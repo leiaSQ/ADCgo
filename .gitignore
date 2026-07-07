@@ -1,0 +1,14 @@
+# Go
+/adcgo
+/bin/
+*.test
+*.out.tmp
+
+# Python / conda
+.venv/
+__pycache__/
+*.pyc
+
+# editors
+.idea/
+.vscode/

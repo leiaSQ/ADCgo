@@ -1,0 +1,783 @@
+  TheADCcode: A collection of ADC/ISR source codes.
+  Contributors: Nikolay Golubev,
+                Yasen Velkov (developer of the original version),
+                Alexander Kuleff,
+                Anthony Dutoi, Nicolas Sisourat, Tsveta Miteva,
+                Joerg Breidbach, Imke Mueller, Nayana Vaval,
+                Francesco Tarantelli, Soeren Kopelke,
+                Sajeev Yesodharan, Kirill Gokhberg, Robin Santra
+
+  SCF data obtained from Gamess UK.
+  m.o.	sym	energy(a.u.)
+  -----------------------------
+  1	1	-1.35904
+  2	4	-0.731183
+  3	1	-0.580175
+  4	3	-0.509098
+  5	1	0.0722483
+  6	4	0.0892081
+  7	3	0.17103
+  8	1	0.174545
+  9	4	0.233424
+  10	1	0.358636
+  11	4	0.390928
+  12	1	1.02617
+  13	3	1.03415
+  14	4	1.08989
+  15	1	1.21113
+  16	4	1.23152
+  17	1	1.27601
+  18	2	1.75954
+  19	1	1.8005
+  20	3	1.9314
+  21	4	2.3798
+  22	1	2.57073
+  23	4	2.83019
+  24	3	2.86437
+  25	2	2.92459
+  26	1	3.25979
+  27	1	3.67727
+  28	4	3.80151
+  29	1	4.36972
+
+ Integral table loaded:
+ type (OO|OO) integrals: 22 of 22 found.
+ type (OV|OO) integrals: 286 of 286 found.
+ type (OV|OV) integrals: 1397 of 1397 found.
+ type (VV|OO) integrals: 941 of 941 found.
+
+ Input summary:
+ Second-order ADC propagator for double ionization potentials
+              Symmetries: 4
+                   Spins: 1 3
+ Static self-energy / density matrix:
+                   Order: 4+
+                   Tasks: Two-hole population analysis
+ Diagonalization:  Lanczos
+ Saving to file
+
+ ADC saver is initialized
+ Specified matrices and vectors will be saved on disk
+
+ Computing the spectrum for symmetry 4, spin 1
+ Lanczos with fast band-matrix diagonalizing: block size 2
+ Iteration:0 time: 0 s
+ Iteration:1 time: 0 s
+ Iteration:2 time: 0 s
+ Iteration:3 time: 0 s
+ Iteration:4 time: 0 s
+ Iteration:5 time: 0 s
+ Iteration:6 time: 0 s
+ Iteration:7 time: 0 s
+ Iteration:8 time: 0 s
+ Iteration:9 time: 0 s
+ Iteration:10 time: 0 s
+ Iteration:11 time: 0 s
+ Iteration:12 time: 0 s
+ Iteration:13 time: 0 s
+ Iteration:14 time: 0 s
+ Iteration:15 time: 0 s
+ Iteration:16 time: 0 s
+ Iteration:17 time: 0 s
+ Iteration:18 time: 0 s
+ Iteration:19 time: 0 s
+ Iteration:20 time: 0 s
+ Iteration:21 time: 0 s
+ Iteration:22 time: 0 s
+ Iteration:23 time: 0 s
+ Iteration:24 time: 0 s
+ Iteration:25 time: 0 s
+ Iteration:26 time: 0 s
+ Iteration:27 time: 0 s
+ Iteration:28 time: 0 s
+ Iteration:29 time: 0 s
+ Iteration:30 time: 0 s
+ Iteration:31 time: 0 s
+ Iteration:32 time: 0 s
+ Iteration:33 time: 0 s
+ Iteration:34 time: 0 s
+ Iteration:35 time: 0 s
+ Iteration:36 time: 0 s
+ Iteration:37 time: 0 s
+ Iteration:38 time: 0 s
+ Iteration:39 time: 0 s
+ Iteration:40 time: 0 s
+ Iteration:41 time: 0 s
+ Iteration:42 time: 0 s
+ Iteration:43 time: 0 s
+ Iteration:44 time: 0 s
+ Iteration:45 time: 0 s
+ Iteration:46 time: 0 s
+ Iteration:47 time: 0 s
+ Iteration:48 time: 0 s
+ Iteration:49 time: 0 s
+ Iteration:50 time: 0 s
+ Iteration:51 time: 0 s
+ Iteration:52 time: 0 s
+ Iteration:53 time: 0 s
+ Iteration:54 time: 0 s
+ Iteration:55 time: 0 s
+ Iteration:56 time: 0 s
+ Iteration:57 time: 0 s
+ Iteration:58 time: 0 s
+ Iteration:59 time: 0 s
+ Iteration:60 time: 0 s
+ Iteration:61 time: 0 s
+ Iteration:62 time: 0 s
+ Iteration:63 time: 0 s
+ Iteration:64 time: 0 s
+ Iteration:65 time: 0 s
+ Iteration:66 time: 0 s
+ Iteration:67 time: 0 s
+ Iteration:68 time: 0 s
+ Iteration:69 time: 0 s
+ Iteration:70 time: 0 s
+ Iteration:71 time: 0 s
+ Iteration:72 time: 0 s
+ Iteration:73 time: 0 s
+ Iteration:74 time: 0 s
+ Iteration:75 time: 0 s
+ Iteration:76 time: 0 s
+ Iteration:77 time: 0 s
+ Iteration:78 time: 0 s
+ Iteration:79 time: 0 s
+ Iteration:80 time: 0 s
+ Iteration:81 time: 0 s
+ Iteration:82 time: 0 s
+ Iteration:83 time: 0 s
+ Iteration:84 time: 0 s
+ Iteration:85 time: 0 s
+ Iteration:86 time: 0 s
+ Iteration:87 time: 0 s
+ Iteration:88 time: 0 s
+ Iteration:89 time: 0 s
+ Iteration:90 time: 0 s
+ Iteration:91 time: 0 s
+ Iteration:92 time: 0 s
+ Iteration:93 time: 0 s
+ Iteration:94 time: 0 s
+ Iteration:95 time: 0 s
+ Iteration:96 time: 0 s
+ Iteration:97 time: 0 s
+ Iteration:98 time: 0 s
+ Iteration:99 time: 0 s
+ Iteration:100 time: 0 s
+ Size of Lanczos space: 200
+ Diagonalizing band matrix,  time: 0 s
+ Warning: 69 spurious Lanczos roots will be dropped.
+ Eigenvalues and eigenvectors fetched for  time: 0 s
+
+ Eigenvalue (eV), ps (%), residue
+ ----------------------------------
+
+
+ 1: 47.252255, 85.14, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|: 0.921730  <2,1|: 0.042656
+
+ 2: 69.762261, 9.61, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|:-0.308015  <3,2|: 0.035079
+
+ 3: 70.938023, 40.79, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|: 0.637721  <3,2|:-0.034515
+
+ 4: 72.904444, 25.76, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|:-0.507262  <3,2|: 0.015831
+
+ 5: 74.094007, 3.61, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|: 0.188162  <3,2|: 0.025774
+
+ 6: 78.758485, 2.26, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|: 0.144341  <3,2|:-0.042078
+
+ 13: 88.427624, 2.51, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|: 0.157254  <2,1|:-0.018162
+
+ 14: 89.517150, 0.66, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|: 0.081487
+
+ 28: 100.507679, 0.79, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|:-0.084201  <2,1|: 0.029204
+
+ 31: 102.717541, 0.65, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|: 0.060295  <3,2|: 0.053331
+
+ 32: 103.090523, 0.63, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|:-0.078931
+
+ 39: 107.283764, 0.92, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|: 0.087349  <3,2|: 0.039085
+
+ 40: 107.581176, 3.89, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|: 0.196972
+
+ 51: 115.313000, 0.97, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|: 0.098609
+
+ 53: 116.228361, 0.56, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|:-0.067927  <2,1|:-0.032174
+
+ 58: 120.159444, 0.84, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|: 0.086093  <2,1|:-0.032146
+
+ 59: 120.691188, 1.05, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|: 0.102313
+
+ 74: 130.171702, 0.51, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|: 0.056019  <2,1|:-0.044351
+
+ 77: 132.938551, 2.44, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|:-0.156324
+
+ 81: 135.543008, 3.38, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|: 0.182981  <3,2|: 0.018184
+
+ 83: 137.185494, 0.86, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|:-0.088038  <3,2|: 0.028732
+
+ 86: 140.033931, 0.69, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|: 0.076288  <3,2|:-0.033339
+
+ ADC two-hole population analysis
+
+    Eigenvalue                           Orbital contributions
+    -------------------------------------------------------------------------------
+                   O     O/H1     O/H2       H1    H1/H2       H2
+    47.2523   0.4984   0.1624   0.1624   0.0131   0.0020   0.0131
+    69.7623   0.0483   0.0201   0.0201   0.0040  -0.0004   0.0040
+    70.9380   0.2096   0.0844   0.0844   0.0157  -0.0018   0.0157
+    72.9044   0.1335   0.0530   0.0530   0.0096  -0.0011   0.0096
+    74.0940   0.0199   0.0071   0.0071   0.0010  -0.0001   0.0010
+    78.7585   0.0107   0.0049   0.0049   0.0011  -0.0001   0.0011
+    88.4276   0.0138   0.0050   0.0050   0.0006   0.0001   0.0006
+    89.5172   0.0038   0.0013   0.0013   0.0001   0.0000   0.0001
+   100.5077   0.0040   0.0017   0.0017   0.0003   0.0000   0.0003
+   102.7175   0.0042   0.0011   0.0011  -0.0000  -0.0000  -0.0000
+   103.0905   0.0038   0.0012   0.0012   0.0001   0.0000   0.0001
+   107.2838   0.0056   0.0017   0.0017   0.0001  -0.0000   0.0001
+   107.5812   0.0228   0.0074   0.0074   0.0006   0.0001   0.0006
+   115.3130   0.0050   0.0020   0.0020   0.0004  -0.0000   0.0004
+   116.2284   0.0036   0.0010   0.0010  -0.0000   0.0000  -0.0000
+   120.1594   0.0043   0.0018   0.0018   0.0003   0.0000   0.0003
+   120.6912   0.0057   0.0021   0.0021   0.0003  -0.0000   0.0003
+   130.1717   0.0023   0.0011   0.0011   0.0003  -0.0000   0.0003
+   132.9386   0.0129   0.0050   0.0050   0.0009  -0.0001   0.0009
+   135.5430   0.0184   0.0068   0.0068   0.0010  -0.0001   0.0010
+   137.1855   0.0040   0.0019   0.0019   0.0004  -0.0000   0.0004
+   140.0339   0.0032   0.0015   0.0015   0.0004  -0.0000   0.0004
+
+
+ Computing spectrum for symmetry 4, spin 1
+ Number of ISR configurations: 131
+ Lanczos with fast band-matrix diagonalizing: block size 2
+ Iteration:0 time: 0 s
+ Iteration:1 time: 0 s
+ Iteration:2 time: 0 s
+ Iteration:3 time: 0 s
+ Iteration:4 time: 0 s
+ Iteration:5 time: 0 s
+ Iteration:6 time: 0 s
+ Iteration:7 time: 0 s
+ Iteration:8 time: 0 s
+ Iteration:9 time: 0 s
+ Iteration:10 time: 0 s
+ Iteration:11 time: 0 s
+ Iteration:12 time: 0 s
+ Iteration:13 time: 0 s
+ Iteration:14 time: 0 s
+ Iteration:15 time: 0 s
+ Iteration:16 time: 0 s
+ Iteration:17 time: 0 s
+ Iteration:18 time: 0 s
+ Iteration:19 time: 0 s
+ Iteration:20 time: 0 s
+ Iteration:21 time: 0 s
+ Iteration:22 time: 0 s
+ Iteration:23 time: 0 s
+ Iteration:24 time: 0 s
+ Iteration:25 time: 0 s
+ Iteration:26 time: 0 s
+ Iteration:27 time: 0 s
+ Iteration:28 time: 0 s
+ Iteration:29 time: 0 s
+ Iteration:30 time: 0 s
+ Iteration:31 time: 0 s
+ Iteration:32 time: 0 s
+ Iteration:33 time: 0 s
+ Iteration:34 time: 0 s
+ Iteration:35 time: 0 s
+ Iteration:36 time: 0 s
+ Iteration:37 time: 0 s
+ Iteration:38 time: 0 s
+ Iteration:39 time: 0 s
+ Iteration:40 time: 0 s
+ Iteration:41 time: 0 s
+ Iteration:42 time: 0 s
+ Iteration:43 time: 0 s
+ Iteration:44 time: 0 s
+ Iteration:45 time: 0 s
+ Iteration:46 time: 0 s
+ Iteration:47 time: 0 s
+ Iteration:48 time: 0 s
+ Iteration:49 time: 0 s
+ Iteration:50 time: 0 s
+ Iteration:51 time: 0 s
+ Iteration:52 time: 0 s
+ Iteration:53 time: 0 s
+ Iteration:54 time: 0 s
+ Iteration:55 time: 0 s
+ Iteration:56 time: 0 s
+ Iteration:57 time: 0 s
+ Iteration:58 time: 0 s
+ Iteration:59 time: 0 s
+ Iteration:60 time: 0 s
+ Iteration:61 time: 0 s
+ Iteration:62 time: 0 s
+ Iteration:63 time: 0 s
+ Iteration:64 time: 0 s
+ Iteration:65 time: 0 s
+ Iteration:66 time: 0 s
+ Iteration:67 time: 0 s
+ Iteration:68 time: 0 s
+ Iteration:69 time: 0 s
+ Iteration:70 time: 0 s
+ Iteration:71 time: 0 s
+ Iteration:72 time: 0 s
+ Iteration:73 time: 0 s
+ Iteration:74 time: 0 s
+ Iteration:75 time: 0 s
+ Iteration:76 time: 0 s
+ Iteration:77 time: 0 s
+ Iteration:78 time: 0 s
+ Iteration:79 time: 0 s
+ Iteration:80 time: 0 s
+ Iteration:81 time: 0 s
+ Iteration:82 time: 0 s
+ Iteration:83 time: 0 s
+ Iteration:84 time: 0 s
+ Iteration:85 time: 0 s
+ Iteration:86 time: 0 s
+ Iteration:87 time: 0 s
+ Iteration:88 time: 0 s
+ Iteration:89 time: 0 s
+ Iteration:90 time: 0 s
+ Iteration:91 time: 0 s
+ Iteration:92 time: 0 s
+ Iteration:93 time: 0 s
+ Iteration:94 time: 0 s
+ Iteration:95 time: 0 s
+ Iteration:96 time: 0 s
+ Iteration:97 time: 0 s
+ Iteration:98 time: 0 s
+ Iteration:99 time: 0 s
+ Iteration:100 time: 0 s
+ Size of Lanczos space: 200
+ Diagonalizing band matrix,  time: 0 s
+ Warning: 198 spurious Lanczos roots will be dropped.
+ Eigenvalues and eigenvectors fetched for  time: 0 s
+
+ Eigenvectors are saved to eigen_vectors.4.s1 file
+ Attention! roots are not specified! vectors will be saved in Lanczos form
+
+
+ Eigenvalue (eV), ps (%), residue
+ ----------------------------------
+
+
+ 1: 0.000000, 100.00, -nan
+ Overlaps with main-space configurations:
+  <2,1|: 1.000000
+
+ 2: 0.000000, 100.00, -nan
+ Overlaps with main-space configurations:
+  <3,2|: 1.000000
+
+
+ Computing the spectrum for symmetry 4, spin 3
+ Lanczos with fast band-matrix diagonalizing: block size 2
+ Iteration:0 time: 0 s
+ Iteration:1 time: 0 s
+ Iteration:2 time: 0 s
+ Iteration:3 time: 0 s
+ Iteration:4 time: 0 s
+ Iteration:5 time: 0 s
+ Iteration:6 time: 0 s
+ Iteration:7 time: 0 s
+ Iteration:8 time: 0 s
+ Iteration:9 time: 0 s
+ Iteration:10 time: 0 s
+ Iteration:11 time: 0 s
+ Iteration:12 time: 0 s
+ Iteration:13 time: 0 s
+ Iteration:14 time: 0 s
+ Iteration:15 time: 0 s
+ Iteration:16 time: 0 s
+ Iteration:17 time: 0 s
+ Iteration:18 time: 0 s
+ Iteration:19 time: 0 s
+ Iteration:20 time: 0 s
+ Iteration:21 time: 0 s
+ Iteration:22 time: 0 s
+ Iteration:23 time: 0 s
+ Iteration:24 time: 0 s
+ Iteration:25 time: 0 s
+ Iteration:26 time: 0 s
+ Iteration:27 time: 0 s
+ Iteration:28 time: 0 s
+ Iteration:29 time: 0 s
+ Iteration:30 time: 0 s
+ Iteration:31 time: 0 s
+ Iteration:32 time: 0 s
+ Iteration:33 time: 0 s
+ Iteration:34 time: 0 s
+ Iteration:35 time: 0 s
+ Iteration:36 time: 0 s
+ Iteration:37 time: 0 s
+ Iteration:38 time: 0 s
+ Iteration:39 time: 0 s
+ Iteration:40 time: 0 s
+ Iteration:41 time: 0 s
+ Iteration:42 time: 0 s
+ Iteration:43 time: 0 s
+ Iteration:44 time: 0 s
+ Iteration:45 time: 0 s
+ Iteration:46 time: 0 s
+ Iteration:47 time: 0 s
+ Iteration:48 time: 0 s
+ Iteration:49 time: 0 s
+ Iteration:50 time: 0 s
+ Iteration:51 time: 0 s
+ Iteration:52 time: 0 s
+ Iteration:53 time: 0 s
+ Iteration:54 time: 0 s
+ Iteration:55 time: 0 s
+ Iteration:56 time: 0 s
+ Iteration:57 time: 0 s
+ Iteration:58 time: 0 s
+ Iteration:59 time: 0 s
+ Iteration:60 time: 0 s
+ Iteration:61 time: 0 s
+ Iteration:62 time: 0 s
+ Iteration:63 time: 0 s
+ Iteration:64 time: 0 s
+ Iteration:65 time: 0 s
+ Iteration:66 time: 0 s
+ Iteration:67 time: 0 s
+ Iteration:68 time: 0 s
+ Iteration:69 time: 0 s
+ Iteration:70 time: 0 s
+ Iteration:71 time: 0 s
+ Iteration:72 time: 0 s
+ Iteration:73 time: 0 s
+ Iteration:74 time: 0 s
+ Iteration:75 time: 0 s
+ Iteration:76 time: 0 s
+ Iteration:77 time: 0 s
+ Iteration:78 time: 0 s
+ Iteration:79 time: 0 s
+ Iteration:80 time: 0 s
+ Iteration:81 time: 0 s
+ Iteration:82 time: 0 s
+ Iteration:83 time: 0 s
+ Iteration:84 time: 0 s
+ Iteration:85 time: 0 s
+ Iteration:86 time: 0 s
+ Iteration:87 time: 0 s
+ Iteration:88 time: 0 s
+ Iteration:89 time: 0 s
+ Iteration:90 time: 0 s
+ Iteration:91 time: 0 s
+ Iteration:92 time: 0 s
+ Iteration:93 time: 0 s
+ Iteration:94 time: 0 s
+ Iteration:95 time: 0 s
+ Iteration:96 time: 0 s
+ Iteration:97 time: 0 s
+ Iteration:98 time: 0 s
+ Iteration:99 time: 0 s
+ Iteration:100 time: 0 s
+ Size of Lanczos space: 200
+ Diagonalizing band matrix,  time: 0 s
+ Warning: 49 spurious Lanczos roots will be dropped.
+ Eigenvalues and eigenvectors fetched for  time: 0 s
+
+ Eigenvalue (eV), ps (%), residue
+ ----------------------------------
+
+
+ 1: 45.053283, 84.65, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|: 0.918797  <2,1|:-0.048273
+
+ 2: 63.556198, 79.50, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|: 0.889081  <3,2|: 0.067251
+
+ 3: 67.200057, 1.11, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|:-0.105164
+
+ 4: 69.727292, 1.73, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|:-0.131636
+
+ 5: 72.533045, 0.64, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|:-0.066235  <3,2|:-0.045159
+
+ 6: 75.149667, 0.73, 0.000000
+ Overlaps with main-space configurations:
+  <2,1|: 0.069835  <3,2|:-0.049215
+
+ 13: 85.796358, 2.13, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|: 0.145842
+
+ 29: 96.957806, 0.58, 0.000000
+ Overlaps with main-space configurations:
+  <3,2|: 0.070551  <2,1|:-0.028124
+
+ 34: 100.191399, 0.58, 0.000001
+ Overlaps with main-space configurations:
+  <3,2|: 0.070840  <2,1|:-0.028285
+
+ 39: 103.279718, 0.89, 0.000028
+ Overlaps with main-space configurations:
+  <3,2|:-0.088250  <2,1|:-0.032905
+
+ 40: 103.303994, 0.98, 0.000020
+ Overlaps with main-space configurations:
+  <3,2|: 0.091855  <2,1|:-0.036965
+
+ 45: 105.339987, 0.65, 0.000040
+ Overlaps with main-space configurations:
+  <2,1|:-0.058672  <3,2|:-0.054944
+
+ 46: 105.518282, 0.79, 0.000038
+ Overlaps with main-space configurations:
+  <3,2|: 0.085981  <2,1|:-0.021393
+
+ 47: 106.338644, 1.19, 0.000075
+ Overlaps with main-space configurations:
+  <3,2|:-0.106325  <2,1|:-0.024059
+
+ 50: 108.429815, 0.98, 0.000622
+ Overlaps with main-space configurations:
+  <2,1|: 0.097855  <3,2|: 0.016021
+
+ 53: 109.589638, 1.14, 0.000031
+ Overlaps with main-space configurations:
+  <3,2|:-0.088240  <2,1|: 0.060485
+
+ 59: 113.413297, 0.90, 0.001750
+ Overlaps with main-space configurations:
+  <2,1|:-0.085570  <3,2|: 0.041154
+
+ 74: 122.596077, 1.32, 0.003513
+ Overlaps with main-space configurations:
+  <2,1|:-0.112716  <3,2|:-0.021613
+
+ 79: 124.762716, 0.58, 0.002985
+ Overlaps with main-space configurations:
+  <2,1|: 0.069590  <3,2|:-0.030535
+
+ 81: 125.845345, 1.13, 0.002781
+ Overlaps with main-space configurations:
+  <2,1|: 0.102382  <3,2|: 0.029194
+
+ 83: 126.491833, 0.92, 0.007144
+ Overlaps with main-space configurations:
+  <2,1|:-0.094474  <3,2|: 0.015812
+
+ 85: 127.498525, 2.79, 0.002424
+ Overlaps with main-space configurations:
+  <2,1|: 0.165290  <3,2|:-0.024319
+
+ 87: 129.060045, 1.08, 0.000053
+ Overlaps with main-space configurations:
+  <2,1|: 0.090452  <3,2|:-0.050717
+
+ 89: 130.073639, 0.90, 0.000247
+ Overlaps with main-space configurations:
+  <2,1|: 0.093143  <3,2|: 0.018269
+
+ ADC two-hole population analysis
+
+    Eigenvalue                           Orbital contributions
+    -------------------------------------------------------------------------------
+                   O     O/H1     O/H2       H1    H1/H2       H2
+    45.0533   0.4966   0.1612   0.1612   0.0010   0.0255   0.0010
+    63.5562   0.4052   0.1652   0.1652  -0.0018   0.0629  -0.0018
+    67.2001   0.0060   0.0022   0.0022  -0.0000   0.0007  -0.0000
+    69.7273   0.0091   0.0035   0.0035  -0.0000   0.0012  -0.0000
+    72.5330   0.0029   0.0014   0.0014  -0.0000   0.0007  -0.0000
+    75.1497   0.0046   0.0013   0.0013  -0.0000   0.0000  -0.0000
+    85.7964   0.0121   0.0041   0.0041   0.0000   0.0008   0.0000
+    96.9578   0.0037   0.0010   0.0010   0.0000   0.0000   0.0000
+   100.1914   0.0037   0.0010   0.0010   0.0000   0.0000   0.0000
+   103.2797   0.0045   0.0019   0.0019   0.0000   0.0007   0.0000
+   103.3040   0.0063   0.0018   0.0018   0.0000   0.0000   0.0000
+   105.3400   0.0029   0.0014   0.0014  -0.0000   0.0007  -0.0000
+   105.5183   0.0049   0.0014   0.0014   0.0000   0.0001   0.0000
+   106.3386   0.0063   0.0024   0.0024   0.0000   0.0007   0.0000
+   108.4298   0.0049   0.0021   0.0021  -0.0000   0.0009  -0.0000
+   109.5896   0.0075   0.0020   0.0020   0.0000  -0.0001   0.0000
+   113.4133   0.0055   0.0017   0.0017  -0.0000   0.0002  -0.0000
+   122.5961   0.0064   0.0028   0.0028  -0.0000   0.0012  -0.0000
+   124.7627   0.0035   0.0011   0.0011  -0.0000   0.0001  -0.0000
+   125.8453   0.0054   0.0024   0.0024  -0.0000   0.0011  -0.0000
+   126.4918   0.0051   0.0018   0.0018  -0.0000   0.0005  -0.0000
+   127.4985   0.0155   0.0055   0.0055  -0.0001   0.0015  -0.0001
+   129.0600   0.0067   0.0020   0.0020  -0.0000   0.0002  -0.0000
+   130.0736   0.0044   0.0019   0.0019  -0.0000   0.0008  -0.0000
+
+
+ Computing spectrum for symmetry 4, spin 3
+ Number of ISR configurations: 152
+ Lanczos with fast band-matrix diagonalizing: block size 2
+ Iteration:0 time: 0 s
+ Iteration:1 time: 0 s
+ Iteration:2 time: 0 s
+ Iteration:3 time: 0 s
+ Iteration:4 time: 0 s
+ Iteration:5 time: 0 s
+ Iteration:6 time: 0 s
+ Iteration:7 time: 0 s
+ Iteration:8 time: 0 s
+ Iteration:9 time: 0 s
+ Iteration:10 time: 0 s
+ Iteration:11 time: 0 s
+ Iteration:12 time: 0 s
+ Iteration:13 time: 0 s
+ Iteration:14 time: 0 s
+ Iteration:15 time: 0 s
+ Iteration:16 time: 0 s
+ Iteration:17 time: 0 s
+ Iteration:18 time: 0 s
+ Iteration:19 time: 0 s
+ Iteration:20 time: 0 s
+ Iteration:21 time: 0 s
+ Iteration:22 time: 0 s
+ Iteration:23 time: 0 s
+ Iteration:24 time: 0 s
+ Iteration:25 time: 0 s
+ Iteration:26 time: 0 s
+ Iteration:27 time: 0 s
+ Iteration:28 time: 0 s
+ Iteration:29 time: 0 s
+ Iteration:30 time: 0 s
+ Iteration:31 time: 0 s
+ Iteration:32 time: 0 s
+ Iteration:33 time: 0 s
+ Iteration:34 time: 0 s
+ Iteration:35 time: 0 s
+ Iteration:36 time: 0 s
+ Iteration:37 time: 0 s
+ Iteration:38 time: 0 s
+ Iteration:39 time: 0 s
+ Iteration:40 time: 0 s
+ Iteration:41 time: 0 s
+ Iteration:42 time: 0 s
+ Iteration:43 time: 0 s
+ Iteration:44 time: 0 s
+ Iteration:45 time: 0 s
+ Iteration:46 time: 0 s
+ Iteration:47 time: 0 s
+ Iteration:48 time: 0 s
+ Iteration:49 time: 0 s
+ Iteration:50 time: 0 s
+ Iteration:51 time: 0 s
+ Iteration:52 time: 0 s
+ Iteration:53 time: 0 s
+ Iteration:54 time: 0 s
+ Iteration:55 time: 0 s
+ Iteration:56 time: 0 s
+ Iteration:57 time: 0 s
+ Iteration:58 time: 0 s
+ Iteration:59 time: 0 s
+ Iteration:60 time: 0 s
+ Iteration:61 time: 0 s
+ Iteration:62 time: 0 s
+ Iteration:63 time: 0 s
+ Iteration:64 time: 0 s
+ Iteration:65 time: 0 s
+ Iteration:66 time: 0 s
+ Iteration:67 time: 0 s
+ Iteration:68 time: 0 s
+ Iteration:69 time: 0 s
+ Iteration:70 time: 0 s
+ Iteration:71 time: 0 s
+ Iteration:72 time: 0 s
+ Iteration:73 time: 0 s
+ Iteration:74 time: 0 s
+ Iteration:75 time: 0 s
+ Iteration:76 time: 0 s
+ Iteration:77 time: 0 s
+ Iteration:78 time: 0 s
+ Iteration:79 time: 0 s
+ Iteration:80 time: 0 s
+ Iteration:81 time: 0 s
+ Iteration:82 time: 0 s
+ Iteration:83 time: 0 s
+ Iteration:84 time: 0 s
+ Iteration:85 time: 0 s
+ Iteration:86 time: 0 s
+ Iteration:87 time: 0 s
+ Iteration:88 time: 0 s
+ Iteration:89 time: 0 s
+ Iteration:90 time: 0 s
+ Iteration:91 time: 0 s
+ Iteration:92 time: 0 s
+ Iteration:93 time: 0 s
+ Iteration:94 time: 0 s
+ Iteration:95 time: 0 s
+ Iteration:96 time: 0 s
+ Iteration:97 time: 0 s
+ Iteration:98 time: 0 s
+ Iteration:99 time: 0 s
+ Iteration:100 time: 0 s
+ Size of Lanczos space: 200
+ Diagonalizing band matrix,  time: 0 s
+ Warning: 198 spurious Lanczos roots will be dropped.
+ Eigenvalues and eigenvectors fetched for  time: 0 s
+
+ Eigenvectors are saved to eigen_vectors.4.s3 file
+ Attention! roots are not specified! vectors will be saved in Lanczos form
+
+
+ Eigenvalue (eV), ps (%), residue
+ ----------------------------------
+
+
+ 1: 0.000000, 100.00, -nan
+ Overlaps with main-space configurations:
+  <2,1|: 1.000000
+
+ 2: 0.000000, 100.00, -nan
+ Overlaps with main-space configurations:
+  <3,2|: 1.000000
+
+
+
+ Tasks accomplished.
