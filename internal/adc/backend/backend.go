@@ -90,10 +90,13 @@ func (m Mat) AddSubVec(r0, c0 int, alpha float64, v []float64) {
 	}
 }
 
-// AddSubDiagConst adds alpha to the diagonal of the sub-block anchored at
-// (r0,c0): m[r0+d, c0+d] += alpha.
-func (m Mat) AddSubDiagConst(r0, c0 int, alpha float64) {
-	n := min(m.Rows-r0, m.Cols-c0)
+// AddSubDiagConst adds alpha to the first n diagonal elements of the sub-block
+// anchored at (r0,c0): m[r0+d, c0+d] += alpha for d in [0,n). The caller passes
+// the sub-block's diagonal length explicitly — inferring it from the matrix edge
+// (min(Rows-r0, Cols-c0)) is wrong for a sub-block that is not flush with the
+// bottom-right corner, e.g. the top-left spin part of a spin-doubled block,
+// where it would spill the constant onto the other spin parts' diagonals.
+func (m Mat) AddSubDiagConst(r0, c0, n int, alpha float64) {
 	for d := range n {
 		m.Data[(r0+d)*m.Cols+(c0+d)] += alpha
 	}

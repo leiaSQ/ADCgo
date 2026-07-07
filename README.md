@@ -22,7 +22,7 @@ M3 backends (build-tag gated; default is pure-Go):
 The pipeline is:
 
 1. `scripts/gen_fcidump.py` runs RHF + MP2 on H₂O/cc-pVDZ with **pyscf** in C₂ᵥ
-   symmetry, writing `testdata/h2o.fcidump` (with 1-based Molpro `ORBSYM`), the
+   symmetry, writing `testdata/h2o.fcidump` (with 1-based GAMESS-UK `ORBSYM`), the
    golden `testdata/h2o.ref.json`, and the C/S sidecar `testdata/h2o.mo.json`
    (MO coefficients + AO overlap + AO→atom map).
 2. `internal/adc/fcidump`, `mp` — integral ingestion + MP2 (M0).

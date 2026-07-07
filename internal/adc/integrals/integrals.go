@@ -40,7 +40,7 @@ type Store struct {
 }
 
 // New builds a Store for a closed-shell reference with nocc occupied orbitals.
-// orbSym gives the point-group label per orbital (1-based Molpro labels, as in
+// orbSym gives the point-group label per orbital (1-based GAMESS-UK labels, as in
 // FCIDUMP ORBSYM); pass nil to disable symmetry (a single virtual group). It must
 // match the orbSym handed to dip.NewSpace so the configuration enumeration and
 // the integral blocks agree on the virtual grouping.
