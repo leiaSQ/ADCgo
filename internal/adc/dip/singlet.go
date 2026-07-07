@@ -242,7 +242,7 @@ func (s *singlet) jiiLKK(row, col Config) (backend.Mat, bool) {
 		if deltaJL && deltaIK {
 			diag -= s.energy(j) + s.energy(i) + s.energy(i)
 		}
-		blk.AddSubDiagConst(0, 0, diag)
+		blk.AddSubDiagConst(0, 0, s.sizeVirGroup(rowSym), diag)
 		if deltaJL && deltaIK {
 			blk.AddSubDiagVec(0, 0, s.diagEnergies(colSym))
 		}
@@ -323,8 +323,8 @@ func (s *singlet) ijkMLL(row, col Config) (backend.Mat, bool) {
 			d0 += 2*s.v(i, k, j, m) - s.v(i, m, j, k)
 			d1 -= s.v(i, m, j, k)
 		}
-		blk.AddSubDiagConst(0, 0, d0*sqrt1_2)
-		blk.AddSubDiagConst(nv, 0, d1*sqrt3_2)
+		blk.AddSubDiagConst(0, 0, nv, d0*sqrt1_2)
+		blk.AddSubDiagConst(nv, 0, nv, d1*sqrt3_2)
 	}
 	return blk, true
 }
@@ -435,16 +435,16 @@ func (s *singlet) ijkLMN(row, col Config) (backend.Mat, bool) {
 			d10 -= s.v(i, m, j, l)
 			d11 += s.v(i, l, j, m) + 0.5*s.v(i, m, j, l)
 		}
-		blk.AddSubDiagConst(0, 0, d00)
-		blk.AddSubDiagConst(0, nvC, d01*sqrt3_4)
-		blk.AddSubDiagConst(nvR, 0, d10*sqrt3_4)
-		blk.AddSubDiagConst(nvR, nvC, d11)
+		blk.AddSubDiagConst(0, 0, nvR, d00)
+		blk.AddSubDiagConst(0, nvC, nvR, d01*sqrt3_4)
+		blk.AddSubDiagConst(nvR, 0, nvR, d10*sqrt3_4)
+		blk.AddSubDiagConst(nvR, nvC, nvR, d11)
 		if deltaIL && deltaJM && deltaKN {
 			epsi := -(s.energy(i) + s.energy(j) + s.energy(k))
 			blk.AddSubDiagVec(0, 0, s.diagEnergies(colSym))
-			blk.AddSubDiagConst(0, 0, epsi)
+			blk.AddSubDiagConst(0, 0, nvR, epsi)
 			blk.AddSubDiagVec(nvR, nvC, s.diagEnergies(colSym))
-			blk.AddSubDiagConst(nvR, nvC, epsi)
+			blk.AddSubDiagConst(nvR, nvC, nvR, epsi)
 		}
 	}
 	return blk, true

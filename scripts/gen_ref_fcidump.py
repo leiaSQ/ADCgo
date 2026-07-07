@@ -17,8 +17,10 @@ import os
 from collections import Counter
 
 import numpy as np
-from pyscf import gto, scf, mcscf, symm
+from pyscf import gto, scf, mcscf
 from pyscf.tools import fcidump
+
+from gamess_orbsym import gamess_orbsym
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TESTDATA = os.path.join(os.path.dirname(HERE), "testdata")
@@ -110,10 +112,10 @@ mo_act = mf.mo_coeff[:, active]
 h1e, ecore = mc.get_h1eff()
 h2e = mc.get_h2eff(mo_act)
 
-# ORBSYM: map pyscf irrep ids of the active MOs to 1-based Molpro labels (C2v:
-# A1->1, A2->4, B1->2, B2->3), the convention ADCgo's reader + XOR product expect.
-orbsym_ids = symm.label_orb_symm(mol, mol.irrep_id, mol.symm_orb, mo_act)
-orbsym = [fcidump.ORBSYM_MAP[mol.groupname][i] for i in orbsym_ids]
+# ORBSYM: 1-based GAMESS-UK / theADCcode irrep labels for the active MOs (C2v:
+# A1->1, A2->2, B1->3, B2->4), so ADCgo sector N corresponds to reference symmetry
+# N. gamess_orbsym generalises this to any supported D2h-subgroup point group.
+orbsym = gamess_orbsym(mol, mo_act)
 
 fcidump_path = os.path.join(TESTDATA, "h2o_dzp.fcidump")
 fcidump.from_integrals(fcidump_path, h1e, h2e, NCAS, NELECAS, nuc=ecore,
@@ -164,9 +166,9 @@ ref = {
     "norb": NCAS, "nelec": NELECAS, "ncore_frozen": int(ncore),
     "e_scf": float(mf.e_tot), "e_scf_reference": REF_SCF_ENERGY,
     "e_core_fcidump": float(ecore),
-    "active_orbsym_molpro": [int(x) for x in orbsym],
+    "active_orbsym_gamess": [int(x) for x in orbsym],
 }
 with open(os.path.join(TESTDATA, "h2o_dzp.ref.json"), "w") as fh:
     json.dump(ref, fh, indent=2)
     fh.write("\n")
-print("active-space Molpro ORBSYM:", orbsym)
+print("active-space GAMESS-UK ORBSYM:", orbsym)

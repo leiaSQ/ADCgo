@@ -158,7 +158,7 @@ func (t *triplet) jiiLKK(row, col Config) (backend.Mat, bool) {
 		if deltaJL && deltaIK {
 			diag -= t.energy(j) + t.energy(i) + t.energy(i)
 		}
-		blk.AddSubDiagConst(0, 0, diag)
+		blk.AddSubDiagConst(0, 0, t.sizeVirGroup(rowSym), diag)
 		if deltaJL && deltaIK {
 			blk.AddSubDiagVec(0, 0, t.diagEnergies(colSym))
 		}
@@ -247,9 +247,9 @@ func (t *triplet) ijkMLL(row, col Config) (backend.Mat, bool) {
 			d1 -= t.v(i, m, j, k)
 			d2 += t.v(i, k, j, m)
 		}
-		blk.AddSubDiagConst(0, 0, d0)
-		blk.AddSubDiagConst(nv, 0, d1)
-		blk.AddSubDiagConst(2*nv, 0, d2)
+		blk.AddSubDiagConst(0, 0, nv, d0)
+		blk.AddSubDiagConst(nv, 0, nv, d1)
+		blk.AddSubDiagConst(2*nv, 0, nv, d2)
 	}
 	return blk, true
 }
@@ -381,13 +381,13 @@ func (t *triplet) ijkLMN(row, col Config) (backend.Mat, bool) {
 		}
 		for a := range 3 {
 			for b := range 3 {
-				blk.AddSubDiagConst(offR(a), offC(b), d[a][b])
+				blk.AddSubDiagConst(offR(a), offC(b), nvR, d[a][b])
 			}
 		}
 		if deltaIL && deltaJM && deltaKN {
 			epsi := -(t.energy(i) + t.energy(j) + t.energy(k))
 			for p := range 3 {
-				blk.AddSubDiagConst(offR(p), offC(p), epsi)
+				blk.AddSubDiagConst(offR(p), offC(p), nvR, epsi)
 				blk.AddSubDiagVec(offR(p), offC(p), t.diagEnergies(colSym))
 			}
 		}

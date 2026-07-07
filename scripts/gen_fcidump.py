@@ -12,6 +12,8 @@ import os
 from pyscf import gto, scf, mp
 from pyscf.tools import fcidump
 
+from gamess_orbsym import gamess_orbsym, rewrite_fcidump_orbsym
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TESTDATA = os.path.join(os.path.dirname(HERE), "testdata")
 os.makedirs(TESTDATA, exist_ok=True)
@@ -46,12 +48,14 @@ fcidump_path = os.path.join(TESTDATA, "h2o.fcidump")
 # %.17g round-trips a float64 exactly; keep tol tiny so nothing physical is
 # dropped. This keeps the reconstructed Fock diagonal within FP path noise of
 # pyscf's own mo_energy.
-# molpro_orbsym=True writes standards-compliant 1-based Molpro ORBSYM labels
-# (C2v: A1→1, A2→4, B1→2, B2→3) rather than pyscf's raw 0-based irrep ids, so the
-# Go reader's 1-based→0-based convention (and the XOR direct product) is consistent
-# with the symmetry-off case (all labels 1).
+# Write the integrals via from_scf, then relabel ORBSYM with 1-based GAMESS-UK /
+# theADCcode irrep numbers (C2v: A1→1, A2→2, B1→3, B2→4) so ADCgo sector N matches
+# theADCcode symmetry N. Generalises to any supported D2h subgroup via gamess_orbsym;
+# the Go reader's 1-based→0-based + XOR direct product stays consistent with the
+# symmetry-off case (all labels 1).
 fcidump.from_scf(mf, fcidump_path, tol=1e-18, float_format="% .17g",
                  molpro_orbsym=True)
+rewrite_fcidump_orbsym(fcidump_path, gamess_orbsym(mol, mf.mo_coeff))
 
 ref = {
     "molecule": "h2o",

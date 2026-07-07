@@ -5,13 +5,20 @@
 // active space (gated on SCF = -76.0498071428 Ha), so any residual is ADC method,
 // not basis.
 //
-// Finding, encoded in the tolerances below: ADCgo (strict ADC(2)) reproduces the
-// reference's DIP *structure* exactly — every strong line's leading two-hole
-// configuration and irrep match, pole strengths agree to a few percent — while
-// its energies sit systematically ABOVE the reference by 0.04..3.2 eV. That
-// positive shift is the reference's higher-order ("Order: 4+") static self-energy
-// vs ADCgo's second-order one, a documented method difference, not an error. The
-// exact ADCgo numbers are pinned separately by the in-process regeneration guard.
+// This runs ADCgo on the pyscf-*reproduced* integrals (gen_ref_fcidump.py), so the
+// residual vs theADCcode is now just pyscf-vs-GAMESS integral transcription noise —
+// the ADC(2) *method* is bit-identical. That was verified out-of-band by running
+// ADCgo on theADCcode's own exported integrals (../ADC/fcidump_export →
+// testdata/reference/h2o_dzp.matched.fcidump): the full DIP matrices agree to
+// ~1e-15 Ha and eigenvalues to ~1e-13 eV across all four irreps × both spins.
+//
+// History: this comment previously attributed a 0.04..3.2 eV gap to the reference's
+// "Order: 4+" static self-energy. That was wrong on two counts — fplus never enters
+// the adc2dip matrix (it only feeds the two-hole population analysis), and the gap
+// survived on matched integrals. The real cause was an ADCgo bug in
+// backend.AddSubDiagConst (diagonal ran to the matrix edge, spilling constants onto
+// the later spin parts of spin-doubled ijkLMN blocks); fixed 2026-07-07. The band
+// below is now integral-noise-limited, not a method gap.
 package validate
 
 import (
@@ -31,9 +38,11 @@ import (
 	"adcgo/internal/adc/refout"
 )
 
-// Tolerances. The energy band is one-sided and wide because it spans the static
-// self-energy-order gap; the tight guarantees are on structure (leading configs,
-// irrep), pole strengths, the ground state, and populations.
+// Tolerances. The energy band is one-sided and wide to absorb pyscf-vs-GAMESS
+// integral-transcription noise (the ADC method itself is bit-exact — see the
+// matched-integral check noted in the package doc); the tight guarantees are on
+// structure (leading configs, irrep), pole strengths, the ground state, and
+// populations.
 const (
 	psMainThresh = 65.0  // "strong line" cutoff (percent) for the comparison
 	tolPS        = 5.0   // pole-strength agreement (percent); max observed ~3.7
@@ -43,11 +52,6 @@ const (
 	tolGroundPS  = 1.0   // ground state: pole strength (percent)
 	tolPopSum    = 1e-3  // per-state PopSum vs ps/100 (ADCgo's own invariant)
 )
-
-// adcgoIrrepToRefSym maps ADCgo's Molpro-ordered irrep index (1=A1,2=B1,3=B2,
-// 4=A2) to theADCcode's C₂ᵥ file numbering (1=A1,2=A2,3=B1,4=B2). Verified against
-// the reference MO-symmetry table and the 14/14 leading-config identity matches.
-var adcgoIrrepToRefSym = map[int]int{1: 1, 2: 3, 3: 4, 4: 2}
 
 type fxLeading struct {
 	I, J  int
@@ -88,11 +92,14 @@ func loadFixture(t *testing.T) fxDoc {
 	return d
 }
 
-// byRefSectorindexes the ADCgo fixture states by (reference symmetry, spin).
+// byRefSector indexes the ADCgo fixture states by (reference symmetry, spin).
+// ADCgo's irrep labels now use theADCcode's GAMESS-UK numbering (emitted by the
+// FCIDUMP generators), so the mapping is the identity — sec.Irrep is the reference
+// file symmetry directly.
 func byRefSector(d fxDoc) map[[2]int][]fxState {
 	m := map[[2]int][]fxState{}
 	for _, sec := range d.Sectors {
-		key := [2]int{adcgoIrrepToRefSym[sec.Irrep], sec.Spin}
+		key := [2]int{sec.Irrep, sec.Spin}
 		m[key] = append(m[key], sec.States...)
 	}
 	return m

@@ -45,7 +45,7 @@ type Space struct {
 	nSym int // number of point-group irreps (power of two spanning the labels)
 
 	Nocc, Nvir, Norb int
-	orbSym           []int // 1-based Molpro ORBSYM per orbital, or nil (symmetry off)
+	orbSym           []int // 1-based GAMESS-UK ORBSYM per orbital, or nil (symmetry off)
 }
 
 // MainBlockSize is the dimension of the 1h main space; everything at or above it
@@ -96,7 +96,7 @@ func numIrreps(orbSym []int, norb int) int {
 
 // NewSpace enumerates the configuration space for the target-symmetry sector,
 // reproducing ndadc3_ip's add_configs() ordering (main 1h first, then the 2h1p
-// satellites in FOR_ALL_2H1P_AKL order). orbSym is 1-based Molpro labels or nil
+// satellites in FOR_ALL_2H1P_AKL order). orbSym is 1-based GAMESS-UK labels or nil
 // (symmetry off). sym is the target cation irrep (0-based).
 func NewSpace(nocc, norb int, orbSym []int, sym int) *Space {
 	s := &Space{

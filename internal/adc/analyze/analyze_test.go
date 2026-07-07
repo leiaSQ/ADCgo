@@ -38,10 +38,10 @@ func TestBuildSector(t *testing.T) {
 		t.Fatal("no states")
 	}
 
-	// Ground dication state: ~39.25 eV, ps ~83%, dominated by |5,5> (HOMO²).
+	// Ground dication state: ~39.17 eV, ps ~83%, dominated by |5,5> (HOMO²).
 	g := sec.States[0]
-	if math.Abs(g.EnergyEV-39.253) > 0.01 {
-		t.Errorf("ground DIP energy = %.3f eV, want ~39.25", g.EnergyEV)
+	if math.Abs(g.EnergyEV-39.172) > 0.01 {
+		t.Errorf("ground DIP energy = %.3f eV, want ~39.17", g.EnergyEV)
 	}
 	if math.Abs(g.PSPercent-83.35) > 0.5 {
 		t.Errorf("ground pole strength = %.2f%%, want ~83.3", g.PSPercent)
