@@ -39,12 +39,17 @@ type Pop struct {
 
 // State is one final dicationic state.
 type State struct {
-	Index     int       `json:"index"`
-	EnergyEV  float64   `json:"energy_ev"`
-	PSPercent float64   `json:"ps_percent"`
-	Residue   float64   `json:"residue"`
-	Leading   []Leading `json:"leading"`
-	Pop       *Pop      `json:"pop,omitempty"`
+	Index     int     `json:"index"`
+	EnergyEV  float64 `json:"energy_ev"`
+	PSPercent float64 `json:"ps_percent"`
+	// Residue is the Ritz residual ‖M y − θ y‖ in eV: how far this state is from
+	// being a true eigenpair. It is the solver's only in-band convergence signal —
+	// use it to tell a converged line from an unconverged one instead of guessing at
+	// -blocks. Exactly 0 on the dense path, which is exact by construction (hence no
+	// omitempty: a zero here is a statement, not a missing value).
+	Residue float64   `json:"residue"`
+	Leading []Leading `json:"leading"`
+	Pop     *Pop      `json:"pop,omitempty"`
 }
 
 // Sector is all states of one (irrep, spin) block.
@@ -105,13 +110,17 @@ func BuildSector(sp *dip.Space, res lanczos.Result, opts Options, pe *PopEngine)
 			}
 			pop = pe.Compute(mv)
 		}
-		states = append(states, State{
+		st := State{
 			Index:     len(states) + 1,
 			EnergyEV:  res.Values[k] * au2eV,
 			PSPercent: res.PS[k],
 			Leading:   leading,
 			Pop:       pop,
-		})
+		}
+		if k < len(res.Residual) {
+			st.Residue = res.Residual[k] * au2eV
+		}
+		states = append(states, st)
 	}
 	return Sector{Irrep: sp.Sym + 1, Spin: spinLabel(sp.Spin), States: states}
 }

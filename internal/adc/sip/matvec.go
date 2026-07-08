@@ -24,12 +24,7 @@ func New(sp *Space, ints *integrals.Store, eps []float64, order int, be backend.
 // row offset rowOff, column offset colOff. A block on the block diagonal (diag)
 // is applied once (GemvN); an off-diagonal block is applied both ways (GemvN into
 // its rows, GemvT into its columns) to realize the symmetric M.
-type placement struct {
-	a      backend.DeviceMat
-	rowOff int
-	colOff int
-	diag   bool
-}
+type placement = backend.Block
 
 // assembledOp is the block-structured operator uploaded once and reused every
 // ApplyFull: the 1h/1h main block (dense symmetric square), the 1h↔2h1p coupling
@@ -37,7 +32,10 @@ type placement struct {
 // square). For very large satellite spaces the future path is recompute-on-device
 // / matrix-free c22; here the dense assembly is exact and backend-accelerated.
 type assembledOp struct {
-	parts []placement
+	parts   []placement
+	batches []backend.Batch
+	sa      []backend.DeviceMat
+	sb, sc  []backend.BlockView
 }
 
 // mainBlock builds the dense symmetric 1h/1h main block.
@@ -95,7 +93,7 @@ func (mx *Matrix) assemble() *assembledOp {
 	main := sp.BeginSat
 	var parts []placement
 	add := func(m backend.Mat, r0, c0 int, diag bool) {
-		parts = append(parts, placement{a: mx.be.UploadMat(m), rowOff: r0, colOff: c0, diag: diag})
+		parts = append(parts, placement{A: mx.be.UploadMat(m), RowOff: r0, ColOff: c0, Diag: diag})
 	}
 	if main > 0 {
 		add(mx.mainBlock(), 0, 0, true)
@@ -106,7 +104,31 @@ func (mx *Matrix) assemble() *assembledOp {
 	if sp.Size() > main {
 		add(mx.satBlock(), main, main, true)
 	}
-	return &assembledOp{parts: parts}
+	batches := backend.PlanBatches(parts)
+	widest := 0
+	for _, b := range batches {
+		if len(b.Blocks) > widest {
+			widest = len(b.Blocks)
+		}
+	}
+	return &assembledOp{
+		parts: parts, batches: batches,
+		sa: make([]backend.DeviceMat, widest),
+		sb: make([]backend.BlockView, widest),
+		sc: make([]backend.BlockView, widest),
+	}
+}
+
+// Release frees the backend-resident operator blocks (a no-op on host backends).
+// See the DIP twin.
+func (mx *Matrix) Release() {
+	if mx.op == nil {
+		return
+	}
+	for _, p := range mx.op.parts {
+		mx.be.FreeMat(p.A)
+	}
+	mx.op = nil
 }
 
 // Size is the matrix dimension.
@@ -159,10 +181,37 @@ func (mx *Matrix) ApplyFull(out, in backend.Vector) {
 	}
 	mx.be.Zero(out)
 	for _, p := range mx.op.parts {
-		rows, cols := p.a.Dims()
-		mx.be.GemvN(1, p.a, in.Slice(p.colOff, cols), out.Slice(p.rowOff, rows))
-		if !p.diag {
-			mx.be.GemvT(1, p.a, in.Slice(p.rowOff, rows), out.Slice(p.colOff, cols))
+		rows, cols := p.A.Dims()
+		mx.be.GemvN(1, p.A, in.Slice(p.ColOff, cols), out.Slice(p.RowOff, rows))
+		if !p.Diag {
+			mx.be.GemvT(1, p.A, in.Slice(p.RowOff, rows), out.Slice(p.ColOff, cols))
 		}
+	}
+}
+
+// ApplyBlock computes out = M·in for every column of in at once, streaming the
+// assembled operator once per block instead of once per vector. See the DIP twin
+// (dip.Matrix.ApplyBlock) for why that matters. out must have Ld == Rows.
+func (mx *Matrix) ApplyBlock(out, in backend.BlockView) {
+	if mx.op == nil {
+		mx.op = mx.assemble()
+	}
+	mx.be.Zero(out.V)
+	op := mx.op
+	for _, bt := range op.batches {
+		n := len(bt.Blocks)
+		for i, pi := range bt.Blocks {
+			p := op.parts[pi]
+			rows, cols := p.A.Dims()
+			op.sa[i] = p.A
+			if bt.Trans {
+				op.sb[i] = in.RowRange(p.RowOff, rows)
+				op.sc[i] = out.RowRange(p.ColOff, cols)
+			} else {
+				op.sb[i] = in.RowRange(p.ColOff, cols)
+				op.sc[i] = out.RowRange(p.RowOff, rows)
+			}
+		}
+		mx.be.GemmMatBatched(bt.Trans, 1, op.sa[:n], op.sb[:n], 1, op.sc[:n])
 	}
 }

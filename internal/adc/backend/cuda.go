@@ -9,19 +9,25 @@ package backend
 
 /*
 #cgo CFLAGS: -I/usr/local/cuda/include
-#cgo LDFLAGS: -L/usr/local/cuda/lib64 -lcublas -lcudart
+#cgo LDFLAGS: -L/usr/local/cuda/lib64 -lcublas -lcudart -lcusolver
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <cusolverDn.h>
 #include <stdlib.h>
 
+// Every CUDA/cuBLAS entry point returns a status. Discarding them turns an OOM into
+// a NULL pointer and a rejected kernel into a silent no-op; the latter surfaces only
+// as a benchmark reporting throughput above the card's FP64 peak. Surface them.
+static int  dev_last_error(void)                       { return (int)cudaGetLastError(); }
+static int  dev_sync(void)                             { return (int)cudaDeviceSynchronize(); }
 static void* dev_malloc(size_t bytes)                  { void* p = NULL; cudaMalloc(&p, bytes); return p; }
 static void  dev_free(void* p)                         { cudaFree(p); }
-static void  dev_zero(void* p, size_t bytes)           { cudaMemset(p, 0, bytes); }
-static void  dev_h2d(void* d, const void* s, size_t b) { cudaMemcpy(d, s, b, cudaMemcpyHostToDevice); }
-static void  dev_d2h(void* d, const void* s, size_t b) { cudaMemcpy(d, s, b, cudaMemcpyDeviceToHost); }
-static void  dev_d2d(void* d, const void* s, size_t b) { cudaMemcpy(d, s, b, cudaMemcpyDeviceToDevice); }
+static int   dev_zero(void* p, size_t bytes)           { return (int)cudaMemset(p, 0, bytes); }
+static int   dev_h2d(void* d, const void* s, size_t b) { return (int)cudaMemcpy(d, s, b, cudaMemcpyHostToDevice); }
+static int   dev_d2h(void* d, const void* s, size_t b) { return (int)cudaMemcpy(d, s, b, cudaMemcpyDeviceToHost); }
+static int   dev_d2d(void* d, const void* s, size_t b) { return (int)cudaMemcpy(d, s, b, cudaMemcpyDeviceToDevice); }
 
-static cublasHandle_t blas_create(void) { cublasHandle_t h; cublasCreate(&h); return h; }
+static cublasHandle_t blas_create(int* status) { cublasHandle_t h = NULL; *status = (int)cublasCreate(&h); return h; }
 
 static void   blas_axpy(cublasHandle_t h, int n, double a, const double* x, double* y) { cublasDaxpy(h, n, &a, x, 1, y, 1); }
 static double blas_dot (cublasHandle_t h, int n, const double* x, const double* y)     { double r = 0; cublasDdot(h, n, x, 1, y, 1, &r); return r; }
@@ -34,29 +40,173 @@ static void blas_gemv(cublasHandle_t h, int trans, int m, int n, double alpha,
 	cublasOperation_t op = trans ? CUBLAS_OP_T : CUBLAS_OP_N;
 	cublasDgemv(h, op, m, n, &alpha, A, lda, x, 1, &beta, y, 1);
 }
+
+// C := alpha*op(A)*op(B) + beta*C, all column-major. cuBLAS is column-major
+// natively and BlockView already is, so the operands pass straight through --
+// unlike blas_gemv above, whose caller compensates for row-major uploaded blocks.
+// Returns the cuBLAS status: a rejected DGEMM is a silent no-op otherwise, which
+// shows up only as an impossibly fast benchmark.
+static int blas_gemm(cublasHandle_t h, int transA, int transB, int m, int n, int k,
+                     double alpha, const double* A, int lda, const double* B, int ldb,
+                     double beta, double* C, int ldc) {
+	cublasOperation_t opA = transA ? CUBLAS_OP_T : CUBLAS_OP_N;
+	cublasOperation_t opB = transB ? CUBLAS_OP_T : CUBLAS_OP_N;
+	return (int)cublasDgemm(h, opA, opB, m, n, k, &alpha, A, lda, B, ldb, &beta, C, ldc);
+}
+
+// Batched DGEMM: one launch for `batch` same-shaped products. A, B, C are DEVICE
+// arrays of device pointers. The batch members run concurrently, so the caller must
+// guarantee the C pointers do not overlap (see backend.PlanBatches).
+static int blas_gemm_batched(cublasHandle_t h, int transA, int transB, int m, int n, int k,
+                             double alpha, const double* const* A, int lda,
+                             const double* const* B, int ldb,
+                             double beta, double* const* C, int ldc, int batch) {
+	cublasOperation_t opA = transA ? CUBLAS_OP_T : CUBLAS_OP_N;
+	cublasOperation_t opB = transB ? CUBLAS_OP_T : CUBLAS_OP_N;
+	return (int)cublasDgemmBatched(h, opA, opB, m, n, k, &alpha, A, lda, B, ldb, &beta, C, ldc, batch);
+}
+
+// ---- cuSOLVER: divide-and-conquer symmetric eigensolver on the device ----
+//
+// The input is a fully symmetric matrix, so its row-major and column-major readings
+// coincide and the uplo choice is immaterial. On exit A holds the eigenvectors as
+// COLUMNS in column-major order; read back as row-major that is the transpose, which
+// the Go caller undoes.
+static cusolverDnHandle_t solver_create(int* status) {
+	cusolverDnHandle_t h = NULL;
+	*status = (int)cusolverDnCreate(&h);
+	return h;
+}
+static void solver_destroy(cusolverDnHandle_t h) { cusolverDnDestroy(h); }
+
+static int solver_dsyevd_bufsize(cusolverDnHandle_t h, int n, const double* A, int lda,
+                                 const double* W, int* lwork) {
+	return (int)cusolverDnDsyevd_bufferSize(h, CUSOLVER_EIG_MODE_VECTOR,
+	                                        CUBLAS_FILL_MODE_LOWER, n, A, lda, W, lwork);
+}
+static int solver_dsyevd(cusolverDnHandle_t h, int n, double* A, int lda, double* W,
+                         double* work, int lwork, int* devInfo) {
+	return (int)cusolverDnDsyevd(h, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
+	                             n, A, lda, W, work, lwork, devInfo);
+}
+
+static int dev_read_int(const int* p) {
+	int v = -1;
+	cudaMemcpy(&v, p, sizeof(int), cudaMemcpyDeviceToHost);
+	return v;
+}
+static int dev_mem_info(size_t* freeB, size_t* totalB) {
+	return (int)cudaMemGetInfo(freeB, totalB);
+}
 */
 import "C"
 
-import "unsafe"
+import (
+	"fmt"
+	"unsafe"
+)
 
 const backendName = "cuda"
 
-func blasCreate() unsafe.Pointer { return unsafe.Pointer(C.blas_create()) }
+// ckCuda panics on a non-zero cudaError_t. ckBlas does the same for cublasStatus_t.
+func ckCuda(st C.int, op string) {
+	if st != 0 {
+		panic(fmt.Sprintf("backend: cuda %s failed (cudaError_t %d)", op, int(st)))
+	}
+}
 
-func devMalloc(n int) unsafe.Pointer  { return C.dev_malloc(C.size_t(n * elemSize)) }
+func ckBlas(st C.int, op string) {
+	if st != 0 {
+		panic(fmt.Sprintf("backend: cublas %s failed (cublasStatus_t %d)", op, int(st)))
+	}
+}
+
+func blasCreate() unsafe.Pointer {
+	var st C.int
+	h := C.blas_create(&st)
+	ckBlas(st, "cublasCreate")
+	if h == nil {
+		panic("backend: cublasCreate returned a nil handle")
+	}
+	return unsafe.Pointer(h)
+}
+
+func devMalloc(n int) unsafe.Pointer {
+	p := C.dev_malloc(C.size_t(n * elemSize))
+	if p == nil && n > 0 {
+		// Drain the sticky error so later calls do not report this one.
+		st := C.dev_last_error()
+		panic(fmt.Sprintf("backend: cudaMalloc(%d bytes) returned NULL (cudaError_t %d)", n*elemSize, int(st)))
+	}
+	return p
+}
+
 func devFree(p unsafe.Pointer)        { C.dev_free(p) }
-func devZero(p unsafe.Pointer, n int) { C.dev_zero(p, C.size_t(n*elemSize)) }
+func devZero(p unsafe.Pointer, n int) { ckCuda(C.dev_zero(p, C.size_t(n*elemSize)), "cudaMemset") }
 
 func devH2D(dst unsafe.Pointer, src []float64) {
-	C.dev_h2d(dst, unsafe.Pointer(&src[0]), C.size_t(len(src)*elemSize))
+	ckCuda(C.dev_h2d(dst, unsafe.Pointer(&src[0]), C.size_t(len(src)*elemSize)), "cudaMemcpy H2D")
 }
 
 func devD2H(dst []float64, src unsafe.Pointer) {
-	C.dev_d2h(unsafe.Pointer(&dst[0]), src, C.size_t(len(dst)*elemSize))
+	ckCuda(C.dev_d2h(unsafe.Pointer(&dst[0]), src, C.size_t(len(dst)*elemSize)), "cudaMemcpy D2H")
 }
 
 func devD2D(dst, src unsafe.Pointer, n int) {
-	C.dev_d2d(dst, src, C.size_t(n*elemSize))
+	ckCuda(C.dev_d2d(dst, src, C.size_t(n*elemSize)), "cudaMemcpy D2D")
+}
+
+// devSync blocks until all queued device work completes, and reports any error the
+// asynchronous kernels raised. Needed for honest benchmarking.
+func devSync() { ckCuda(C.dev_sync(), "cudaDeviceSynchronize") }
+
+// devH2DPtrs uploads a host array of device pointers, as cublasDgemmBatched requires.
+func devH2DPtrs(dst unsafe.Pointer, src []unsafe.Pointer) {
+	ckCuda(C.dev_h2d(dst, unsafe.Pointer(&src[0]), C.size_t(len(src)*ptrSize)), "cudaMemcpy H2D (ptrs)")
+}
+
+// devMemInfo reports free and total device memory in bytes.
+func devMemInfo() (free, total uint64) {
+	var f, t C.size_t
+	ckCuda(C.dev_mem_info(&f, &t), "cudaMemGetInfo")
+	return uint64(f), uint64(t)
+}
+
+// devReadInt reads a single int32 (cuSOLVER's devInfo) back from the device.
+func devReadInt(p unsafe.Pointer) int { return int(C.dev_read_int((*C.int)(p))) }
+
+// solverCreate makes the dense-solver handle. Created lazily on the device thread.
+func solverCreate() unsafe.Pointer {
+	var st C.int
+	h := C.solver_create(&st)
+	if st != 0 || h == nil {
+		panic(fmt.Sprintf("backend: cusolverDnCreate failed (status %d)", int(st)))
+	}
+	return unsafe.Pointer(h)
+}
+
+func solverDestroy(h unsafe.Pointer) { C.solver_destroy(C.cusolverDnHandle_t(h)) }
+
+// solverDsyevdBufferSize returns the workspace size in float64 elements.
+func solverDsyevdBufferSize(h unsafe.Pointer, n int, a unsafe.Pointer, lda int, w unsafe.Pointer) int {
+	var lwork C.int
+	st := C.solver_dsyevd_bufsize(C.cusolverDnHandle_t(h), C.int(n), (*C.double)(a), C.int(lda),
+		(*C.double)(w), &lwork)
+	if st != 0 {
+		panic(fmt.Sprintf("backend: cusolverDnDsyevd_bufferSize failed (status %d, n=%d)", int(st), n))
+	}
+	return int(lwork)
+}
+
+// solverDsyevd overwrites a with the eigenvectors (columns, column-major) and w with
+// the ascending eigenvalues. Returns cuSOLVER's devInfo: 0 on success.
+func solverDsyevd(h unsafe.Pointer, n int, a unsafe.Pointer, lda int, w, work unsafe.Pointer, lwork int, info unsafe.Pointer) int {
+	st := C.solver_dsyevd(C.cusolverDnHandle_t(h), C.int(n), (*C.double)(a), C.int(lda),
+		(*C.double)(w), (*C.double)(work), C.int(lwork), (*C.int)(info))
+	if st != 0 {
+		panic(fmt.Sprintf("backend: cusolverDnDsyevd failed (status %d, n=%d)", int(st), n))
+	}
+	return devReadInt(info)
 }
 
 func handle(h unsafe.Pointer) C.cublasHandle_t { return C.cublasHandle_t(h) }
@@ -84,4 +234,45 @@ func blasGemv(h unsafe.Pointer, trans bool, m, n int, alpha float64, a unsafe.Po
 	}
 	C.blas_gemv(handle(h), t, C.int(m), C.int(n), C.double(alpha),
 		(*C.double)(a), C.int(lda), (*C.double)(x), C.double(beta), (*C.double)(y))
+}
+
+func blasGemm(h unsafe.Pointer, transA, transB bool, m, n, k int, alpha float64,
+	a unsafe.Pointer, lda int, b unsafe.Pointer, ldb int, beta float64, c unsafe.Pointer, ldc int) {
+	var ta, tb C.int
+	if transA {
+		ta = 1
+	}
+	if transB {
+		tb = 1
+	}
+	st := C.blas_gemm(handle(h), ta, tb, C.int(m), C.int(n), C.int(k), C.double(alpha),
+		(*C.double)(a), C.int(lda), (*C.double)(b), C.int(ldb),
+		C.double(beta), (*C.double)(c), C.int(ldc))
+	if st != 0 {
+		// cuBLAS reports INTERNAL_ERROR for faults raised by earlier async work, so
+		// surface the underlying cudaError_t too.
+		cudaErr := int(C.dev_last_error())
+		panic(fmt.Sprintf("backend: cublasDgemm failed (cublasStatus_t %d, cudaError_t %d): transA=%v transB=%v m=%d n=%d k=%d lda=%d ldb=%d ldc=%d",
+			int(st), cudaErr, transA, transB, m, n, k, lda, ldb, ldc))
+	}
+}
+
+// blasGemmBatched: a, b, c are device arrays of device pointers, batch elements long.
+func blasGemmBatched(h unsafe.Pointer, transA, transB bool, m, n, k int, alpha float64,
+	a unsafe.Pointer, lda int, b unsafe.Pointer, ldb int, beta float64, c unsafe.Pointer, ldc, batch int) {
+	var ta, tb C.int
+	if transA {
+		ta = 1
+	}
+	if transB {
+		tb = 1
+	}
+	st := C.blas_gemm_batched(handle(h), ta, tb, C.int(m), C.int(n), C.int(k), C.double(alpha),
+		(**C.double)(a), C.int(lda), (**C.double)(b), C.int(ldb),
+		C.double(beta), (**C.double)(c), C.int(ldc), C.int(batch))
+	if st != 0 {
+		cudaErr := int(C.dev_last_error())
+		panic(fmt.Sprintf("backend: cublasDgemmBatched failed (cublasStatus_t %d, cudaError_t %d): transA=%v m=%d n=%d k=%d lda=%d ldb=%d ldc=%d batch=%d",
+			int(st), cudaErr, transA, m, n, k, lda, ldb, ldc, batch))
+	}
 }
