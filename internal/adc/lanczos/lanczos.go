@@ -53,8 +53,17 @@ type Operator interface {
 }
 
 // Options tunes the block-Krylov build.
+//
+// MaxBlocks counts the blocks in the Krylov basis, start block included, so the subspace
+// it spans is MaxBlocks × MainBlockSize() columns. This is exactly theADCcode's `iter`
+// input keyword: there, `iter N` runs N+1 Iterate() calls (the first only registers the
+// start block), reaching dim = (N+1)·block, and Diagonalize() then sets
+// dimd = dim − block = N·block (../ADC/libLanczos/lanczos.h:226-238, :257). The trailing
+// block exists only to supply the coupling for the Ritz residuals, which is what the
+// discarded orthogonalization in Solve reproduces. So `-blocks N` == `iter N`, and the
+// reference's printed "Size of Lanczos space" is N·block.
 type Options struct {
-	MaxBlocks int     // cap on block iterations (0 → until deflation/full)
+	MaxBlocks int     // blocks in the basis, start block included (0 → until deflation/full)
 	MaxDim    int     // cap on subspace dimension (0 → Size())
 	DeflTol   float64 // deflation threshold for new basis vectors (0 → 1e-8)
 }
@@ -76,7 +85,7 @@ func (o Options) normalize(n int) Options {
 	if o.MaxDim == 0 || o.MaxDim > n {
 		o.MaxDim = n
 	}
-	if o.MaxBlocks == 0 {
+	if o.MaxBlocks <= 0 {
 		o.MaxBlocks = n // effectively until deflation / MaxDim
 	}
 	return o
@@ -86,14 +95,15 @@ func (o Options) normalize(n int) Options {
 // size n with a main block of `main` columns. Exported so the backend chooser can size a
 // sector without running it; Solve uses the same expression, so the two cannot drift.
 //
-// The basis starts at `main` columns and grows by at most `main` per block iteration,
-// capped at MaxDim. Deflation can stop it earlier, so this is an upper bound.
+// The basis holds MaxBlocks blocks of at most `main` columns each (the start block is one
+// of them), capped at MaxDim. Deflation can stop it earlier, so this is an upper bound.
+// MaxBlocks·main is the reference's "Size of Lanczos space" for `iter MaxBlocks`.
 func SubspaceDim(n, main int, opts Options) int {
 	if n == 0 || main == 0 {
 		return 0
 	}
 	o := opts.normalize(n)
-	return min(o.MaxDim, (o.MaxBlocks+1)*main)
+	return min(o.MaxDim, o.MaxBlocks*main)
 }
 
 // DenseOperator additionally exposes the densely-built matrix for the exact
@@ -336,9 +346,13 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 		}
 		tm.Proj += time.Since(t0)
 
-		if dim >= opts.MaxDim || iter >= opts.MaxBlocks {
+		// iter is the 0-based index of the block just projected, so the basis now holds
+		// iter+1 blocks. Stop once that reaches MaxBlocks — the basis spans exactly the
+		// same MaxBlocks·main columns the reference diagonalizes for `iter MaxBlocks`.
+		if dim >= opts.MaxDim || iter+1 >= opts.MaxBlocks {
 			// One extra projection, discarded, purely to obtain R_{j+1} for the Ritz
-			// residuals: a truncated run never forms the block after the last one.
+			// residuals: a truncated run never forms the block after the last one. This
+			// is the reference's trailing block (dim = (iter+1)·block, dimd = iter·block).
 			t0 = time.Now()
 			v := backend.BlockView{V: vbuf, Rows: n, Cols: blkSize, Ld: n}
 			be.Copy(vbuf, wbuf)

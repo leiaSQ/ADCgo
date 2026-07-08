@@ -35,7 +35,7 @@ func main() {
 	spinSel := flag.String("spin", "both", "spin sector: both | singlet | triplet")
 	psThresh := flag.Float64("ps-thresh", 1.0, "drop states with pole strength below this (percent)")
 	coeffThresh := flag.Float64("coeff-thresh", 0.1, "drop leading components with |coeff| below this")
-	blocks := flag.Int("blocks", 30, "max block-Lanczos iterations")
+	blocks := flag.Int("blocks", 100, "block-Lanczos iterations; Krylov subspace = blocks × 2h-space size (theADCcode's 'iter', whose reference DIP runs used 100)")
 	moPath := flag.String("mo", "", "MO-coefficient/overlap sidecar for atom-resolved 2h populations")
 	sym := flag.String("sym", "all", "target dication irrep: all | none | <0-based index>")
 	backendName := flag.String("backend", "gonum", "linear-algebra backend: gonum | hip | cuda | auto (auto calibrates and picks per sector; build-tag gated)")
