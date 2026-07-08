@@ -11,9 +11,10 @@ package backend
 
 /*
 #cgo CFLAGS: -I/opt/rocm/include -D__HIP_PLATFORM_AMD__
-#cgo LDFLAGS: -L/opt/rocm/lib -lhipblas -lamdhip64
+#cgo LDFLAGS: -L/opt/rocm/lib -lhipblas -lhipsolver -lamdhip64
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
+#include <hipsolver/hipsolver.h>
 #include <stdlib.h>
 
 // Memory helpers hide hip's pointer-to-pointer and enum signatures from cgo.
@@ -37,10 +38,69 @@ static void blas_gemv(hipblasHandle_t h, int trans, int m, int n, double alpha,
 	hipblasOperation_t op = trans ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 	hipblasDgemv(h, op, m, n, &alpha, A, lda, x, 1, &beta, y, 1);
 }
+
+// C := alpha*op(A)*op(B) + beta*C, all column-major (hipBLAS's native layout, so
+// BlockView passes straight through -- see the note on gpuBackend.Gemm).
+static int blas_gemm(hipblasHandle_t h, int transA, int transB, int m, int n, int k,
+                     double alpha, const double* A, int lda, const double* B, int ldb,
+                     double beta, double* C, int ldc) {
+	hipblasOperation_t opA = transA ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+	hipblasOperation_t opB = transB ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+	return (int)hipblasDgemm(h, opA, opB, m, n, k, &alpha, A, lda, B, ldb, &beta, C, ldc);
+}
+
+// Batched DGEMM: one launch for `batch` same-shaped products. A, B, C are DEVICE
+// arrays of device pointers; members run concurrently, so the C pointers must not
+// overlap (see backend.PlanBatches).
+static int blas_gemm_batched(hipblasHandle_t h, int transA, int transB, int m, int n, int k,
+                             double alpha, const double* const* A, int lda,
+                             const double* const* B, int ldb,
+                             double beta, double* const* C, int ldc, int batch) {
+	hipblasOperation_t opA = transA ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+	hipblasOperation_t opB = transB ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+	return (int)hipblasDgemmBatched(h, opA, opB, m, n, k, &alpha, A, lda, B, ldb, &beta, C, ldc, batch);
+}
+
+// ---- hipSOLVER: divide-and-conquer symmetric eigensolver on the device ----
+//
+// hipSOLVER deliberately mirrors the cuSOLVER API (it dispatches to rocSOLVER on AMD),
+// so this is a line-for-line twin of cuda.go's block. The input is fully symmetric, so
+// its row-major and column-major readings coincide and uplo is immaterial; on exit A
+// holds the eigenvectors as COLUMNS in column-major order, which the Go caller
+// transposes back.
+static hipsolverHandle_t solver_create(int* status) {
+	hipsolverHandle_t h = NULL;
+	*status = (int)hipsolverCreate(&h);
+	return h;
+}
+static void solver_destroy(hipsolverHandle_t h) { hipsolverDestroy(h); }
+
+static int solver_dsyevd_bufsize(hipsolverHandle_t h, int n, double* A, int lda,
+                                 double* W, int* lwork) {
+	return (int)hipsolverDsyevd_bufferSize(h, HIPSOLVER_EIG_MODE_VECTOR,
+	                                       HIPSOLVER_FILL_MODE_LOWER, n, A, lda, W, lwork);
+}
+static int solver_dsyevd(hipsolverHandle_t h, int n, double* A, int lda, double* W,
+                         double* work, int lwork, int* devInfo) {
+	return (int)hipsolverDsyevd(h, HIPSOLVER_EIG_MODE_VECTOR, HIPSOLVER_FILL_MODE_LOWER,
+	                            n, A, lda, W, work, lwork, devInfo);
+}
+
+static int dev_read_int(const int* p) {
+	int v = -1;
+	hipMemcpy(&v, p, sizeof(int), hipMemcpyDeviceToHost);
+	return v;
+}
+static int dev_mem_info(size_t* freeB, size_t* totalB) {
+	return (int)hipMemGetInfo(freeB, totalB);
+}
 */
 import "C"
 
-import "unsafe"
+import (
+	"fmt"
+	"unsafe"
+)
 
 const backendName = "hip"
 
@@ -87,4 +147,88 @@ func blasGemv(h unsafe.Pointer, trans bool, m, n int, alpha float64, a unsafe.Po
 	}
 	C.blas_gemv(handle(h), t, C.int(m), C.int(n), C.double(alpha),
 		(*C.double)(a), C.int(lda), (*C.double)(x), C.double(beta), (*C.double)(y))
+}
+
+func blasGemm(h unsafe.Pointer, transA, transB bool, m, n, k int, alpha float64,
+	a unsafe.Pointer, lda int, b unsafe.Pointer, ldb int, beta float64, c unsafe.Pointer, ldc int) {
+	var ta, tb C.int
+	if transA {
+		ta = 1
+	}
+	if transB {
+		tb = 1
+	}
+	st := C.blas_gemm(handle(h), ta, tb, C.int(m), C.int(n), C.int(k), C.double(alpha),
+		(*C.double)(a), C.int(lda), (*C.double)(b), C.int(ldb),
+		C.double(beta), (*C.double)(c), C.int(ldc))
+	if st != 0 {
+		panic(fmt.Sprintf("backend: hipblasDgemm failed (status %d): transA=%v transB=%v m=%d n=%d k=%d", int(st), transA, transB, m, n, k))
+	}
+}
+
+// blasGemmBatched: a, b, c are device arrays of device pointers, batch elements long.
+func blasGemmBatched(h unsafe.Pointer, transA, transB bool, m, n, k int, alpha float64,
+	a unsafe.Pointer, lda int, b unsafe.Pointer, ldb int, beta float64, c unsafe.Pointer, ldc, batch int) {
+	var ta, tb C.int
+	if transA {
+		ta = 1
+	}
+	if transB {
+		tb = 1
+	}
+	st := C.blas_gemm_batched(handle(h), ta, tb, C.int(m), C.int(n), C.int(k), C.double(alpha),
+		(**C.double)(a), C.int(lda), (**C.double)(b), C.int(ldb),
+		C.double(beta), (**C.double)(c), C.int(ldc), C.int(batch))
+	if st != 0 {
+		panic(fmt.Sprintf("backend: hipblasDgemmBatched failed (status %d): transA=%v m=%d n=%d k=%d batch=%d", int(st), transA, m, n, k, batch))
+	}
+}
+
+// devH2DPtrs uploads a host array of device pointers, as hipblasDgemmBatched requires.
+func devH2DPtrs(dst unsafe.Pointer, src []unsafe.Pointer) {
+	C.dev_h2d(dst, unsafe.Pointer(&src[0]), C.size_t(len(src)*ptrSize))
+}
+
+// devMemInfo reports free and total device memory in bytes.
+func devMemInfo() (free, total uint64) {
+	var f, t C.size_t
+	C.dev_mem_info(&f, &t)
+	return uint64(f), uint64(t)
+}
+
+// devReadInt reads a single int32 (hipSOLVER's devInfo) back from the device.
+func devReadInt(p unsafe.Pointer) int { return int(C.dev_read_int((*C.int)(p))) }
+
+// solverCreate makes the dense-solver handle. Created lazily on the device thread.
+func solverCreate() unsafe.Pointer {
+	var st C.int
+	h := C.solver_create(&st)
+	if st != 0 || h == nil {
+		panic(fmt.Sprintf("backend: hipsolverCreate failed (status %d)", int(st)))
+	}
+	return unsafe.Pointer(h)
+}
+
+func solverDestroy(h unsafe.Pointer) { C.solver_destroy(C.hipsolverHandle_t(h)) }
+
+// solverDsyevdBufferSize returns the workspace size in float64 elements.
+func solverDsyevdBufferSize(h unsafe.Pointer, n int, a unsafe.Pointer, lda int, w unsafe.Pointer) int {
+	var lwork C.int
+	st := C.solver_dsyevd_bufsize(C.hipsolverHandle_t(h), C.int(n), (*C.double)(a), C.int(lda),
+		(*C.double)(w), &lwork)
+	if st != 0 {
+		panic(fmt.Sprintf("backend: hipsolverDsyevd_bufferSize failed (status %d, n=%d)", int(st), n))
+	}
+	return int(lwork)
+}
+
+// solverDsyevd overwrites a with the eigenvectors (columns, column-major) and w with
+// the ascending eigenvalues. Returns hipSOLVER's devInfo: 0 on success.
+func solverDsyevd(h unsafe.Pointer, n int, a unsafe.Pointer, lda int, w, work unsafe.Pointer, lwork int, info unsafe.Pointer) int {
+	st := C.solver_dsyevd(C.hipsolverHandle_t(h), C.int(n), (*C.double)(a), C.int(lda),
+		(*C.double)(w), (*C.double)(work), C.int(lwork), (*C.int)(info))
+	if st != 0 {
+		panic(fmt.Sprintf("backend: hipsolverDsyevd failed (status %d, n=%d)", int(st), n))
+	}
+	return devReadInt(info)
 }

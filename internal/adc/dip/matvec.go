@@ -32,12 +32,7 @@ func New(sp *Space, ints *integrals.Store, eps []float64, be backend.Backend) *M
 // row offset rowOff, column offset colOff. A diagonal (on the block diagonal)
 // block is applied once (GemvN); an off-diagonal block is applied both ways
 // (GemvN into its rows, GemvT into its columns) to realize the symmetric M.
-type placement struct {
-	a      backend.DeviceMat
-	rowOff int
-	colOff int
-	diag   bool
-}
+type placement = backend.Block
 
 // assembledOp is the block-structured operator uploaded once and reused every
 // ApplyFull: the 2h/2h main block (a dense symmetric square, applied as one
@@ -46,6 +41,29 @@ type placement struct {
 // very large satellite spaces the future path is recompute-blocks-on-device.
 type assembledOp struct {
 	parts []placement
+	// batches groups same-shaped parts into batched-GEMM calls with disjoint output
+	// offsets, computed once here because it depends only on the operator's structure.
+	// For formic acid's largest sector this turns 55,097 GEMM calls per apply into
+	// 1,002. Scratch slices are reused across applies to keep the hot path allocation
+	// free.
+	batches []backend.Batch
+	sa      []backend.DeviceMat
+	sb, sc  []backend.BlockView
+}
+
+// OperatorNNZ reports the number of stored matrix elements in the assembled
+// block-sparse operator (assembling it if needed), together with the block count.
+// Every apply streams all of them, so this is the memory-traffic unit of a
+// mat-vec and the sizing input for a device-residency check.
+func (mx *Matrix) OperatorNNZ() (nnz, nblocks int) {
+	if mx.op == nil {
+		mx.op = mx.assemble()
+	}
+	for _, p := range mx.op.parts {
+		r, c := p.A.Dims()
+		nnz += r * c
+	}
+	return nnz, len(mx.op.parts)
 }
 
 // assemble builds the block-sparse operator on the backend. It mirrors the block
@@ -56,7 +74,7 @@ func (mx *Matrix) assemble() *assembledOp {
 	sp := mx.sp
 	var parts []placement
 	add := func(m backend.Mat, r0, c0 int, diag bool) {
-		parts = append(parts, placement{a: mx.be.UploadMat(m), rowOff: r0, colOff: c0, diag: diag})
+		parts = append(parts, placement{A: mx.be.UploadMat(m), RowOff: r0, ColOff: c0, Diag: diag})
 	}
 
 	// 2h/2h main block: a dense symmetric square (both triangles filled), applied
@@ -118,7 +136,39 @@ func (mx *Matrix) assemble() *assembledOp {
 			}
 		}
 	}
-	return &assembledOp{parts: parts}
+	return newAssembledOp(parts)
+}
+
+// newAssembledOp plans the batched applies and sizes the scratch slices.
+func newAssembledOp(parts []placement) *assembledOp {
+	batches := backend.PlanBatches(parts)
+	widest := 0
+	for _, b := range batches {
+		if len(b.Blocks) > widest {
+			widest = len(b.Blocks)
+		}
+	}
+	return &assembledOp{
+		parts:   parts,
+		batches: batches,
+		sa:      make([]backend.DeviceMat, widest),
+		sb:      make([]backend.BlockView, widest),
+		sc:      make([]backend.BlockView, widest),
+	}
+}
+
+// Release frees the backend-resident operator blocks. On a host backend this is a
+// no-op; on a device it is the difference between one sector's operator (0.25–0.48 GB
+// for formic acid) living until the process exits and being reclaimed for the next
+// sector. Safe to call more than once; the operator is rebuilt on the next apply.
+func (mx *Matrix) Release() {
+	if mx.op == nil {
+		return
+	}
+	for _, p := range mx.op.parts {
+		mx.be.FreeMat(p.A)
+	}
+	mx.op = nil
 }
 
 // Size is the matrix dimension.
@@ -251,10 +301,46 @@ func (mx *Matrix) ApplyFull(out, in backend.Vector) {
 	}
 	mx.be.Zero(out)
 	for _, p := range mx.op.parts {
-		rows, cols := p.a.Dims()
-		mx.be.GemvN(1, p.a, in.Slice(p.colOff, cols), out.Slice(p.rowOff, rows))
-		if !p.diag {
-			mx.be.GemvT(1, p.a, in.Slice(p.rowOff, rows), out.Slice(p.colOff, cols))
+		rows, cols := p.A.Dims()
+		mx.be.GemvN(1, p.A, in.Slice(p.ColOff, cols), out.Slice(p.RowOff, rows))
+		if !p.Diag {
+			mx.be.GemvT(1, p.A, in.Slice(p.RowOff, rows), out.Slice(p.ColOff, cols))
 		}
+	}
+}
+
+// ApplyBlock computes out = M·in for every column of in at once.
+//
+// This is ApplyFull's level-3 twin, and the reason it exists is memory traffic, not
+// arithmetic. ApplyFull streams the entire assembled operator once per vector; over a
+// Lanczos run that is `dim` passes over ~0.25 GB of blocks (formic acid), plus one
+// GEMV call per block per vector — 1.8e8 calls, where per-call overhead, not
+// bandwidth, sets the pace. Applying to a whole b-column block streams the operator
+// once per block and cuts the call count by b, turning a bandwidth/overhead-bound
+// GEMV into a compute-bound GEMM.
+//
+// out must be a dedicated buffer with Ld == Rows; it is zeroed first, then every
+// block accumulates into it (beta = 1), mirroring ApplyFull's additive GEMVs.
+func (mx *Matrix) ApplyBlock(out, in backend.BlockView) {
+	if mx.op == nil {
+		mx.op = mx.assemble()
+	}
+	mx.be.Zero(out.V)
+	op := mx.op
+	for _, bt := range op.batches {
+		n := len(bt.Blocks)
+		for i, pi := range bt.Blocks {
+			p := op.parts[pi]
+			rows, cols := p.A.Dims()
+			op.sa[i] = p.A
+			if bt.Trans {
+				op.sb[i] = in.RowRange(p.RowOff, rows)
+				op.sc[i] = out.RowRange(p.ColOff, cols)
+			} else {
+				op.sb[i] = in.RowRange(p.ColOff, cols)
+				op.sc[i] = out.RowRange(p.RowOff, rows)
+			}
+		}
+		mx.be.GemmMatBatched(bt.Trans, 1, op.sa[:n], op.sb[:n], 1, op.sc[:n])
 	}
 }

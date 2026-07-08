@@ -37,6 +37,46 @@ type DeviceMat interface {
 	Dims() (rows, cols int)
 }
 
+// BlockView is a mutable, column-major view onto a backend-resident Vector: column
+// j occupies [j*Ld, j*Ld+Rows). It is the level-3 counterpart of Vector — a panel
+// of vectors that GEMM can consume in one call.
+//
+// Column-major is load-bearing. It makes each column contiguous, so a column is a
+// plain V.Slice(j*Ld, Rows) usable anywhere a Vector is (in particular as the
+// argument to a mat-vec), and it is cuBLAS's native layout, so the GPU shim passes
+// it straight through. Contrast Mat, which is row-major and immutable and stays the
+// host-side assembly type for the operator blocks.
+type BlockView struct {
+	V          Vector // backing storage; at least Ld*(Cols-1)+Rows long
+	Rows, Cols int
+	Ld         int // leading dimension, >= Rows
+}
+
+// Col returns column j as a Vector sharing storage.
+func (b BlockView) Col(j int) Vector { return b.V.Slice(j*b.Ld, b.Rows) }
+
+// Cut returns the leading n columns of b, sharing storage.
+func (b BlockView) Cut(n int) BlockView { b.Cols = n; return b }
+
+// ColRange returns columns [lo, hi) of b, sharing storage.
+func (b BlockView) ColRange(lo, hi int) BlockView {
+	return BlockView{V: b.V.Slice(lo*b.Ld, (hi-lo-1)*b.Ld+b.Rows), Rows: b.Rows, Cols: hi - lo, Ld: b.Ld}
+}
+
+// RowRange returns rows [r0, r0+rows) of every column, sharing storage. Column j of
+// the result begins at offset j*Ld of the sliced buffer, so the leading dimension is
+// unchanged — this is how an operator block addresses its row band of a panel.
+func (b BlockView) RowRange(r0, rows int) BlockView {
+	return BlockView{V: b.V.Slice(r0, (b.Cols-1)*b.Ld+rows), Rows: rows, Cols: b.Cols, Ld: b.Ld}
+}
+
+// general reinterprets the column-major block as the row-major blas64.General of its
+// transpose: identical memory, dims swapped, Stride = Ld. Callers compensate by
+// swapping the operand order and transpose flags (see Gonum.Gemm).
+func (b BlockView) general(data []float64) blas64.General {
+	return blas64.General{Rows: b.Cols, Cols: b.Rows, Stride: b.Ld, Data: data}
+}
+
 // Mat is a dense real matrix stored row-major (Data[i*Cols+j]), matching the
 // gonum blas64.General convention. It is the host-side assembly type for the
 // operator blocks and the dense validation path; UploadMat turns one into a
@@ -67,6 +107,19 @@ func (m Mat) MulVec(x Vec) Vec {
 	y := make([]float64, m.Rows)
 	blas64.Gemv(blas.NoTrans, 1, m.general(), vector(x), 0, vector(y))
 	return y
+}
+
+// MatMul returns a·b for row-major host matrices. Used for the Ritz back-transform
+// (main × dim times dim × dim), which is off the device — the main-space slice of the
+// basis is tiny next to the basis itself, so bringing it home beats uploading the
+// dim×dim eigenvector matrix. Threaded when built with the openblas tag.
+func MatMul(a, b Mat) Mat {
+	if a.Cols != b.Rows {
+		panic("backend: MatMul shape mismatch")
+	}
+	c := NewMat(a.Rows, b.Cols)
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, a.general(), b.general(), 0, c.general())
+	return c
 }
 
 // AddSubMat accumulates alpha*src into the sub-block of m whose top-left corner
@@ -121,6 +174,7 @@ type Backend interface {
 	Copy(dst, src Vector)      // dst[:] = src
 	Free(v Vector)             // release (no-op for host backends)
 	UploadMat(m Mat) DeviceMat // resident copy of an (immutable) block
+	FreeMat(m DeviceMat)       // release an UploadMat allocation (no-op for host backends)
 
 	// BLAS-1 on resident vectors (scalars are returned to the host).
 	Axpy(alpha float64, x, y Vector) // y += alpha*x
@@ -132,6 +186,28 @@ type Backend interface {
 	// (GemvT). x and y are typically Slice views onto the block offsets.
 	GemvN(alpha float64, a DeviceMat, x, y Vector)
 	GemvT(alpha float64, a DeviceMat, x, y Vector)
+
+	// BLAS-3 on resident column-major panels: c := alpha*op(a)*op(b) + beta*c,
+	// where op(x) is xᵀ when the corresponding trans flag is set. This is what
+	// keeps the block-Lanczos reorthogonalization and the projected-matrix build
+	// off the BLAS-1 path, where per-call overhead (host sync on a GPU, no
+	// threading on a CPU) dominates the O(n) arithmetic.
+	Gemm(transA, transB bool, alpha float64, a, b BlockView, beta float64, c BlockView)
+
+	// GemmMat is the level-3 counterpart of GemvN/GemvT: c := alpha*op(a)*b + beta*c
+	// for a resident, row-major, immutable operator block a (as returned by
+	// UploadMat) against a column-major panel b. It lets the mat-vec apply the whole
+	// operator to a block of vectors at once, streaming each block once per block
+	// rather than once per vector.
+	GemmMat(transA bool, alpha float64, a DeviceMat, b BlockView, beta float64, c BlockView)
+
+	// GemmMatBatched applies GemmMat to a whole batch in one call. Every a[i] must have
+	// the same dimensions, every b[i] the same Rows/Cols/Ld, every c[i] the same
+	// Rows/Cols/Ld — and the c[i] must be pairwise non-overlapping, because a batched
+	// GEMM runs its members concurrently and they accumulate (beta = 1).
+	// PlanBatches builds batches satisfying exactly that contract. On a GPU this is one
+	// kernel launch instead of len(a); on a host backend it is the obvious loop.
+	GemmMatBatched(transA bool, alpha float64, a []DeviceMat, b []BlockView, beta float64, c []BlockView)
 
 	// SymEig returns the ascending eigenvalues and eigenvectors (as columns of
 	// the returned Mat) of the symmetric host matrix a. The lower triangle of a is
@@ -188,11 +264,51 @@ func (Gonum) Copy(dst, src Vector) { copy(host(dst), host(src)) }
 func (Gonum) Free(Vector)          {}
 
 func (Gonum) UploadMat(m Mat) DeviceMat { return hostMat{m: m} }
+func (Gonum) FreeMat(DeviceMat)         {}
+
+// Gemm computes c := alpha*op(a)*op(b) + beta*c on column-major panels.
+//
+// gonum's blas64 is row-major, and the row-major reading of a column-major panel is
+// its transpose. Transposing the identity C = op(A)·op(B) gives
+// Cᵀ = op(B)ᵀ·op(A)ᵀ, and op(X)ᵀ is exactly the row-major view of X carrying the
+// same trans flag. So the row-major call is the operands swapped, flags following
+// their operands — no flag inversion.
+func (Gonum) Gemm(transA, transB bool, alpha float64, a, b BlockView, beta float64, c BlockView) {
+	t := func(v bool) blas.Transpose {
+		if v {
+			return blas.Trans
+		}
+		return blas.NoTrans
+	}
+	blas64.Gemm(t(transB), t(transA), alpha,
+		b.general(host(b.V)), a.general(host(a.V)), beta, c.general(host(c.V)))
+}
 
 func (Gonum) Axpy(alpha float64, x, y Vector) { blas64.Axpy(alpha, vector(host(x)), vector(host(y))) }
 func (Gonum) Dot(x, y Vector) float64         { return blas64.Dot(vector(host(x)), vector(host(y))) }
 func (Gonum) Nrm2(x Vector) float64           { return blas64.Nrm2(vector(host(x))) }
 func (Gonum) Scal(alpha float64, x Vector)    { blas64.Scal(alpha, vector(host(x))) }
+
+// GemmMat computes c := alpha*op(a)*b + beta*c with a row-major (a) and column-major
+// (b, c). Transposing, Cᵀ = Bᵀ·op(A)ᵀ: rmB and rmC are the row-major readings of the
+// column-major panels, and op(A)ᵀ is the row-major general of a carrying the negated
+// trans flag.
+func (Gonum) GemmMat(transA bool, alpha float64, a DeviceMat, b BlockView, beta float64, c BlockView) {
+	ta := blas.Trans // op(A)ᵀ = Aᵀ when transA is false
+	if transA {
+		ta = blas.NoTrans
+	}
+	blas64.Gemm(blas.NoTrans, ta, alpha,
+		b.general(host(b.V)), a.(hostMat).m.general(), beta, c.general(host(c.V)))
+}
+
+// GemmMatBatched on the host is the loop the batch exists to avoid on a device: the
+// per-call overhead of a host BLAS call is nanoseconds, not microseconds.
+func (g Gonum) GemmMatBatched(transA bool, alpha float64, a []DeviceMat, b []BlockView, beta float64, c []BlockView) {
+	for i := range a {
+		g.GemmMat(transA, alpha, a[i], b[i], beta, c[i])
+	}
+}
 
 func (Gonum) GemvN(alpha float64, a DeviceMat, x, y Vector) {
 	blas64.Gemv(blas.NoTrans, alpha, a.(hostMat).m.general(), vector(host(x)), 1, vector(host(y)))
@@ -202,7 +318,21 @@ func (Gonum) GemvT(alpha float64, a DeviceMat, x, y Vector) {
 	blas64.Gemv(blas.Trans, alpha, a.(hostMat).m.general(), vector(host(x)), 1, vector(host(y)))
 }
 
-func (Gonum) SymEig(a Mat) ([]float64, Mat) {
+// SymEig dispatches to symEig, which build-tagged files may replace. The default
+// (symEigGonum) is gonum's mat.EigenSym, i.e. LAPACK dsyev — QR iteration, and by
+// far the slowest symmetric driver: measured at 2.4 GFLOP/s here, against 23.8
+// GFLOP/s for the divide-and-conquer dsyevd on the same OpenBLAS. Since the
+// projected Lanczos matrix reaches dim ~11600 for formic acid, where this is
+// O(dim³), openblas.go swaps in LAPACKE_dsyevd.
+func (Gonum) SymEig(a Mat) ([]float64, Mat) { return symEig(a) }
+
+// symEig is the symmetric eigensolver behind Gonum.SymEig. Replaced in an init()
+// by the build-tagged accelerated implementations.
+var symEig = symEigGonum
+
+// symEigGonum is the pure-Go reference: LAPACK dsyev via gonum's mat.EigenSym.
+// Cross-implementation agreement is asserted against it.
+func symEigGonum(a Mat) ([]float64, Mat) {
 	n := a.Rows
 	sym := mat.NewSymDense(n, nil)
 	for i := range n {

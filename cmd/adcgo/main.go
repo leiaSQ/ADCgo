@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"adcgo/internal/adc/analyze"
 	"adcgo/internal/adc/backend"
@@ -37,8 +38,9 @@ func main() {
 	blocks := flag.Int("blocks", 30, "max block-Lanczos iterations")
 	moPath := flag.String("mo", "", "MO-coefficient/overlap sidecar for atom-resolved 2h populations")
 	sym := flag.String("sym", "all", "target dication irrep: all | none | <0-based index>")
-	backendName := flag.String("backend", "gonum", "linear-algebra backend: gonum | hip | cuda (build-tag gated)")
+	backendName := flag.String("backend", "gonum", "linear-algebra backend: gonum | hip | cuda | auto (auto calibrates and picks per sector; build-tag gated)")
 	out := flag.String("out", "", "write JSON to this file (default stdout)")
+	profile := flag.Bool("profile", false, "print per-sector solver phase timings to stderr")
 
 	doSpectrum := flag.Bool("spectrum", false, "emit the decay-channel stick spectrum instead of the solver document (needs -dip or -sip; DIP needs -mo)")
 	initAtom := flag.String("init-atom", "O", "initial core-ionized site for DIP decay channels (overridden by the interactive prompt)")
@@ -89,7 +91,8 @@ func main() {
 			solver: *solver, spinSel: *spinSel, moPath: *moPath, out: *out, sym: *sym,
 			backend:  *backendName,
 			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks,
-			spec: specCfg,
+			profile: *profile,
+			spec:    specCfg,
 		}
 		if err := runDIP(d, cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
@@ -102,7 +105,8 @@ func main() {
 		cfg := sipConfig{
 			solver: *solver, out: *out, sym: *sym, backend: *backendName, order: *order,
 			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks,
-			spec: specCfg,
+			profile: *profile,
+			spec:    specCfg,
 		}
 		if err := runSIP(d, cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
@@ -141,7 +145,27 @@ type dipConfig struct {
 	solver, spinSel, moPath, out, sym, backend string
 	psThresh, coeffThresh                      float64
 	blocks                                     int
+	profile                                    bool
 	spec                                       specConfig
+}
+
+// reportTiming prints one solver's phase breakdown to stderr. The percentages are
+// what matter: a phase that dominates because it runs at the wrong BLAS level looks
+// identical, in flop count, to one that does not.
+func reportTiming(label string, n, main int, tm lanczos.Timing) {
+	tot := tm.Total()
+	if tot == 0 {
+		return
+	}
+	pct := func(d time.Duration) float64 { return 100 * float64(d) / float64(tot) }
+	fmt.Fprintf(os.Stderr,
+		"profile %-22s n=%-6d b=%-3d total=%8.2fs | apply %6.2fs (%4.1f%%)  orth %7.2fs (%4.1f%%)  proj %7.2fs (%4.1f%%)  eig %6.2fs (%4.1f%%)  back %6.2fs (%4.1f%%)\n",
+		label, n, main, tot.Seconds(),
+		tm.Apply.Seconds(), pct(tm.Apply),
+		tm.Orth.Seconds(), pct(tm.Orth),
+		tm.Proj.Seconds(), pct(tm.Proj),
+		tm.Eig.Seconds(), pct(tm.Eig),
+		tm.Back.Seconds(), pct(tm.Back))
 }
 
 func runDIP(d *fcidump.Data, cfg dipConfig) error {
@@ -151,7 +175,7 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 	}
 	nocc := mp.NOcc(d)
 	eps := mp.OrbitalEnergies(d, nocc)
-	be, err := backend.New(cfg.backend)
+	ch, err := newChooser(cfg.backend, cfg.profile)
 	if err != nil {
 		return err
 	}
@@ -180,6 +204,21 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 			if sp.Size() == 0 {
 				continue // no configurations in this (irrep, spin) sector
 			}
+			label := fmt.Sprintf("dip spin=%d irrep=%d", spin, targetSym+1)
+			lopts := lanczos.Options{MaxBlocks: cfg.blocks}
+			n, b := sp.Size(), sp.MainBlockSize()
+
+			var be backend.Backend
+			if cfg.solver == "dense" {
+				be = ch.pickDense(label, n)
+			} else {
+				be = ch.pickLanczos(label, n, b, lanczos.SubspaceDim(n, b, lopts),
+					func(cand backend.Backend) time.Duration {
+						m := dip.New(sp, ints, eps, cand)
+						defer m.Release()
+						return timeApplyBlock(cand, n, b, m.ApplyBlock)
+					})
+			}
 			mx := dip.New(sp, ints, eps, be)
 
 			var res lanczos.Result
@@ -187,9 +226,15 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 			case "dense":
 				res = lanczos.SolveDense(mx, be)
 			case "lanczos":
-				res = lanczos.Solve(mx, be, lanczos.Options{MaxBlocks: cfg.blocks})
+				res = lanczos.Solve(mx, be, lopts)
 			default:
 				return fmt.Errorf("unknown solver %q (want lanczos or dense)", cfg.solver)
+			}
+			// Reclaim the sector's resident operator before the next one is assembled;
+			// on a device this is up to 0.5 GB, and the memory check depends on it.
+			mx.Release()
+			if cfg.profile {
+				reportTiming(label, sp.Size(), sp.MainBlockSize(), res.Timing)
 			}
 
 			var pe *analyze.PopEngine
@@ -242,6 +287,7 @@ type sipConfig struct {
 	order                     int
 	psThresh, coeffThresh     float64
 	blocks                    int
+	profile                   bool
 	spec                      specConfig
 }
 
@@ -251,7 +297,7 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 	}
 	nocc := mp.NOcc(d)
 	eps := mp.OrbitalEnergies(d, nocc)
-	be, err := backend.New(cfg.backend)
+	ch, err := newChooser(cfg.backend, cfg.profile)
 	if err != nil {
 		return err
 	}
@@ -269,6 +315,21 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 		if sp.MainBlockSize() == 0 {
 			continue // no 1h configurations in this irrep
 		}
+		label := fmt.Sprintf("sip irrep=%d", targetSym+1)
+		lopts := lanczos.Options{MaxBlocks: cfg.blocks}
+		n, b := sp.Size(), sp.MainBlockSize()
+
+		var be backend.Backend
+		if cfg.solver == "dense" {
+			be = ch.pickDense(label, n)
+		} else {
+			be = ch.pickLanczos(label, n, b, lanczos.SubspaceDim(n, b, lopts),
+				func(cand backend.Backend) time.Duration {
+					m := sip.New(sp, ints, eps, cfg.order, cand)
+					defer m.Release()
+					return timeApplyBlock(cand, n, b, m.ApplyBlock)
+				})
+		}
 		mx := sip.New(sp, ints, eps, cfg.order, be)
 
 		var res lanczos.Result
@@ -276,11 +337,16 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 		case "dense":
 			res = lanczos.SolveDense(mx, be)
 		case "lanczos":
-			res = lanczos.Solve(mx, be, lanczos.Options{MaxBlocks: cfg.blocks})
+			res = lanczos.Solve(mx, be, lopts)
 		default:
 			return fmt.Errorf("unknown solver %q (want lanczos or dense)", cfg.solver)
 		}
-		doc.Sectors = append(doc.Sectors, analyze.BuildSIPSector(sp, res, mx.FMatrix(), opts))
+		if cfg.profile {
+			reportTiming(label, sp.Size(), sp.MainBlockSize(), res.Timing)
+		}
+		sector := analyze.BuildSIPSector(sp, res, mx.FMatrix(), opts)
+		mx.Release()
+		doc.Sectors = append(doc.Sectors, sector)
 	}
 
 	if cfg.spec.enabled {
