@@ -1,0 +1,23 @@
+# ADCgo DIP run on H2O, DZP+Diffuse (Dunning) basis, active space 2..30.
+# Reproduces theADCcode's ../ADCanalysis/examples/DIP_h2o run on matched integrals.
+#
+#   scripts/adcgo_run.sh examples/DIP_h2o/dump.in ./adcgo
+#
+&geometry
+  file   _zmatrix.dat        # GAMESS-UK z-matrix (O-H 0.944 A, HOH 107.07 deg)
+&basis
+  file   _basisset.dat       # GAMESS-UK basis; cartesian GTOs (31 functions)
+  cartesian on
+&scf
+  charge 0
+  symmetry auto              # -> C2v; fixes 1-based GAMESS ORBSYM in the FCIDUMP
+  gate   -76.0498071428      # gate on the reference GAMESS-UK SCF energy
+&active
+  active 2 to 30             # freeze O 1s (MO 1), drop top virtual (MO 31) -> 29 orbitals
+&output
+  fcidump  h2o_dzp.fcidump
+  sidecar  h2o_dzp.mo.json
+  manifest h2o_dzp.ref.json
+&adc
+  args   -dip -order 2 -solver lanczos -spin both
+  sym    1 to 4              # one adcgo run per C2v irrep (theADCcode adcdip{1..4}.out)
