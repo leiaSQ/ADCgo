@@ -19,6 +19,7 @@ import (
 	"adcgo/internal/adc/dip"
 	"adcgo/internal/adc/fcidump"
 	"adcgo/internal/adc/integrals"
+	"adcgo/internal/adc/lanczos"
 	"adcgo/internal/adc/mp"
 )
 
@@ -79,9 +80,10 @@ func main() {
 				maxDim = n
 			}
 
-			// Block-Lanczos subspace: the basis grows by at most one block of
-			// width b per iteration, capped at the full space.
-			dim := min(n, *nblocks*b)
+			// Block-Lanczos subspace: the basis holds one block of width b per
+			// iteration, capped at the full space. Ask the solver rather than
+			// re-deriving it, so the estimate cannot drift from what Solve builds.
+			dim := lanczos.SubspaceDim(n, b, lanczos.Options{MaxBlocks: *nblocks})
 			fmt.Printf("   %s irrep=%d  dim=%-7d 2h=%-5d 3h1p=%-8d dense=%6.3f GB  krylov=%-6d (%3.0f%% of n)  B=%5.2f GB  T=%5.2f GB",
 				name, sym, n, b, n-b, float64(n)*float64(n)*8/gb,
 				dim, 100*float64(dim)/float64(n),

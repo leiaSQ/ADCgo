@@ -47,6 +47,9 @@ type State struct {
 	// use it to tell a converged line from an unconverged one instead of guessing at
 	// -blocks. Exactly 0 on the dense path, which is exact by construction (hence no
 	// omitempty: a zero here is a statement, not a missing value).
+	//
+	// Same quantity as the "residue" column of theADCcode's adcdip*.out, which prints
+	// it in a.u. (adc_analyzer.cpp:48); divide by au2eV to compare.
 	Residue float64   `json:"residue"`
 	Leading []Leading `json:"leading"`
 	Pop     *Pop      `json:"pop,omitempty"`
@@ -73,7 +76,7 @@ func spinLabel(s dip.Spin) int {
 	return 1
 }
 
-// Sector assembles a sector's states from a solved result, ordered by energy,
+// BuildSector assembles a sector's states from a solved result, ordered by energy,
 // with spurious and weak roots dropped and leading components sorted. If pe is
 // non-nil, each state also carries its atom-resolved two-hole population.
 func BuildSector(sp *dip.Space, res lanczos.Result, opts Options, pe *PopEngine) Sector {

@@ -2,299 +2,236 @@
 
 ## Context
 
-Today `ADCanalysis` is a **post-processing** tool: it parses the text output of
-`theADCcode` (the C++/F77 Green's-function ADC program in `../ADC`, Golubev/
-Cederbaum lineage), classifies dicationic/cationic states into decay channels
-(Auger / ICD / ETMD), and renders stick spectra with `gonum/plot`. It contains
-**no solver core** — no integrals, no matrices, no eigensolver (a grep for
-`gonum/mat` returns nothing; the only gonum use is `plot`). See
-`decay_analyzer_sketch.md` and `internal/model/types.go`.
+ADCgo is a fast, exact, GPU-accelerated ionization-ADC solver written in Go. It
+**delegates SCF + integrals** (FCIDUMP + sidecars, produced by pyscf) and implements
+*only* ADC, reaching larger systems by **accelerating** the exact secular problem on
+modern hardware rather than **truncating** it (no RI, no reduced-scaling). Where the
+Dreuw world (adcc) omits the entire IP/DIP/decay branch and the Cederbaum legacy code
+(`../ADC`, "theADCcode") exists only as hard-to-build, effectively single-threaded
+C++/F77, ADCgo occupies the open niche: a **fast, exact, GPU-capable ionization solver**
+for DIP/SIP/ICD physics.
 
-The question this plan answers: **what is the lift to compute ADC(n) in Go**,
-rather than only parse someone else's ADC output — and how to carve a niche the
-Dreuw group has left open.
-
-### The angle: exact treatment of *larger* systems
-
-The Dreuw world reaches big molecules by **approximating** (RI/density fitting,
-CVS truncation, reduced-scaling schemes). ADCgo takes the opposite bet: keep the
-ionization ADC secular problem **exact — no reduced-scaling truncations** — and
-reach larger systems by **throwing modern hardware at it** instead of throwing
-away terms:
-
-- **GPU Lanczos** — the ADC matrix–vector product (the hotspot) runs as batched
-  `cuBLAS` GEMM/contractions on the GPU; the Lanczos recurrence is orchestrated
-  on the CPU. The matrix `M` is real-symmetric, so Lanczos (band/block) recovers
-  the *whole* photoionization band, which is exactly what a DIP/SIP spectrum
-  needs — not just a few extremal roots.
-- **Multicore CPU BLAS** — back Gonum with a threaded BLAS (OpenBLAS/MKL via
-  `netlib` cgo) and goroutine-parallel contraction loops, so the mat-vec uses
-  all cores. `theADCcode` leans on archaic, effectively single-threaded
-  LAPACK/Lanczos; simply using every core is a real, measurable win before any
-  GPU work.
-
-"Exact" here means **no further physical approximation on top of the chosen ADC
-order** (no RI, no CVS, no frozen truncation of the satellite space) — the full
-secular problem, *accelerated* rather than *truncated*. It does not claim ADC(2)
-itself is exact quantum chemistry.
-
-### The competitive landscape (why this is a real niche, not a clone)
-
-| | Dreuw / **adcc** | Cederbaum / **theADCcode** (`../ADC`) | **ADCgo** |
-|---|---|---|---|
-| Propagator | Polarization (neutral exc.) | **Ionization: IP / DIP / EA**, CVS | **DIP first, then SIP** |
-| Reaching big systems | **approximate** (RI, CVS, reduced-scaling) | small/medium, exact | **exact + GPU/multicore** |
-| Decay widths | ✗ | ✓ Fano / CAP / Stieltjes | later milestone |
-| SCF + integrals | delegated (pyscf/psi4) | delegated (GAMESS-UK/Molcas, libphis) | **delegated (FCIDUMP/pyscf)** |
-| Parallelism | C++ tensor lib | archaic ~single-thread BLAS | **cuBLAS GPU + threaded BLAS** |
-
-**Key insight:** adcc *deliberately omits* the entire IP/DIP-ADC and decay
-branch — that branch lives only in hard-to-build legacy code (`../ADC` needs
-conda gcc8 + libphis + a GAMESS-UK frontend) that does not exploit GPUs or many
-cores. Both mature codes already **delegate SCF and integrals**. So the value is
-not in re-deriving integrals — it is in a **fast, exact, GPU-capable ionization
-solver** that lets you push DIP/ICD physics to systems the legacy code stalls on.
-
-### Decisions locked in
-
-1. **Integrals/SCF: delegate via FCIDUMP** from pyscf
-   (`pyscf.tools.fcidump.from_scf`). ADCgo implements *only* ADC. Smallest lift,
-   fully portable, mirrors both reference codes.
-2. **First method: DIP-ADC(2)** (double ionization). Its 2h / **3h1p** satellite
-   space is far larger and more compute-heavy than SIP even at non-Dyson
-   ADC(3) — so it is the honest stress-test that justifies (and validates) the
-   GPU/multicore performance thesis from day one, and it feeds your existing
-   FA_DIP decay-channel analyzer directly.
-3. **Performance-first, not single-binary.** The old "one static binary" goal is
-   dropped: reaching larger systems needs cgo (OpenBLAS, cuBLAS). Keep a pure-Go
-   fallback behind a build tag for portability/CI, but the default build links a
-   threaded BLAS and optionally CUDA.
+The foundation (M0–M6, all done) delivers DIP-ADC(2), non-Dyson SIP-ADC(3), device-
+resident block-Lanczos across four backends, and a decay-channel classifier that emits
+stick spectra. **This document now describes the next arc**: turning ADCgo from a tool
+that says *where* decay goes into one that says *how fast* (Track W — ICD/ETMD decay
+widths and lifetimes) and *how accurately* (Track A — a modern ADC(4) exchange
+implementation). The two tracks are **parallel and independent**, deliberately kept
+alongside each other for generality.
 
 ---
 
-## Architecture
+## Completed foundation (M0–M6)
 
-Extend the existing `internal/` layout (do **not** fork a new repo). The current
-`model` types and golden parser tests become the **validation oracle**: ADCgo's
-states / pole strengths / two-hole populations must reproduce the parsed
-reference tables (the "v2" idea in `decay_analyzer_sketch.md` §3, §5).
+| # | Deliverable |
+|---|---|
+| **M0** | FCIDUMP reader + MO-integral store + **MP2 energy** matching pyscf |
+| **M1** | **DIP-ADC(2)** mat-vec + block-Lanczos → dication states + pole strengths + 2h populations |
+| **M2** | Per-irrep point-group symmetry blocking (union of per-irrep spectra == full spectrum) |
+| **M3** | Device-resident backends: **gonum / OpenBLAS / hipBLAS / cuBLAS** behind build tags |
+| **M4** | External DIP validation vs theADCcode on **matched integrals** |
+| **M5** | **SIP / non-Dyson IP-ADC(3)** (1h/2h1p), validated vs pyscf `ip_adc` |
+| **M6** | Decay-channel spectrum: classify (Auger/ICD/ETMD) + stick-spectrum JSON |
 
-```
-internal/
-├── model/        # EXISTING — reuse MO, State, SIPState, PopRow, Config …
-├── parse/        # EXISTING — reference oracle for validation
-├── classify/     # EXISTING — solver output feeds straight into this
-├── spectrum/     # EXISTING
-└── adc/          # NEW — the ADCgo engine
-    ├── fcidump/      # FCIDUMP reader → h_pq, (pq|rs), ε_p, nocc, symmetry
-    ├── integrals/    # MO-integral store: occ/vir-blocked, permutation-symmetric
-    │                 #   (design borrowed from ../ADC integral_table.hpp)
-    ├── mp/           # Møller–Plesset ground state: t2 amplitudes, MP2 energy
-    ├── isr/          # DIP config spaces (2h, 3h1p) + indexing; later 1h/2h1p (IP)
-    ├── matvec/       # σ = M·x contractions per order — backend-agnostic
-    ├── backend/      # linear-algebra backend interface + impls:
-    │                 #   gonum (pure-Go) | openblas (netlib cgo) |
-    │                 #   cuda (cuBLAS cgo, NVIDIA) | hip (hipBLAS cgo, AMD Instinct)
-    ├── lanczos/       # band/block Lanczos driver (spectrum + pole strengths)
-    └── analyze/      # eigenvectors → pole strengths, 2h-populations (Eqs 3/4/8)
-cmd/
-└── adcgo/        # NEW CLI: FCIDUMP + config → states JSON (same schema)
-```
+**Status (2026-07-08):** M0–M6 done.
 
-The **`backend` interface** is the load-bearing abstraction: `matvec` expresses
-the ADC mat-vec as a sequence of GEMM/contraction calls against an interface, and
-the same Lanczos driver runs unchanged on pure-Go Gonum, threaded OpenBLAS, or
-cuBLAS. This is what makes "CPU now, GPU later" a swap, not a rewrite.
+**M3** is done: the backend interface is handle-based (device-resident `Vector`/`DeviceMat`);
+the DIP/SIP mat-vec is an assembled block-sparse operator uploaded once and applied as
+resident GEMVs/batched GEMMs; Lanczos vectors stay on device across iterations. Gates:
+hipBLAS matches gonum to ~1e-11 and a full device Lanczos solve reproduces the pure-Go dense
+spectrum to <1e-7; OpenBLAS to ~1e-13; cuBLAS parity validated on the NVIDIA host.
 
-**Deliberate non-goals** (same scope discipline adcc/theADCcode enforce): no AO
-integral evaluation, no SCF, no AO→MO transform, no basis-set library. FCIDUMP is
-the single ingestion path; the `vfile`/`dfile` GAMESS-UK dumps stay unused.
+**M4** is done: cross-validation vs theADCcode's h2o DIP reference (`adcdip{1..4}.out`) on
+*matched* integrals (`scripts/gen_ref_fcidump.py`, gated on SCF = −76.0498071428 Ha; 29
+active-MO symmetries match the reference orbital-for-orbital). `internal/adc/refout` parses
+the reference; `internal/adc/validate` compares. On matched integrals ADCgo is bit-exact vs
+theADCcode (the earlier 0.04–3.2 eV gap was a `backend.AddSubDiagConst` bug, fixed
+2026-07-07, not the reference's inert "Order: 4+" self-energy).
 
-### Dependencies to add
+**M5** is done: non-Dyson IP-ADC(3) (`internal/adc/sip`, ported from `../ADC/ndadc3_ip`),
+reusing the M1–M3 engine. `-order 2|3` gates the 3rd-order main self-energy and 2nd-order
+coupling; spectroscopic factors via the ND-ADC F-matrix. Validated on matched integrals vs
+pyscf `ip_adc` (satellites/SF ~1e-5/5e-4; mains within ~0.03–0.16 eV nD-gap). Committed
+fixture `testdata/h2o_sip.adcgo.json` pinned to 1e-8.
 
-- `gonum.org/v1/gonum/mat`, `blas/blas64` — dense algebra + the subspace/Ritz
-  work; pure-Go fallback backend.
-- `gonum.org/v1/netlib` (cgo) → **OpenBLAS/MKL** — the multicore CPU backend.
-- **cuBLAS** via a thin cgo wrapper (or an existing Go CUDA binding) — the NVIDIA
-  GPU backend. Isolated behind the `backend` interface and a `cuda` build tag.
-- **hipBLAS** (ROCm) via an analogous cgo wrapper — the **AMD Instinct** GPU
-  backend, behind the same interface and a `hip` build tag. Because hipBLAS mirrors
-  the cuBLAS API (`hipblasDgemv`/`hipblasDaxpy` ↔ `cublasDgemv`/`cublasDaxpy`), the
-  two GPU backends share the real-GEMV/AXPY contraction surface; only the runtime,
-  memory-management, and library-linkage cgo shims differ.
+**M6** is done: the decay-channel interpretation layer absorbed into `internal/adc/spectrum`,
+consuming the in-memory `analyze` sectors directly (no text round-trip). `classify.go` routes
+each dicationic state's atom-resolved two-hole population onto Auger@A / ICD:A→B / ETMD(2) /
+ETMD(3); `build.go` flattens sectors into stick-spectrum JSON. `cmd/adcgo -spectrum` runs
+solve→classify→emit; the emitted JSON matches ADCanalysis's `plotspec` schema field-for-field
+(rendering stays in ADCanalysis).
+
+**Solver-parameter note (2026-07-08):** `-blocks N` == theADCcode's `iter N`; the Krylov
+subspace is `N × MainBlockSize()` (start block included). Pinned by
+`internal/adc/lanczos/blockcount_test.go`; default is 100 (the reference DIP runs' `iter`).
 
 ---
 
-## The ADC building blocks (DIP branch, concrete)
+## The next arc: two parallel tracks
 
-For **DIP-ADC** the target is the two-electron-removal secular problem
-`M X = ω X`, ω = double-ionization energies, pole strengths from the 2h part of
-X. Configuration spaces: **2h** (main) and **3h1p** (satellite — the large one).
+The gap M0–M6 leaves open for the ICD/ETMD field: ADCgo computes **energies, pole
+strengths, and channel classification** but no **rates**. Every serious ICD/ETMD study
+reports lifetimes τ = ℏ/Γ and branching ratios (partial Γ per channel). No open,
+GPU-accelerated, exact ionization-ADC code produces them.
 
-1. **FCIDUMP ingest** → `h_pq`, `(pq|rs)` in MO basis, `ε_p`, `nocc`/`nvir`,
-   `ORBSYM`. Store ERIs occ/vir-blocked and permutation-symmetric.
-2. **MP2 ground state** → `t2_{ijab}`, MP2 energy as the first correctness gate
-   (compare to pyscf to ~1e-8 Ha). Needed regardless of branch.
-3. **DIP-ADC(2) mat-vec** `σ = M·x` (never build M densely), as contractions
-   routed through `backend`:
-   - 2h/2h block: 1st/2nd-order terms in the two-hole space.
-   - 2h ↔ 3h1p coupling (1st order).
-   - 3h1p/3h1p diagonal (zeroth order = orbital-energy differences). This block
-     dominates dimension and cost — the reason DIP is the performance target.
-4. **Lanczos eigensolver**: band/block Lanczos to sweep the full DIP band; pole
-   strengths from the 2h weight of each Ritz vector. Mirrors `../ADC`'s
-   `libLanczos` / `adc2_dip`, but with the mat-vec on GPU/threaded BLAS.
-5. **Analysis**: two-hole population via the Tarantelli–Cederbaum U-transform +
-   overlap metric (`decay_analyzer_sketch.md` §3, Eqs 3/4/8). Emit the **same
-   JSON schema** the analyzer already consumes, so `classify`/`spectrum`/
-   `plotspec` work unchanged.
+### Reference map (where the physics lives in `../ADC`)
 
-SIP (IP-ADC(2) → nD-ADC(3), 1h/2h1p, `../ADC/ndadc3_ip`) is the same machinery on
-a smaller config space — a later milestone, validated against your `ndadc3ip`
-`ADC.out` files.
+- **Fano/Stieltjes (Track W primary):** `adc2_pol/master_fano_new.f90` (golden rule
+  `Γ_f = 2π|⟨Φ_i|Ĥ|χ_f⟩|²`); `adc2_pol/partgammas.f90` (`getf_HIJ_adc2/adc2e` — coupling
+  vector = (Ĥ−E_i)Φ_i over final configs); `adc2_pol/select_fano.f90` (subspace selection);
+  `adc2_pol/stieltjes_phi1.f` (Averbukh quad-precision Stieltjes imaging) + `tql2.f`.
+  *Improve on:* the `stieltjes_phi` calls in `fspace.f90` are commented out — the reference
+  stops at discrete (E,γ) pairs; our pipeline runs live and automated.
+- **CAP-ADC (Track W validator):** `subspaceCAP/cap_main.f90` `docap` — builds
+  `H = diag(E_ADC) − iη·W` in the *selected ADC-eigenvector window* and calls `ZGEEV` per η;
+  `CAP.f90` (`CAP_SINGLY`, IP) / `CAP_doubly.f90` (DIP + triplet) project the MO-CAP;
+  box-CAP AO integrals in `scf_data/r2capmat.f90` + `cap_Sajeev.f`. The complex solve is over
+  a small selected window — **no complex Lanczos needed**. *Improve on:* the reference reads
+  the resonance off the trajectory by eye — we automate it.
+- **ADC(4) exchange (Track A):** legacy **F77** `adc4core/adc4_constr/*.F` — `calcsi.F` (Σ
+  with Coulomb + exchange Fock parameters), `sec198_mp.F` (2nd + O(3) + O(4) Σ), `kopp1..4.F`
+  and `k1p3h/k2p2h/k3p1h.F` (4th-order coupling/satellite blocks). `adc4cvs_matrix.cpp` is
+  **only a C++ driver** that calls that F77 (`ndriver_core_`, `adc_`, `sec198_mp_`) — it holds
+  none of the exchange physics; CVS-ADC(4) = the same diagrams + a core-valence-separation
+  restriction. Literature: von Niessen/Schirmer/Cederbaum, Comp. Phys. Rep. 1 (1984) 57.
+
+### Reusable ADCgo infrastructure
+
+- **Channel taxonomy & site routing** — `internal/adc/spectrum/classify.go`
+  (`Site`/`Regroup`/`Classify`/`Discount`): Track W attaches Γ per channel using this unchanged.
+- **Localized-population engine** — `internal/adc/analyze/populations.go` (Tarantelli U/O).
+- **Block-Krylov + GPU matvec** — `internal/adc/lanczos`, `internal/adc/{dip,sip}/matvec.go`.
+- **MO/overlap sidecar** — `internal/adc/mo/mo.go`, `scripts/gen_fcidump.py` (extended in W5).
+- **Config enumeration** — `internal/adc/dip/config.go`, `internal/adc/sip` (P/Q partition, CVS).
+
+### Net-new to build
+
+Complex128 dense algebra + a small non-Hermitian eigensolver (ZGEEV-equivalent, selected
+window only); a Stieltjes-imaging engine; a Feshbach P/Q partition + decaying-state selector;
+box-CAP MO integrals in the sidecar (delegated from pyscf); width observables in the JSON
+schema; the 4th-order exchange blocks for SIP and DIP (+ a CVS filter).
 
 ---
 
-## Milestones & honest lift estimate
+## Track W — Decay widths (Fano-Stieltjes primary, CAP validator; SIP + DIP)
 
-Solo, part-time, integrals delegated. Large but bounded; delegation is what
-keeps it bounded, and the `backend` interface is what keeps the GPU work from
-being a second project.
+**W1 — Feshbach–Fano partition & decaying-state selection (generic over SIP & DIP).**
+P (bound/decaying) / Q (continuum) partition over a config space, generic across `dip.Space`
+and the SIP space. Select |Φ_d⟩ — the inner-valence 1h (SIP) or 2h (DIP) main configuration —
+via a bound-subspace-projected diagonalization (reuse `MainBlockSize` + Lanczos on the
+P-block). New `internal/adc/fano`. Mirror `adc2_pol/select_fano.f90`. *Verify:* bound-projected
+energy reproduces the inner-valence main line; |Φ_d⟩ has the expected hole character; dense
+oracle; both spaces.
 
-| # | Deliverable | Rough lift |
-|---|---|---|
-| **M0** | FCIDUMP reader + MO-integral store + **MP2 energy** matching pyscf | 1–2 wks — correctness foundation |
-| **M1** | **DIP-ADC(2)** mat-vec + Lanczos on the **pure-Go/threaded-BLAS** backend → dication states + pole strengths + 2h populations; validate vs `../ADC` h2o DIP & your FA_DIP | 6–10 wks — the real solver core |
-| **M2** | **OpenBLAS backend + goroutine-parallel contractions**; scaling benchmark vs theADCcode on a mid-size DIP case | 2–4 wks |
-| **M3** | **GPU backend** for the mat-vec (**cuBLAS** on NVIDIA *and* **hipBLAS** on AMD Instinct); large-DIP case theADCcode can't reach in reasonable time | 4–8 wks — the headline win |
-| **M4** | Wire eigenvectors → 2h populations → existing `classify` → JSON → `plotspec` end-to-end | 2–4 wks |
-| **M5** | **SIP / nD-ADC(3)** (IP branch) reusing the engine | 3–6 wks |
-| **M6** | Decay widths: Stieltjes imaging, then CAP/Fano | open-ended — eventual physics differentiator |
+**W2 — Per-channel continuum-coupling spectrum (on the GPU engine).**
+Compute {E_j, γ_j = 2π|⟨Φ_d|Ĥ−E_d|Ψ_j⟩|²} over the Q-space pseudo-continuum eigenstates
+(2h1p for SIP-ICD; 3h1p for DIP) — the projection of (Ĥ−E_d)Φ_d onto the Q-eigenbasis,
+reusing the existing matvec + block-Lanczos band sweep. Split the coupling per decay channel
+with the existing `spectrum` Site/Regroup/Classify routing. Mirror `adc2_pol/partgammas.f90`.
+*Verify:* sum rule Σγ_j = 2π‖Q(Ĥ−E_d)Φ_d‖²; dense vs Lanczos; per-irrep union; both spaces.
 
-Building integrals + SCF in Go instead of delegating would add ~3–5× to M0 for
-near-zero differentiation — rejected.
+**W3 — Stieltjes imaging engine.**
+Port `adc2_pol/stieltjes_phi1.f`: spectral moments S₋ₖ = Σ γ_j E_j⁻ᵏ → orthogonal-polynomial
+3-term recurrence → tridiagonal → eigen (Gauss nodes/weights) → cumulative γ(E) → numerical
+derivative → Γ at E_d, with order-convergence. `math/big.Float` for the moment recurrence,
+float64 for the small tridiagonal eig. New `internal/adc/stieltjes`, wired live + automated.
+*Verify:* analytic Lorentzian-coupling model with known Γ; order-convergence curve; a published
+ICD Γ (Ne dimer literature).
 
-**Status (2026-07-07):** M0, M1 done. The realized track then took **per-irrep
-point-group symmetry blocking** as M2 (the union of per-irrep spectra reproduces
-the full spectrum to <1e-8); the OpenBLAS/multicore work above was folded into
-M3 as a build-tag over the Gonum backend rather than a separate milestone. **M3
-is done**: the backend interface is now handle-based (device-resident
-`Vector`/`DeviceMat`), the DIP mat-vec is an assembled block-sparse operator
-uploaded once and applied as resident GEMVs, and the Lanczos vectors stay on the
-device across iterations. Backends behind build tags (default pure-Go): multicore
-**gonum+OpenBLAS** (`openblas`), **hipBLAS** (`hip`, built and validated on a
-Radeon 890M / gfx1150), and **cuBLAS** (`cuda`, compiled against CUDA 13.x here,
-run on NVIDIA hardware). Gates: hipBLAS ops match gonum to ~1e-11 and a full
-device Lanczos solve reproduces the pure-Go dense spectrum to <1e-7; OpenBLAS
-matches to ~1e-13. cuBLAS parity is validated on the NVIDIA host.
+**W4 — Widths / lifetimes / branching ratios → JSON (tied to classify).**
+Per-channel Stieltjes → partial Γ_channel; Γ_total = Σ; τ = ℏ/Γ (0.6582 fs·eV / Γ[eV]);
+branching = Γ_channel/Γ_total. Extend `analyze.State` and `spectrum.Line`/`Meta` with
+`width_ev`, `lifetime_fs`, and per-channel partial widths. New `cmd/adcgo -widths` flow.
+*Verify:* Σ partial = total; channel labels match classify; committed fixture + regeneration
+guard + schema test.
 
-**M4 is done**: external cross-validation against theADCcode's h2o DIP reference
-(`adcdip{1..4}.out`) on *matched* integrals. `scripts/gen_ref_fcidump.py`
-reproduces the reference's DZP+diffuse basis + geometry + frozen-core "2 to 30"
-active space (gated on SCF = −76.0498071428 Ha; the 29 active-MO symmetries match
-the reference orbital-for-orbital). `internal/adc/refout` parses the reference and
-`internal/adc/validate` compares a committed ADCgo fixture to it: **every strong
-line matches in irrep and leading two-hole configuration, pole strengths within
-~3%, the ¹A₁ ground state to 0.15 eV, O/H populations to table rounding**. ADCgo
-(strict ADC(2)) sits 0.04–3.2 eV *above* the reference, whose run used a
-higher-order ("Order: 4+") static self-energy — a documented method difference,
-not an error; a strict-ADC(2) reference would need re-running theADCcode at order
-2.
+**W5 — Complex backend + subspace CAP-ADC + automated η-trajectory (independent validator).**
+Minimal complex128 in `backend`: a complex dense Mat + a non-Hermitian eigensolver over the
+*selected* window only (ZGEEV via netlib/OpenBLAS cgo, or a Go complex-QR — no complex
+Lanczos). Extend the MO sidecar + `gen_fcidump.py` with a delegated box-CAP MO matrix W_pq
+(pyscf grid box-CAP, occupied MOs zeroed, per `cap_Sajeev.f`/`r2capmat.f90`). Project W into
+the selected window (port `CAP_SINGLY`/`CAP_doubly`). Sweep H = diag(E) − iηW → ZGEEV →
+trajectory; extract the resonance automatically via min|η·dE/dη| (Riß–Meyer optimal η).
+Mirror `subspaceCAP/cap_main.f90`. *Verify:* reproduce `subspaceCAP` on a matched case; dense
+complex oracle; **Γ_CAP agrees with Γ_Fano-Stieltjes within method spread**; cross-backend parity.
 
-**M5 is done**: the **single-ionization** branch — a **non-Dyson IP-ADC(3)**
-solver (1h main / 2h1p satellite), ported from `../ADC/ndadc3_ip` (Breidbach, JCP
-109 (1998) 4734) into `internal/adc/sip`, reusing the M1–M3 engine unchanged
-(backend / integrals / mp / lanczos, the assembled block-sparse operator: dense
-1h/1h main + 1h↔2h1p coupling + symmetric 2h1p/2h1p satellite). `-order 2|3`
-gates the 3rd-order main self-energy (`calc_c11_3`) and 2nd-order coupling
-(`calc_c12_2`); order 2 is the reference's *extended* ADC(2) (1st-order satellite
-kept). Spectroscopic factors use the ND-ADC F-matrix (`FMatrix`, F = 1 + F⁽²⁾ +
-F⁽³⁾). Gates: `ApplyFull == BuildMatrix`, matrix symmetric, per-irrep union ==
-symmetry-off spectrum <1e-8 (both orders). **Validated on matched integrals vs
-pyscf `ip_adc`** (pyscf computes IP-ADC natively, unlike DIP): 2h1p satellite
-roots and spectroscopic factors to ~1e-5 / ~5e-3; strong 1h main lines within a
-one-sided ~0.03–0.16 eV self-energy-formulation band vs pyscf's ISR IP-ADC.
-Committed fixture `testdata/h2o_sip.adcgo.json` pinned to the in-process solver to
-1e-8. Definitive reproduction of theADCcode's own `ndadc3ip` main lines (matched
-DZP integrals + a SIP `ADC.out` parser) is the remaining follow-on.
+---
 
-**M6 is done** (the polish round, JSON-sticks scope): the decay-channel
-interpretation layer — ADCanalysis's `classify` + `spectrum` — is absorbed into
-`internal/adc/spectrum`, consuming the in-memory `analyze` sectors directly (no
-text round-trip). `classify.go` routes each dicationic state's atom-resolved
-two-hole population onto Auger@A / ICD:A→B / ETMD(2) / ETMD(3) channels relative
-to a chosen initial site (with site regrouping + passive-column discounting);
-`build.go` flattens the solved DIP sectors into the stick-spectrum JSON
-(`BuildDIP`) and the SIP sectors per orbital (`BuildSIP`). `cmd/adcgo -spectrum`
-runs solve→classify→emit in one call; sites come from `-group NAME=col1,~col2`
-(repeatable; a bare `-group` opens an interactive dialogue via the
-`IsBoolFlag`/`promptGrouping` idiom) and `-init-atom`. The emitted JSON matches
-ADCanalysis's schema field-for-field — **rendering stays in ADCanalysis's
-`plotspec`** (verified: it renders the ADCgo fixture directly, 5 channels / 414
-sticks), so no `gonum/plot` dependency and no EES/panel port here. Gates: the
-ported `classify` unit tests; a committed stick-spectrum fixture
-(`testdata/h2o_dzp.spec.json`) pinned to the in-process solve→classify to 1e-8; a
-JSON key-contract test.
+## Track A — Modern ADC(4) exchange terms (SIP + DIP, CVS as a restriction)
 
-Remaining (deferred, user-run or later): cuBLAS full-scale run on the NVIDIA box;
-optional M3b batched-GEMV perf on Instinct; the definitive theADCcode `ndadc3ip`
-`ADC.out` SIP main-line reproduction (M5 follow-on); plotspec/EES rendering, the
-EA branch, and Fano/CAP decay widths remain shelved.
+**A1 — ADC(4) exchange-diagram spec (derivation / de-risk; no code).**
+Extract the exact 4th-order exchange diagrams from the F77 (`calcsi.F`, `sec198_mp.F`,
+`kopp*.F`, `k*p*h.F`) and the literature (von Niessen/Schirmer/Cederbaum 1984;
+Schirmer/Trofimov), in the ADCgo block-matrix idiom (like `dip/singlet.go` / `sip/elements.go`)
+with coefficient tables. A markdown spec in the repo. *Verify:* peer vs literature; a
+hand-checked term vs the F77 numeric output.
+
+**A2 — SIP-ADC(4): 4th-order self-energy + coupling + satellite exchange blocks.**
+In `internal/adc/sip`, gated by `-order 4`: the O(4) static self-energy (extends `calc_c11_*`),
+the 4th-order 1h↔2h1p coupling, and the 2h1p/2h1p exchange terms (`kopp*`/`k2p2h`), as new
+order-gated blocks in the assembled operator (GPU matvec unchanged). *Verify:* `ApplyFull ==
+BuildMatrix`; symmetric; per-irrep union; **matched-integral vs theADCcode ADC(4)**.
+
+**A3 — DIP-ADC(4) exchange terms.**
+The same 4th-order exchange blocks for the DIP 2h/3h1p problem in `internal/adc/dip`, gated by
+`-order 4`. *Verify:* matched integrals vs reference; symmetry; per-irrep union; dense oracle.
+
+**A4 — CVS-ADC(4) restriction (core-level; feeds Track W).**
+A core-valence-separation projector as a config-space filter on the ADC(4) spaces (drop configs
+lacking a core hole), reproducing `adc4cvs_matrix`'s CVS behaviour. Yields core-ionized ADC(4)
+states — the Auger/ICD *initial* states — so W1 can select its decaying state from a CVS-ADC(4)
+solve. *Verify:* vs `adc4cvs_matrix` on a matched core case; the CVS spectrum is a clean
+sub-block of the full ADC(4) spectrum.
 
 ---
 
 ## Verification (how each milestone is proven)
 
-- **M0**: MP2 energy vs `pyscf.mp.MP2` on H₂O/dzp (same FCIDUMP) to ~1e-8 Ha.
-- **M1**: DIP energies + pole strengths vs (a) `pyscf.adc` DIP-ADC(2) where
-  available and (b) the `../ADC` H₂O DIP reference and your parsed `FA_DIP.json`.
-  Reuse the **existing golden parser tests** (`internal/parse/dipfile_test.go`)
-  as the oracle: parse the reference, assert ADCgo reproduces states (energies
-  ~1e-3 eV — tables are rounded; pole strengths ~1e-2).
-- **M2/M3**: correctness identical across backends (pure-Go == OpenBLAS ==
-  cuBLAS == hipBLAS within tolerance) is the primary test; wall-clock + core/GPU
-  scaling curves vs theADCcode are the differentiation evidence. For M3 both GPU
-  vendors (NVIDIA cuBLAS, AMD Instinct hipBLAS) must reproduce the pure-Go
-  reference spectrum.
-- **M4**: recomputed two-hole populations must reproduce the parsed `PopRow`
-  tables for H₂O (`decay_analyzer_sketch.md` §3 oracle).
-- **End-to-end**: `pyscf → FCIDUMP → adcgo → JSON → plotspec` reproduces
-  `FADIP.pdf` from a first-principles run rather than a parsed one.
+The four testing pillars proven in M0–M6 are load-bearing and every new milestone keeps them:
 
-Every step is runnable and self-checking against artifacts already in the repo.
+1. **Matched integrals** — run ADCgo on theADCcode's *own* exported integrals
+   (`testdata/reference/*.matched.fcidump` via `../ADC/fcidump_export`) so any residual is
+   pure ADC-method difference. For Track A, export ADC(4) reference matrices via
+   `../ADC/matrix_dump`; for Track W, a matched CAP/Fano reference Γ.
+2. **Dense/exact oracle** — an in-process exact path the iterative/approximate path is checked
+   against (`SolveDense`; a dense complex eigensolver for CAP; the analytic Lorentzian for
+   Stieltjes). The dense `SymEig` path is the DIP/SIP correctness oracle.
+3. **Committed fixture + regeneration guard** — commit a JSON fixture *and* a test that
+   re-solves in-process and asserts reproduction to ~1e-8, so contracts can't drift (pattern of
+   `validate_spec_test.go`, `validate_sip_test.go`, `TestFixtureMatchesSolver`).
+4. **Cross-backend parity** — every accelerated/complex backend reproduces pure-Go Gonum to
+   tight tolerance (`gpu_parity_test.go`, `backend/symeig_test.go`;
+   `TestSymEigMatchesGonum` handles degenerate-eigenvector sign/basis ambiguity).
+
+Plus per-irrep/per-spin union tests, the `refout` parser as an independent oracle, and (from
+M0) MP2 vs `pyscf.mp.MP2` to ~1e-8 Ha as the integral-ingestion contract.
+
+**Physics gates / differentiation demo for the new arc:**
+- Ne₂ **ICD lifetime** reproduced vs the literature (both Fano-Stieltjes and CAP), with
+  branching ratios.
+- A larger rare-gas / hydrogen-bonded cluster the legacy code can't reach in reasonable time —
+  full ICD/ETMD widths + branching — timed GPU vs CPU.
+- ADC(4) matched-integral eigenvalues vs theADCcode ADC(4) (SIP, DIP, CVS) to print precision.
+- End-to-end: `pyscf → FCIDUMP + sidecars → adcgo (-order 4 / -widths) → JSON` yields
+  lifetimes and branching ratios from a first-principles run.
+
+Building integrals + SCF in Go instead of delegating would add ~3–5× for near-zero
+differentiation — rejected. FCIDUMP + sidecars remain the single ingestion path.
 
 ---
 
 ## Risks / open questions
 
-1. **Backend abstraction must come first.** If M1 hard-codes Gonum calls, the
-   GPU port becomes a rewrite. Design `matvec` against the `backend` interface
-   from the start, even while only the pure-Go impl exists.
-2. **GPU mat-vec formulation** — decide sparse-SpMV vs batched-GEMM contraction.
-   The contraction form (integrals × vector as batched GEMM) maps cleanly to
-   both cuBLAS and hipBLAS and avoids materializing M; recommend that. Host↔device
-   transfer per Lanczos iteration is the likely bottleneck — keep vectors resident
-   on device. Target NVIDIA (cuBLAS) and AMD Instinct (hipBLAS/ROCm) from the same
-   GEMV/AXPY contraction surface; the two differ only in the cgo shim.
-3. **3h1p dimension / memory** — the DIP satellite space is what makes this hard;
-   validate the mat-vec on tiny H₂O first, then watch memory as the case grows.
-4. **Lanczos spurious/ghost roots** — band-Lanczos produces spurious eigenvalues;
-   need the standard purge/convergence tests. `../ADC` already handles this
-   (spurious roots dropped) — a porting reference, and the parser already copes
-   with index gaps.
-5. **cgo + reproducibility** — threaded BLAS and GPU can perturb reproducibility
-   (summation order); keep the deterministic pure-Go backend as the reference in
-   CI and assert cross-backend agreement to a set tolerance.
-6. **Sign/normalization & spin conventions** — singlet/triplet phases (Eq. 2a)
-   and pole-strength normalization must match the reference tables; golden tests
-   catch drift.
-
----
-
-## Immediate first step (M0 spike)
-
-`pyscf.tools.fcidump.from_scf(mf, 'h2o.fcidump')` on the existing H₂O/dzp
-example, then implement `internal/adc/fcidump` + `internal/adc/mp` and a
-throwaway `cmd/adcgo` that prints the MP2 energy. If that matches pyscf, the
-integral-ingestion contract is proven and the DIP-ADC(2) core (M1) can start —
-written against the `backend` interface from line one.
+1. **Complex-algebra scope.** Keep the complex path confined to the small *selected*
+   ADC-eigenvector window (CAP) — no complex Lanczos. If a full complex diagonalization is ever
+   needed it is a separate project.
+2. **Stieltjes conditioning.** The moment recurrence is ill-conditioned (the reference uses
+   real*16); use `math/big.Float` for it and validate order-convergence against the analytic
+   model before trusting any Γ.
+3. **CAP delegated integrals.** The box-CAP MO matrix must come from pyscf via the sidecar
+   (geometry + AO basis are not in FCIDUMP); occupied MOs zeroed, per the reference.
+4. **ADC(4) transcription risk.** The F77 exchange diagrams are opaque; A1 (a written spec,
+   no code) de-risks the port, and matched-integral bit-exactness vs theADCcode is the gate.
+5. **cgo + reproducibility.** Keep the deterministic pure-Go backend as the CI reference and
+   assert cross-backend agreement to a set tolerance (including the new complex ops).
+6. **Sign/normalization & spin conventions.** Golden/matched tests catch drift, as in M4/M5.
