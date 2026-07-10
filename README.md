@@ -225,8 +225,3 @@ The committed ADCgo output fixtures are regenerated with the corresponding `-out
 do **not** regenerate the FCIDUMPs to add a sidecar key (it moves ~110 near-zero
 integrals by ~1e-13 and breaks the bit-exact gates — use the scripts' `--sidecar-only`
 path instead).
-
-## Design
-
-See [`ADCgo_plan.md`](ADCgo_plan.md) for milestones and the full design, and
-[`docs/adc4_rassi_plan.md`](docs/adc4_rassi_plan.md) for the transition-moment chain.
