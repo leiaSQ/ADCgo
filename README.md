@@ -1,122 +1,190 @@
 # ADCgo
 
-An exact, hardware-accelerated ADC(n) **ionization** solver in Go.
+An exact, hardware-accelerated **ADC(n) ionization** solver in Go.
 
-ADCgo computes the algebraic-diagrammatic-construction (ADC) secular problem for
-electron removal exactly* — no reduced-scaling truncations — and reaches larger 
-systems by acceleration (multicore OpenBLAS, GPU Lanczos via **hipBLAS** on AMD 
-and **cuBLAS** on NVIDIA) rather than approximation. SCF + molecular integrals 
-are delegated: ADCgo ingests a standard **FCIDUMP** (e.g. from pyscf).
+ADCgo builds and diagonalizes the algebraic-diagrammatic-construction secular problem
+for electron removal *exactly* — no reduced-scaling truncations — and reaches larger
+systems through acceleration (multicore OpenBLAS, GPU block-Lanczos via **hipBLAS** on
+AMD and **cuBLAS** on NVIDIA) rather than approximation. SCF and molecular integrals are
+delegated: ADCgo ingests a standard **FCIDUMP** (e.g. from pyscf) plus an optional MO
+sidecar for the properties that FCIDUMP does not carry (populations, dipoles).
 
-See [`ADCgo_plan.md`](ADCgo_plan.md) for the full design and milestones.
+Everything is one CLI, `cmd/adcgo`. The method is chosen by flags; output is JSON on
+stdout (or `-out FILE`).
 
-M3 backends (build-tag gated; default is pure-Go):
+## What it computes
 
-- **gonum** (default) — pure-Go reference; with `-tags openblas` its BLAS/LAPACK
-  engine is swapped for multicore OpenBLAS (same code path).
-- **hip** (`-tags hip`) — hipBLAS/ROCm; built and validated here on a Radeon 890M
-  (gfx1150), deployment target AMD Instinct.
-- **cuda** (`-tags cuda`) — cuBLAS; a structural twin of the hip shim, compiled
-  against CUDA 13.x here and run on NVIDIA hardware.
+| Capability | Method | Flags |
+|---|---|---|
+| Double ionization | DIP-ADC(2) | `-dip` |
+| Single ionization | non-Dyson IP-ADC(2) / IP-ADC(3) | `-sip -order 2\|3` |
+| Core single ionization | CVS Dyson IP-ADC(4) | `-sip -order 4 -core` |
+| Auger / ICD / ETMD spectrum | decay-channel classification | `-spectrum` |
+| Transition dipoles | RASSI-like ion→ion emission, Dyson photoionization, core→valence X-ray emission | `-tdm` |
 
-The pipeline is:
-
-1. `scripts/gen_fcidump.py` runs RHF + MP2 on H₂O/cc-pVDZ with **pyscf** in C₂ᵥ
-   symmetry, writing `testdata/h2o.fcidump` (with 1-based GAMESS-UK `ORBSYM`), the
-   golden `testdata/h2o.ref.json`, and the C/S sidecar `testdata/h2o.mo.json`
-   (MO coefficients + AO overlap + AO→atom map).
-2. `internal/adc/fcidump`, `mp` — integral ingestion + MP2 (M0).
-3. `internal/adc/backend` — the handle-based linear-algebra interface (resident
-   `Vector`/`DeviceMat`) plus the gonum, OpenBLAS, hipBLAS, and cuBLAS backends.
-4. `internal/adc/integrals` — occ/vir-blocked, **per-virtual-symmetry** V/A/B
-   integral accessors.
-5. `internal/adc/dip` — DIP configuration spaces, the singlet/triplet building
-   blocks (ported from `../ADC/adc2_dip`, Tarantelli Chem. Phys. 329 (2005) 11),
-   the matrix-free mat-vec, and a dense `BuildMatrix` for validation.
-   `internal/adc/sip` — the SIP (IP-ADC(n)) analogue: 1h/2h1p spaces + block
-   elements ported from `../ADC/ndadc3_ip`, plus the F-matrix (spectroscopic
-   amplitudes), reusing the same assembled-operator / Lanczos path.
-6. `internal/adc/lanczos` — block-Lanczos band solver + a dense reference path.
-7. `internal/adc/analyze` — pole strengths, leading 2h configs, spurious-root
-   purge, and atom-resolved 2h populations (Tarantelli U-transform).
-8. `internal/adc/spectrum` — the decay-channel layer (M6): routes each state's
-   two-hole population onto Auger/ICD/ETMD channels (`classify`) and flattens the
-   solved sectors into the stick-spectrum JSON (`BuildDIP`/`BuildSIP`), consuming
-   the in-memory `analyze` sectors directly — no text round-trip. Emits the same
-   schema ADCanalysis's `plotspec` renders.
-9. `internal/adc/refout` + `internal/adc/validate` — parse theADCcode's
-   `adcdip*.out` and cross-validate ADCgo against it on matched integrals (M4).
-
-### Regenerate the reference (needs the `adcgo` conda env with pyscf)
+## Quick start
 
 ```sh
-/home/leia/miniconda3/envs/adcgo/bin/python scripts/gen_fcidump.py
-```
+# 0. Generate integrals: RHF+MP2 on H2O/cc-pVDZ, C2v (needs pyscf; see below).
+#    Writes testdata/h2o.fcidump and the sidecar testdata/h2o.mo.json.
+python scripts/gen_fcidump.py
 
-### Run
-
-```sh
-# M0 sanity: reconstructed HF + MP2 energies
+# 1. Sanity: reconstructed HF + MP2 energies from the FCIDUMP.
 go run ./cmd/adcgo -fcidump testdata/h2o.fcidump
 
-# DIP-ADC(2): dication states as JSON (energies, pole strengths, leading 2h
-# configs, and — with the sidecar — atom-resolved two-hole populations),
-# one sector per point-group irrep (-sym all | none | <0-based index>)
+# 2. Single ionization, IP-ADC(3), one sector per irrep.
+go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 3 -sym all
+```
+
+## Methods
+
+### Double ionization — DIP-ADC(2)
+
+Dication states: energies, pole strengths, leading two-hole configurations, and — with
+the `-mo` sidecar — atom-resolved two-hole populations (Tarantelli U-transform). One
+sector per point-group irrep and spin.
+
+```sh
 go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -dip \
     -mo testdata/h2o.mo.json -solver lanczos -spin both -sym all
+```
 
-# SIP: single-ionization (cation) states as JSON — ionization energies,
-# spectroscopic factors, per-orbital one-hole overlaps. -order 2|3 (non-Dyson
-# IP-ADC; order 2 is the reference's extended ADC(2)).
+### Single ionization — IP-ADC(2) / IP-ADC(3)
+
+Cation (doublet) states: ionization energies, spectroscopic factors, per-orbital
+one-hole overlaps. `-order 2` is the reference's extended ADC(2); `-order 3` is the
+non-Dyson IP-ADC(3) (1h main / 2h1p satellite).
+
+```sh
 go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 3 -sym all
+```
 
-# Decay-channel stick spectrum (M6): solve + classify in one run. DIP needs -mo
-# (channels need atom-resolved populations). -init-atom picks the core-ionized
-# site; -group NAME=col1,~col2 defines composite/passive sites; a bare -group
-# opens an interactive dialogue. The JSON feeds ADCanalysis's plotspec unchanged.
+### Core ionization — CVS Dyson IP-ADC(4)
+
+`-order 4` is core-valence-separated Dyson ADC(4); it requires `-core` naming the
+occupied core orbital(s) (0-based). Only the core orbital's irrep has a main block, so
+pin it with `-sym`.
+
+```sh
+# O 1s of water (orbital 0, a1 sector)
+go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 4 -core 0 -sym 0
+```
+
+The bare core diagonal is Koopmans-level; use the solver as-is for relative core-state
+structure, not absolute core binding energies.
+
+### Decay-channel spectrum — Auger / ICD / ETMD
+
+Solve and classify in one pass, emitting a stick-spectrum JSON (the schema ADCanalysis's
+`plotspec` renders). DIP needs `-mo` (channels are built from atom-resolved populations).
+`-init-atom` picks the core-ionized site; `-group NAME=col,~col` defines composite or
+passive sites (a bare `-group` opens an interactive prompt).
+
+```sh
 go run ./cmd/adcgo -fcidump testdata/h2o_dzp.fcidump -dip -mo testdata/h2o_dzp.mo.json \
     -solver dense -sym all -spectrum -init-atom O
-# passive-hydrogen water site: only Auger@wat survives, O holes credited in full
+
+# treat both H as a passive "water" site: only Auger@wat survives
 go run ./cmd/adcgo -fcidump testdata/h2o_dzp.fcidump -dip -mo testdata/h2o_dzp.mo.json \
     -solver dense -sym all -spectrum -group "wat=O,~H1,~H2" -init-atom wat
+```
 
-# Accelerated backends (build-tag gated; -backend selects at runtime).
+### Transition dipole moments — `-tdm` (`-rassi`)
+
+RASSI-like transition properties along the ICD decay chain, from a single-ionization run.
+Requires `-sip` and a `-mo` sidecar carrying dipole integrals. Emits three sections:
+
+- **`emissions`** — ion→ion radiative transitions within a sector (μ, oscillator
+  strength *f*, Einstein *A* in s⁻¹). Within one sector only the totally-symmetric dipole
+  component connects states.
+- **`photoionization`** — each cation state's Dyson orbital contracted with the dipole
+  integrals into an L² photoionization pseudo-spectrum μ(ε_a), one channel per virtual
+  orbital (the ejected-electron proxy). Discrete strengths; a smooth σ_ion(ω) needs
+  Stieltjes imaging (future work).
+- **`cross_emissions`** — for `-order 4`, core→valence X-ray emission between the CVS core
+  sector and companion plain-ADC(3) valence sectors. Each row reports the state overlap
+  `overlap`, which is 0 (and the moment gauge-independent) across different irreps.
+
+```sh
+# ion->ion emission + per-state Dyson photoionization
+go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 3 \
+    -mo testdata/h2o.mo.json -solver dense -tdm
+
+# CVS run: adds core->valence X-ray emission (O 1s -> outer valence ~522 eV for H2O)
+go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 4 -core 0 -sym 0 \
+    -mo testdata/h2o.mo.json -solver dense -tdm
+```
+
+## Flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-fcidump PATH` | — | FCIDUMP with MO integrals (required) |
+| `-dip` | off | solve DIP-ADC(2) |
+| `-sip` | off | solve IP-ADC(n) |
+| `-order N` | 3 | SIP order: 2, 3, or 4 (4 = CVS Dyson ADC(4), needs `-core`) |
+| `-core LIST` | — | CVS core orbitals for `-order 4`: comma-separated 0-based occupied indices |
+| `-sym SEL` | all | target irrep: `all` \| `none` \| 0-based index |
+| `-spin SEL` | both | DIP spin sector: `both` \| `singlet` \| `triplet` |
+| `-mo PATH` | — | MO/overlap/dipole sidecar (needed by populations, `-spectrum -dip`, `-tdm`) |
+| `-solver S` | lanczos | `lanczos` (band) or `dense` (full diagonalization) |
+| `-blocks N` | 100 | block-Lanczos iterations; Krylov dim = N × 2h-space size |
+| `-backend B` | gonum | `gonum` \| `hip` \| `cuda` \| `auto` (build-tag gated) |
+| `-ps-thresh P` | 1.0 | drop states with pole strength below P percent |
+| `-coeff-thresh C` | 0.1 | drop leading components with \|coeff\| below C |
+| `-spectrum` | off | emit the decay-channel stick spectrum |
+| `-init-atom A` | O | initial core-ionized site (spectrum) |
+| `-group SPEC` | — | decay-site grouping `NAME=col,~col` (repeatable; bare = interactive) |
+| `-min-weight` / `-min-fraction` / `-include-zero` | 0 / 0 / off | channel thresholds (spectrum) |
+| `-st-ratio R` | 3.0 | singlet:triplet ratio recorded in spectrum meta |
+| `-tdm` (`-rassi`) | off | emit transition dipole moments (needs `-sip -mo`) |
+| `-tdm-osc-thresh T` | 1e-6 | drop photoionization channels below oscillator strength T |
+| `-out PATH` | stdout | write JSON here |
+| `-profile` | off | per-sector solver phase timings to stderr |
+
+## Backends
+
+Default is pure-Go (`gonum`); the accelerated backends are build-tag gated and selected
+at runtime with `-backend`.
+
+```sh
 go run -tags openblas ./cmd/adcgo -fcidump testdata/h2o.fcidump -dip -sym all   # multicore CPU
 HSA_OVERRIDE_GFX_VERSION=11.0.0 \
   go run -tags hip ./cmd/adcgo -fcidump testdata/h2o.fcidump -dip -backend hip -sym 0 -spin singlet
 go build -tags cuda ./...   # cuBLAS: compiles here, run on an NVIDIA host
+```
 
+With `-backend auto` the solver calibrates each available backend once and picks the
+predicted-fastest per sector (measuring the real mat-vec cost, not a flop estimate).
+
+## Tests
+
+```sh
 go test ./...          # full validation (slow gates included)
 go test -short ./...   # fast subset
 HSA_OVERRIDE_GFX_VERSION=11.0.0 go test -tags hip ./...   # + GPU cross-backend gates
 ```
 
-### Regenerate the M4 reference (matched DZP+diffuse integrals + fixture)
+Validation is layered: MP2 energy reconstruction (M0); DIP cross-checked against
+theADCcode's `adcdip*.out` on matched DZP+diffuse integrals (M4); SIP against pyscf's
+`ip_adc` on the same integrals (M5); the CVS ADC(4) blocks bit-exact against theADCcode's
+B2 tape; and the transition-dipole machinery against hermetic Slater–Condon determinant
+oracles.
+
+## Regenerating fixtures (needs pyscf)
 
 ```sh
-# 1. matched FCIDUMP + sidecar (asserts SCF == -76.0498071428 Ha)
-/home/leia/miniconda3/envs/adcgo/bin/python scripts/gen_ref_fcidump.py
-# 2. committed ADCgo fixture the validation test compares to adcdip*.out
-go run ./cmd/adcgo -fcidump testdata/h2o_dzp.fcidump -dip -mo testdata/h2o_dzp.mo.json \
-    -solver dense -spin both -sym all -out testdata/h2o_dzp.adcgo.json
+python scripts/gen_fcidump.py       # h2o.fcidump + h2o.mo.json + h2o.ref.json
+python scripts/gen_ref_fcidump.py   # matched DZP+diffuse integrals for the M4 DIP gate
+python scripts/gen_sip_ref.py       # pyscf IP-ADC + Dyson reference (M5)
 ```
 
-### Regenerate the M5 SIP reference (pyscf oracle + fixture)
+The committed ADCgo output fixtures are regenerated with the corresponding `-out` runs;
+do **not** regenerate the FCIDUMPs to add a sidecar key (it moves ~110 near-zero
+integrals by ~1e-13 and breaks the bit-exact gates — use the scripts' `--sidecar-only`
+path instead).
 
-```sh
-# pyscf IP-ADC(2)/(3) energies + spectroscopic factors on the same cc-pVDZ
-# integrals ADCgo reads (writes testdata/h2o_sip.pyscf.json)
-/home/leia/miniconda3/envs/adcgo/bin/python scripts/gen_sip_ref.py
-# committed ADCgo SIP fixture the regen guard pins
-go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 3 -sym all \
-    -solver dense -out testdata/h2o_sip.adcgo.json
-```
+## Design
 
-### Regenerate the M6 decay-channel spectrum fixture
-
-```sh
-# committed stick-spectrum fixture the regen guard pins to the in-process solve
-go run ./cmd/adcgo -fcidump testdata/h2o_dzp.fcidump -dip -mo testdata/h2o_dzp.mo.json \
-    -solver dense -sym all -spectrum -init-atom O -out testdata/h2o_dzp.spec.json
-```
-
+See [`ADCgo_plan.md`](ADCgo_plan.md) for milestones and the full design, and
+[`docs/adc4_rassi_plan.md`](docs/adc4_rassi_plan.md) for the transition-moment chain.

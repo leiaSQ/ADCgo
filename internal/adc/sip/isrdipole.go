@@ -425,7 +425,7 @@ func OscillatorStrength(omega float64, mu [3]float64) float64 {
 }
 
 // EinsteinA is the spontaneous-emission rate A = (2/c³)·ω²·f, in a.u. of inverse time
-// (equivalently (4/3)·ω³|μ|²/c³). Divide by 4.1341373e16 to get s⁻¹.
+// (equivalently (4/3)·ω³|μ|²/c³). Multiply by 4.1341373e16 to get s⁻¹.
 func EinsteinA(omega, f float64) float64 {
 	return 2 * omega * omega * f / (SpeedOfLight * SpeedOfLight * SpeedOfLight)
 }

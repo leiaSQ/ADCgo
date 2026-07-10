@@ -44,6 +44,10 @@ func main() {
 	out := flag.String("out", "", "write JSON to this file (default stdout)")
 	profile := flag.Bool("profile", false, "print per-sector solver phase timings to stderr")
 
+	doTDM := flag.Bool("tdm", false, "emit RASSI-like transition dipole moments instead of the solver document: ion→ion emission (element 1), Dyson photoionization (element 2), and — for -order 4 — core→valence X-ray emission; needs -sip -mo (with dipole integrals)")
+	flag.BoolVar(doTDM, "rassi", false, "alias for -tdm")
+	tdmOsc := flag.Float64("tdm-osc-thresh", 1e-6, "drop photoionization channels with oscillator strength below this")
+
 	doSpectrum := flag.Bool("spectrum", false, "emit the decay-channel stick spectrum instead of the solver document (needs -dip or -sip; DIP needs -mo)")
 	initAtom := flag.String("init-atom", "O", "initial core-ionized site for DIP decay channels (overridden by the interactive prompt)")
 	initOrbital := flag.String("init-orbital", "", "optional initial-orbital label recorded in the spectrum meta")
@@ -74,6 +78,21 @@ func main() {
 	if *doSpectrum && !*doDIP && !*doSIP {
 		fmt.Fprintln(os.Stderr, "adcgo: -spectrum needs -dip or -sip")
 		os.Exit(2)
+	}
+
+	if *doTDM {
+		if !*doSIP {
+			fmt.Fprintln(os.Stderr, "adcgo: -tdm needs -sip")
+			os.Exit(2)
+		}
+		if *doSpectrum {
+			fmt.Fprintln(os.Stderr, "adcgo: -tdm and -spectrum are mutually exclusive")
+			os.Exit(2)
+		}
+		if *moPath == "" {
+			fmt.Fprintln(os.Stderr, "adcgo: -tdm needs -mo (a sidecar with dipole integrals)")
+			os.Exit(2)
+		}
 	}
 
 	specCfg := specConfig{
@@ -115,6 +134,7 @@ func main() {
 			profile: *profile,
 			spec:    specCfg,
 			core:    core,
+			moPath:  *moPath, tdm: *doTDM, tdmOsc: *tdmOsc,
 		}
 		if err := runSIP(d, cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
@@ -298,6 +318,10 @@ type sipConfig struct {
 	profile                   bool
 	spec                      specConfig
 	core                      []int // CVS core orbitals (order 4)
+
+	moPath string  // MO/dipole sidecar (required by -tdm)
+	tdm    bool    // emit transition dipole moments instead of the solver document
+	tdmOsc float64 // photoionization channel oscillator-strength cutoff
 }
 
 // parseCoreOrbitals parses the -core flag: comma-separated 0-based occupied indices.
@@ -341,7 +365,18 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 	}
 	ints := integrals.New(d, nocc, orbSym)
 
+	var md *mo.Data
+	if cfg.moPath != "" {
+		if md, err = mo.ReadFile(cfg.moPath); err != nil {
+			return err
+		}
+	}
+	if cfg.tdm && !md.HasDipole {
+		return fmt.Errorf("-tdm needs an MO sidecar with dipole integrals (dip_ao); regenerate it with fcidump_common.py")
+	}
+
 	doc := SIPDocument{NORB: d.NORB, NELEC: d.NELEC, Order: cfg.order, Solver: cfg.solver}
+	var solved []solvedSIP // retained (with live operators) only in -tdm mode
 	for _, targetSym := range syms {
 		var sp *sip.Space
 		if cfg.order == 4 {
@@ -353,37 +388,29 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 			continue // no 1h configurations in this irrep (e.g. CVS: no core hole here)
 		}
 		label := fmt.Sprintf("sip irrep=%d", targetSym+1)
-		lopts := lanczos.Options{MaxBlocks: cfg.blocks}
-		n, b := sp.Size(), sp.MainBlockSize()
 
-		var be backend.Backend
-		if cfg.solver == "dense" {
-			be = ch.pickDense(label, n)
-		} else {
-			be = ch.pickLanczos(label, n, b, lanczos.SubspaceDim(n, b, lopts),
-				func(cand backend.Backend) time.Duration {
-					m := sip.New(sp, ints, eps, cfg.order, cand)
-					defer m.Release()
-					return timeApplyBlock(cand, n, b, m.ApplyBlock)
-				})
-		}
-		mx := sip.New(sp, ints, eps, cfg.order, be)
-
-		var res lanczos.Result
-		switch cfg.solver {
-		case "dense":
-			res = lanczos.SolveDense(mx, be)
-		case "lanczos":
-			res = lanczos.Solve(mx, be, lopts)
-		default:
-			return fmt.Errorf("unknown solver %q (want lanczos or dense)", cfg.solver)
-		}
-		if cfg.profile {
-			reportTiming(label, sp.Size(), sp.MainBlockSize(), res.Timing)
+		res, mx, err := solveSIPSpace(ch, label, sp, ints, eps, cfg.order, cfg, cfg.tdm)
+		if err != nil {
+			return err
 		}
 		sector := analyze.BuildSIPSector(sp, res, mx.FMatrix(), opts)
-		mx.Release()
 		doc.Sectors = append(doc.Sectors, sector)
+		if cfg.tdm {
+			solved = append(solved, solvedSIP{sp: sp, mx: mx, res: res, sector: sector})
+		} else {
+			mx.Release()
+		}
+	}
+
+	if cfg.tdm {
+		td, err := buildSIPTDMDoc(ch, d, ints, orbSym, eps, solved, md, opts, cfg)
+		for _, s := range solved {
+			s.mx.Release()
+		}
+		if err != nil {
+			return err
+		}
+		return emitJSON(td, cfg.out)
 	}
 
 	if cfg.spec.enabled {
