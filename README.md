@@ -9,8 +9,10 @@ AMD and **cuBLAS** on NVIDIA) rather than approximation. SCF and molecular integ
 delegated: ADCgo ingests a standard **FCIDUMP** (e.g. from pyscf) plus an optional MO
 sidecar for the properties that FCIDUMP does not carry (populations, dipoles).
 
-Everything is one CLI, `cmd/adcgo`. The method is chosen by flags; output is JSON on
-stdout (or `-out FILE`).
+The solver is one CLI, `cmd/adcgo`: the method is chosen by flags; output is JSON on
+stdout (or `-out FILE`). A companion CLI, `cmd/plotspec`, renders that JSON to a figure
+(PNG/SVG/PDF) — decay-channel, single-ionization, and transition-dipole spectra. See
+[Plotting](#plotting).
 
 ## What it computes
 
@@ -75,8 +77,8 @@ structure, not absolute core binding energies.
 
 ### Decay-channel spectrum — Auger / ICD / ETMD
 
-Solve and classify in one pass, emitting a stick-spectrum JSON (the schema ADCanalysis's
-`plotspec` renders). DIP needs `-mo` (channels are built from atom-resolved populations).
+Solve and classify in one pass, emitting a stick-spectrum JSON (rendered by
+[`cmd/plotspec`](#plotting)). DIP needs `-mo` (channels are built from atom-resolved populations).
 `-init-atom` picks the core-ionized site; `-group NAME=col,~col` defines composite or
 passive sites (a bare `-group` opens an interactive prompt).
 
@@ -114,6 +116,46 @@ go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 3 \
 go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 4 -core 0 -sym 0 \
     -mo testdata/h2o.mo.json -solver dense -tdm
 ```
+
+## Plotting
+
+`cmd/adcgo` writes JSON; `cmd/plotspec` turns that JSON into a figure. The output format
+follows the `-out` extension (`.png` / `.svg` / `.pdf`). By default each channel is
+Gaussian-broadened onto a shared grid and drawn as one curve; `-stick` draws bare sticks
+instead. The mode is picked with `-mode`:
+
+| `-mode` | Input | Plots |
+|---|---|---|
+| `spectrum` (default) | a `-spectrum` JSON (`-in`) | one broadened curve per decay channel (DIP) or per orbital (SIP); axis/title switch on `meta.kind` |
+| `tdm` | a `-tdm` JSON (`-in`) | the **transition-dipole spectrum** — peaks at each transition energy, height = oscillator strength |
+| `ees` | a SIP + a DIP JSON (`-sip`, `-dip`) | electron-emission spectrum σ(ε) = ∫ S_in(E)·S_fin(E−ε)/N(E) dE |
+| `panel` | SIP + DIP JSON | 3-panel composite (SIP sticks, DIP sticks, EES) |
+
+```sh
+# Decay-channel spectrum (Auger/ICD/ETMD)
+go run ./cmd/plotspec -in spec.json -out spectrum.png -fwhm 1.2
+
+# Transition-dipole spectrum from a -tdm run
+go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 3 \
+    -mo testdata/h2o.mo.json -solver dense -tdm -out tdm.json
+go run ./cmd/plotspec -mode tdm -in tdm.json -out tdm.png
+go run ./cmd/plotspec -mode tdm -in tdm.json -out tdm_sticks.png -stick -xrange 500-560
+```
+
+### `-mode tdm`
+
+Flattens a `-tdm` document into a stick spectrum: the x-position of each line is the
+photon energy `omega_ev`, the height is the oscillator strength `osc`, and the three
+transition families become the plotted channels — **`emission`** (ion→ion),
+**`cross-emission`** (core→valence X-ray, `-order 4`), and **`photoionization`** (per-virtual
+Dyson channels). Dipole-forbidden lines (`osc ≤ 0`) are dropped. All the shared rendering
+controls apply: `-fwhm`, `-stick`, `-xrange`, `-absolute`, `-colorblind`, and the raster
+`-width` / `-height` / `-dpi`.
+
+Common `plotspec` flags: `-in` / `-out`, `-fwhm F` (broadening FWHM, eV), `-stick`,
+`-xrange LO-HI`, `-absolute` (raw instead of tallest-peak = 1), `-exp FILE` (dotted
+reference overlay, `spectrum` mode), `-colorblind` (Okabe–Ito palette). Reference spectra
+for overlays live in [`testdata/reference/spectra/`](testdata/reference/spectra).
 
 ## Flags
 
