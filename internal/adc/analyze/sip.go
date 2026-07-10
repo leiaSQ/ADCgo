@@ -38,6 +38,15 @@ type SIPSector struct {
 // Y the state's 1h main-block eigenvector part); the spectroscopic factor is
 // 100·‖a‖² and the per-orbital overlaps are the components of a.
 func BuildSIPSector(sp *sip.Space, res lanczos.Result, fmat backend.Mat, opts Options) SIPSector {
+	sec, _ := buildSIPSector(sp, res, fmat, opts)
+	return sec
+}
+
+// buildSIPSector is BuildSIPSector plus the raw solver column each surviving state
+// came from (the index into res.Values / res.FullVecs). cols[i] belongs to
+// sec.States[i]; the transition-moment layer (tdm.go) needs it to select the right
+// Ritz vectors after energy ordering and spurious/weak filtering have reshuffled them.
+func buildSIPSector(sp *sip.Space, res lanczos.Result, fmat backend.Mat, opts Options) (SIPSector, []int) {
 	main := sp.MainBlockSize()
 
 	order := make([]int, len(res.Values))
@@ -47,6 +56,7 @@ func BuildSIPSector(sp *sip.Space, res lanczos.Result, fmat backend.Mat, opts Op
 	sort.Slice(order, func(a, b int) bool { return res.Values[order[a]] < res.Values[order[b]] })
 
 	var states []SIPState
+	var cols []int
 	for _, k := range order {
 		if res.Spurious(k, spurThresh) {
 			continue
@@ -84,6 +94,7 @@ func BuildSIPSector(sp *sip.Space, res lanczos.Result, fmat backend.Mat, opts Op
 			PSPercent: ps,
 			Main:      overlaps,
 		})
+		cols = append(cols, k)
 	}
-	return SIPSector{Irrep: sp.Sym + 1, Spin: 2, States: states}
+	return SIPSector{Irrep: sp.Sym + 1, Spin: 2, States: states}, cols
 }
