@@ -15,12 +15,12 @@ import (
 	"fmt"
 	"os"
 
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/dip"
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/integrals"
-	"adcgo/internal/adc/lanczos"
-	"adcgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/dip"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
 )
 
 const gb = 1 << 30

@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"adcgo/internal/adc/analyze"
-	"adcgo/internal/adc/mo"
-	"adcgo/internal/adc/spectrum"
+	"github.com/leiaSQ/ADCgo/internal/adc/analyze"
+	"github.com/leiaSQ/ADCgo/internal/adc/mo"
+	"github.com/leiaSQ/ADCgo/internal/adc/spectrum"
 )
 
 // specConfig carries the -spectrum-mode options resolved from the CLI flags.

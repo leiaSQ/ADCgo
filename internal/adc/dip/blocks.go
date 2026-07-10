@@ -3,8 +3,8 @@ package dip
 import (
 	"math"
 
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
 )
 
 // Spin-coupling coefficients from the reference (singlet.cpp:4-12).

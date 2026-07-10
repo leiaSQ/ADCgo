@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/dip"
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/integrals"
-	"adcgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/dip"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
 )
 
 func gpuBackend(t *testing.T) (backend.Backend, string) {

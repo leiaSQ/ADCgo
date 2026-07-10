@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
 )
 
 func load(t *testing.T) *Store {

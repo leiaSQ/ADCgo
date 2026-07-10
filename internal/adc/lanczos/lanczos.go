@@ -20,7 +20,7 @@ import (
 	"math"
 	"time"
 
-	"adcgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
 )
 
 // Timing accumulates the wall time of each phase of Solve. The phases are
@@ -66,6 +66,11 @@ type Options struct {
 	MaxBlocks int     // blocks in the basis, start block included (0 → until deflation/full)
 	MaxDim    int     // cap on subspace dimension (0 → Size())
 	DeflTol   float64 // deflation threshold for new basis vectors (0 → 1e-8)
+	// WantFull retains the satellite rows of each Ritz vector too, not just the main
+	// block, at the price of an n×dim back-transform and an n×dim host matrix. Only the
+	// transition-moment machinery needs them; the spectrum does not. SolveDense ignores
+	// this — the dense eigenvectors are already full, so it always returns them.
+	WantFull bool
 }
 
 // Result holds the Ritz spectrum, ascending in eigenvalue.
@@ -73,9 +78,16 @@ type Result struct {
 	Values   []float64   // eigenvalues (a.u.)
 	PS       []float64   // pole strength percent = 100·‖main part‖²
 	MainVecs backend.Mat // main-space components of each Ritz vector (main × len(Values))
-	Residual []float64   // ‖M y_k − θ_k y_k‖ (a.u.); nil for the dense path, which is exact
-	Timing   Timing      // per-phase wall time
+	// FullVecs holds every one of the Size() rows of each Ritz vector
+	// (Size() × len(Values)), main block first. Solve fills it only under
+	// Options.WantFull; SolveDense always does. Empty otherwise — test with HasFull.
+	FullVecs backend.Mat
+	Residual []float64 // ‖M y_k − θ_k y_k‖ (a.u.); nil for the dense path, which is exact
+	Timing   Timing    // per-phase wall time
 }
+
+// HasFull reports whether FullVecs was retained.
+func (r Result) HasFull() bool { return r.FullVecs.Rows > 0 }
 
 // Solve runs the block-Lanczos driver.
 func (o Options) normalize(n int) Options {
@@ -138,7 +150,7 @@ func SolveDense(op DenseOperator, be backend.Backend) Result {
 		ps[k] = 100 * acc
 	}
 	tm.Back = time.Since(tBack)
-	return Result{Values: evals, PS: ps, MainVecs: mainVecs, Timing: tm}
+	return Result{Values: evals, PS: ps, MainVecs: mainVecs, FullVecs: evecs, Timing: tm}
 }
 
 // blockOrth orthonormalizes the columns of v in place against nothing (v is assumed
@@ -412,6 +424,40 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 		ps[k] = 100 * acc
 	}
 
+	// Full Ritz vectors, satellite rows included: fullVecs = B·S. Unlike the main-space
+	// slice, this panel is n rows tall, so it stays on the device — bringing the basis
+	// home to multiply it here would cost an n×dim transfer and an O(n·dim²) host GEMM.
+	// It is computed in column chunks of `main` states so the output panel is wbuf, which
+	// the Krylov build already paid for; no device memory is added.
+	//
+	// mainVecs is deliberately not re-derived from its leading rows: WantFull must leave
+	// every existing field bit-for-bit as it was, and a device GEMM rounds differently
+	// from the host MatMul above.
+	var fullVecs backend.Mat
+	if opts.WantFull {
+		fullVecs = backend.NewMat(n, dim)
+		for k0 := 0; k0 < dim; k0 += main {
+			cols := min(main, dim-k0)
+			sc := make([]float64, dim*cols) // column-major s[:, k0:k0+cols]
+			for j := range cols {
+				for i := range dim {
+					sc[j*dim+i] = s.At(i, k0+j)
+				}
+			}
+			sv := be.Upload(sc)
+			sblk := backend.BlockView{V: sv, Rows: dim, Cols: cols, Ld: dim}
+			wv := backend.BlockView{V: wbuf, Rows: n, Cols: cols, Ld: n}
+			be.Gemm(false, false, 1, basis.Cut(dim), sblk, 0, wv)
+			be.Free(sv)
+			hd := be.Download(wbuf)
+			for j := range cols {
+				for r := range n {
+					fullVecs.Set(r, k0+j, hd[j*n+r])
+				}
+			}
+		}
+	}
+
 	// Ritz residual. With T = BᵀMB block-tridiagonal in exact arithmetic,
 	// M·B = B·T + Q_{j+1}·R_{j+1}·Eᵀ_last, so for T·s_k = θ_k·s_k the first term
 	// cancels and ‖r_k‖ = ‖R_{j+1}·s_k[last block]‖ — O(b) per Ritz vector.
@@ -429,7 +475,7 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 	}
 	tm.Back = time.Since(tBack)
 
-	return Result{Values: theta, PS: ps, MainVecs: mainVecs, Residual: residual, Timing: tm}
+	return Result{Values: theta, PS: ps, MainVecs: mainVecs, FullVecs: fullVecs, Residual: residual, Timing: tm}
 }
 
 // cgs2 applies two passes of classical Gram–Schmidt: v -= B·(Bᵀ·v), twice. Each pass

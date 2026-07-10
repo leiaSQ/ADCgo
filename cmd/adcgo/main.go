@@ -12,25 +12,26 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
-	"adcgo/internal/adc/analyze"
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/dip"
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/integrals"
-	"adcgo/internal/adc/lanczos"
-	"adcgo/internal/adc/mo"
-	"adcgo/internal/adc/mp"
-	"adcgo/internal/adc/sip"
-	"adcgo/internal/adc/spectrum"
+	"github.com/leiaSQ/ADCgo/internal/adc/analyze"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/dip"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
+	"github.com/leiaSQ/ADCgo/internal/adc/mo"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/sip"
+	"github.com/leiaSQ/ADCgo/internal/adc/spectrum"
 )
 
 func main() {
 	path := flag.String("fcidump", "", "path to an FCIDUMP file (MO integrals)")
 	doDIP := flag.Bool("dip", false, "solve DIP-ADC(2) and emit dication states as JSON")
 	doSIP := flag.Bool("sip", false, "solve IP-ADC(n) (non-Dyson) and emit cation states as JSON")
-	order := flag.Int("order", 3, "SIP ADC order: 2 or 3")
+	order := flag.Int("order", 3, "SIP ADC order: 2, 3, or 4 (4 = CVS Dyson ADC(4), needs -core)")
 	solver := flag.String("solver", "lanczos", "eigensolver: lanczos | dense")
 	spinSel := flag.String("spin", "both", "spin sector: both | singlet | triplet")
 	psThresh := flag.Float64("ps-thresh", 1.0, "drop states with pole strength below this (percent)")
@@ -38,6 +39,7 @@ func main() {
 	blocks := flag.Int("blocks", 100, "block-Lanczos iterations; Krylov subspace = blocks × 2h-space size (theADCcode's 'iter', whose reference DIP runs used 100)")
 	moPath := flag.String("mo", "", "MO-coefficient/overlap sidecar for atom-resolved 2h populations")
 	sym := flag.String("sym", "all", "target dication irrep: all | none | <0-based index>")
+	coreOrb := flag.String("core", "", "CVS core orbitals for -order 4: comma-separated 0-based occupied indices (e.g. 0)")
 	backendName := flag.String("backend", "gonum", "linear-algebra backend: gonum | hip | cuda | auto (auto calibrates and picks per sector; build-tag gated)")
 	out := flag.String("out", "", "write JSON to this file (default stdout)")
 	profile := flag.Bool("profile", false, "print per-sector solver phase timings to stderr")
@@ -102,11 +104,17 @@ func main() {
 	}
 
 	if *doSIP {
+		core, err := parseCoreOrbitals(*coreOrb)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "adcgo:", err)
+			os.Exit(1)
+		}
 		cfg := sipConfig{
 			solver: *solver, out: *out, sym: *sym, backend: *backendName, order: *order,
 			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks,
 			profile: *profile,
 			spec:    specCfg,
+			core:    core,
 		}
 		if err := runSIP(d, cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
@@ -289,11 +297,35 @@ type sipConfig struct {
 	blocks                    int
 	profile                   bool
 	spec                      specConfig
+	core                      []int // CVS core orbitals (order 4)
+}
+
+// parseCoreOrbitals parses the -core flag: comma-separated 0-based occupied indices.
+func parseCoreOrbitals(s string) ([]int, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var out []int
+	for _, f := range strings.Split(s, ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		v, err := strconv.Atoi(f)
+		if err != nil || v < 0 {
+			return nil, fmt.Errorf("bad -core orbital %q (want 0-based occupied index)", f)
+		}
+		out = append(out, v)
+	}
+	return out, nil
 }
 
 func runSIP(d *fcidump.Data, cfg sipConfig) error {
-	if cfg.order != 2 && cfg.order != 3 {
-		return fmt.Errorf("unknown -order %d (want 2 or 3)", cfg.order)
+	if cfg.order < 2 || cfg.order > 4 {
+		return fmt.Errorf("unknown -order %d (want 2, 3, or 4)", cfg.order)
+	}
+	if cfg.order == 4 && len(cfg.core) == 0 {
+		return fmt.Errorf("-order 4 is CVS Dyson ADC(4) and requires -core (e.g. -core 0)")
 	}
 	nocc := mp.NOcc(d)
 	eps := mp.OrbitalEnergies(d, nocc)
@@ -311,9 +343,14 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 
 	doc := SIPDocument{NORB: d.NORB, NELEC: d.NELEC, Order: cfg.order, Solver: cfg.solver}
 	for _, targetSym := range syms {
-		sp := sip.NewSpace(nocc, d.NORB, orbSym, targetSym)
+		var sp *sip.Space
+		if cfg.order == 4 {
+			sp = sip.NewSpace4(nocc, d.NORB, orbSym, targetSym, cfg.core)
+		} else {
+			sp = sip.NewSpace(nocc, d.NORB, orbSym, targetSym)
+		}
 		if sp.MainBlockSize() == 0 {
-			continue // no 1h configurations in this irrep
+			continue // no 1h configurations in this irrep (e.g. CVS: no core hole here)
 		}
 		label := fmt.Sprintf("sip irrep=%d", targetSym+1)
 		lopts := lanczos.Options{MaxBlocks: cfg.blocks}

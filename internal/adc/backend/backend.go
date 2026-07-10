@@ -122,6 +122,19 @@ func MatMul(a, b Mat) Mat {
 	return c
 }
 
+// Transpose returns mᵀ as a fresh host matrix. MatMul takes no transpose flags — the
+// solver never needs them — so the one-electron AO→MO transforms (Cᵀ·A·C) form the
+// transpose explicitly. The matrices involved are nAO-sized, not sector-sized.
+func Transpose(m Mat) Mat {
+	t := NewMat(m.Cols, m.Rows)
+	for i := range m.Rows {
+		for j := range m.Cols {
+			t.Set(j, i, m.At(i, j))
+		}
+	}
+	return t
+}
+
 // AddSubMat accumulates alpha*src into the sub-block of m whose top-left corner
 // is (r0,c0): m[r0+i, c0+j] += alpha*src[i,j]. Mirrors a BLAS daxpy of an
 // integral block into a matrix sub-region.

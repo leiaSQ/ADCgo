@@ -41,6 +41,16 @@ type Space struct {
 	// group runs to len(Configs). Used by the assembled satellite operator.
 	Group []int
 
+	// ADC(4) 3h2p satellite space (config4.go; empty for order 2/3). Sat3 holds the
+	// 3h2p configs; Begin3h2p is their global start index (== len(Configs)); Group3
+	// records 3h2p group boundaries in the global index. Group boundaries are the
+	// per-symmetry-block starts used by the assembled 3h2p operator.
+	Sat3      []Config3
+	Begin3h2p int
+	Group3    []int
+	core      []int // absolute occupied core-orbital indices (CVS); nil for order 2/3
+	adc4      bool  // true when built by NewSpace4 (CVS ADC(4) 1h|2h1p|3h2p space)
+
 	Sym  int // target cation irrep (0-based)
 	nSym int // number of point-group irreps (power of two spanning the labels)
 
@@ -52,8 +62,8 @@ type Space struct {
 // is the 2h1p satellite space. Spectroscopic factors are the squared 1h weight.
 func (s *Space) MainBlockSize() int { return s.BeginSat }
 
-// Size is the full matrix dimension.
-func (s *Space) Size() int { return len(s.Configs) }
+// Size is the full matrix dimension (1h + 2h1p, plus 3h2p for order 4).
+func (s *Space) Size() int { return len(s.Configs) + len(s.Sat3) }
 
 // irrep returns the 0-based point-group irrep of an orbital.
 func (s *Space) irrep(orb int) int {

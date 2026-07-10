@@ -10,8 +10,8 @@ package analyze
 import (
 	"sort"
 
-	"adcgo/internal/adc/dip"
-	"adcgo/internal/adc/lanczos"
+	"github.com/leiaSQ/ADCgo/internal/adc/dip"
+	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
 )
 
 // au2eV matches the reference conversion (adc2_dip_analyzer.cpp:16).

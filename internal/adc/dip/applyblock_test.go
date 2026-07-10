@@ -5,10 +5,10 @@ import (
 	"math/rand"
 	"testing"
 
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/integrals"
-	"adcgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
 )
 
 // TestApplyBlockMatchesApplyFull pins the level-3 mat-vec to the level-2 one it

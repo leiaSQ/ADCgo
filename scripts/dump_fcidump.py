@@ -115,8 +115,10 @@ def dump(cfg):
 
     if cfg.sidecar:
         side = cfg.resolve(cfg.sidecar)
-        doc = fcidump_common.write_sidecar(side, mol, mo_side, mf.get_ovlp())
-        print(f"wrote {side}  nAO={doc['nao']} atoms={doc['atom_names']}")
+        doc = fcidump_common.write_sidecar(side, mol, mo_side, mf.get_ovlp(),
+                                           dm=mf.make_rdm1())
+        print(f"wrote {side}  nAO={doc['nao']} atoms={doc['atom_names']} "
+              f"dipole_origin={doc['dip_origin']}")
 
     if cfg.manifest:
         man = cfg.resolve(cfg.manifest)

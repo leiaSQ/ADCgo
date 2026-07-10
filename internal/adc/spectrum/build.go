@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strconv"
 
-	"adcgo/internal/adc/analyze"
+	"github.com/leiaSQ/ADCgo/internal/adc/analyze"
 )
 
 // DIPOptions configures BuildDIP. Classify carries the channel thresholds; the

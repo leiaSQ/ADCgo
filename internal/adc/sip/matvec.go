@@ -1,19 +1,27 @@
 package sip
 
 import (
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
 )
 
 // Matrix is the IP-ADC(n) secular matrix for one target-symmetry sector. It is
 // never stored densely in production — the Lanczos driver calls ApplyFull — but
 // BuildMatrix materializes it for the dense validation path and tests.
 type Matrix struct {
-	sp *Space
-	el *elements
-	be backend.Backend
-	op *assembledOp // built lazily on the first ApplyFull, reused thereafter
+	sp    *Space
+	el    *elements
+	be    backend.Backend
+	op    *assembledOp // built lazily on the first ApplyFull, reused thereafter
+	sigma func(i, j int) float64
 }
+
+// SetStaticSelfEnergy supplies the static self-energy Σ_ij (a.u.) for the CVS-ADC(4)
+// 1h/1h block, indexed by absolute core-orbital indices; the block becomes
+// −ε_i δ_ij − Σ_ij. This mirrors theADCcode, whose EGF reads Σ from an external
+// self-energy module (&self-energy) rather than the ADC(4) matrix code. Pass nil (the
+// default) for the bare −ε_i diagonal. See docs/adc4_sip_spec.md and TestADC4MatchedGateA1.
+func (mx *Matrix) SetStaticSelfEnergy(sigma func(i, j int) float64) { mx.sigma = sigma }
 
 // New builds the IP-ADC(order) matrix engine for space sp. order is 2 or 3.
 func New(sp *Space, ints *integrals.Store, eps []float64, order int, be backend.Backend) *Matrix {
@@ -87,8 +95,12 @@ func (mx *Matrix) satBlock() backend.Mat {
 	return S
 }
 
-// assemble uploads the three blocks once for the resident matrix-vector product.
+// assemble uploads the blocks once for the resident matrix-vector product. Order 4
+// (CVS ADC(4), with a 3h2p space) uses the assemble4 path (matvec4.go).
 func (mx *Matrix) assemble() *assembledOp {
+	if mx.isADC4() {
+		return mx.assemble4()
+	}
 	sp := mx.sp
 	main := sp.BeginSat
 	var parts []placement
@@ -142,7 +154,11 @@ func (mx *Matrix) MainBlockSize() int { return mx.sp.MainBlockSize() }
 func (mx *Matrix) Space() *Space { return mx.sp }
 
 // BuildMatrix materializes the full symmetric secular matrix (both triangles).
+// Order 4 uses the buildMatrix4 path (matvec4.go).
 func (mx *Matrix) BuildMatrix() backend.Mat {
+	if mx.isADC4() {
+		return mx.buildMatrix4()
+	}
 	sp := mx.sp
 	main := sp.BeginSat
 	M := backend.NewMat(sp.Size(), sp.Size())

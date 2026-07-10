@@ -3,9 +3,9 @@ package analyze
 import (
 	"sort"
 
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/lanczos"
-	"adcgo/internal/adc/sip"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
+	"github.com/leiaSQ/ADCgo/internal/adc/sip"
 )
 
 // OrbWeight is one one-hole main-space overlap "<i|: coeff" of a SIP state: the

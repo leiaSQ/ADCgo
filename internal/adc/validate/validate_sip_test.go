@@ -20,13 +20,13 @@ import (
 	"strconv"
 	"testing"
 
-	"adcgo/internal/adc/analyze"
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/integrals"
-	"adcgo/internal/adc/lanczos"
-	"adcgo/internal/adc/mp"
-	"adcgo/internal/adc/sip"
+	"github.com/leiaSQ/ADCgo/internal/adc/analyze"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/sip"
 )
 
 const (

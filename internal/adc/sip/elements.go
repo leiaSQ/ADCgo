@@ -3,7 +3,7 @@ package sip
 import (
 	"math"
 
-	"adcgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
 )
 
 // Spin-coupling constants (adc_macros.h).

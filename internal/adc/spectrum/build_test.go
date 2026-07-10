@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"adcgo/internal/adc/analyze"
+	"github.com/leiaSQ/ADCgo/internal/adc/analyze"
 )
 
 func groups() []Site {

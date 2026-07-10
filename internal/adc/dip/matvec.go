@@ -1,8 +1,8 @@
 package dip
 
 import (
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
 )
 
 // Matrix is the DIP-ADC(2) secular matrix for one (symmetry, spin) sector. It is

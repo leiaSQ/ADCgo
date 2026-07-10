@@ -3,9 +3,9 @@ package analyze
 import (
 	"math"
 
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/dip"
-	"adcgo/internal/adc/mo"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/dip"
+	"github.com/leiaSQ/ADCgo/internal/adc/mo"
 )
 
 // U-transform normalization constants (eqs. 3c, 3d).

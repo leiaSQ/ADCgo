@@ -6,10 +6,10 @@ import (
 	"sort"
 	"testing"
 
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/integrals"
-	"adcgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
 )
 
 // symSetup loads the (symmetric) H2O FCIDUMP and returns the pieces needed to
