@@ -1,0 +1,16 @@
+&frontend
+guk
+&propagator
+ADC4CVS
+spin 2
+SYMGRP C2v
+sym 1
+&adc4
+MCORE 1
+&self-energy
+infinite
+&diagonalizer
+full
+&eigen
+ps 0.1
+thresh 0.1

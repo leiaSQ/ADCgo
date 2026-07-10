@@ -1,0 +1,370 @@
+{
+  "meta": {
+    "kind": "dip",
+    "initial_ionization": {
+      "atom": "wat"
+    },
+    "irreps": [
+      "1"
+    ],
+    "energy_unit": "eV",
+    "singlet_triplet_ratio": 3,
+    "source_files": null
+  },
+  "channels": [
+    "Auger@wat"
+  ],
+  "lines": [
+    {
+      "energy": 39.73431902990803,
+      "intensity": 0.820228854147607,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#1",
+      "ps_percent": 83.45104775138519
+    },
+    {
+      "energy": 44.38087682253679,
+      "intensity": 0.7445273519902221,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#2",
+      "ps_percent": 84.78211260228993
+    },
+    {
+      "energy": 52.760235330504386,
+      "intensity": 0.5648214093828278,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#3",
+      "ps_percent": 86.54579759234929
+    },
+    {
+      "energy": 66.38814952744427,
+      "intensity": 0.6673841442560786,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#4",
+      "ps_percent": 75.60579435171024
+    },
+    {
+      "energy": 70.43840549051849,
+      "intensity": 0.05943529627007114,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#5",
+      "ps_percent": 6.646373169309163
+    },
+    {
+      "energy": 76.37837649424304,
+      "intensity": 0.009228803338875227,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#6",
+      "ps_percent": 1.0069693123466124
+    },
+    {
+      "energy": 83.62879810960388,
+      "intensity": 0.05466881672981594,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#7",
+      "ps_percent": 6.589726179499767
+    },
+    {
+      "energy": 84.28146616317807,
+      "intensity": 0.03142564392768771,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#8",
+      "ps_percent": 3.729190000560719
+    },
+    {
+      "energy": 85.26690172434489,
+      "intensity": 0.2291117902640289,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#9",
+      "ps_percent": 29.626824321744362
+    },
+    {
+      "energy": 86.0599947175574,
+      "intensity": 0.06057645718900162,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#10",
+      "ps_percent": 7.446656935212394
+    },
+    {
+      "energy": 86.22093423117501,
+      "intensity": 0.2866691951105291,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#11",
+      "ps_percent": 35.989411471150845
+    },
+    {
+      "energy": 88.33237535043718,
+      "intensity": 0.019542359207426196,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#12",
+      "ps_percent": 2.5216197212366698
+    },
+    {
+      "energy": 91.05047736890185,
+      "intensity": 0.014010205434388336,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#13",
+      "ps_percent": 1.8063747205465157
+    },
+    {
+      "energy": 92.35372250202659,
+      "intensity": 0.012599684038823626,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#14",
+      "ps_percent": 1.8969176467725768
+    },
+    {
+      "energy": 95.20413545799576,
+      "intensity": 0.015868613546337174,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#15",
+      "ps_percent": 1.675516244854051
+    },
+    {
+      "energy": 97.00868982558251,
+      "intensity": 0.01118306920845771,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#16",
+      "ps_percent": 1.285927041512574
+    },
+    {
+      "energy": 103.43152459416274,
+      "intensity": 0.05078110335666072,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#17",
+      "ps_percent": 5.224144499684707
+    },
+    {
+      "energy": 105.39547627317455,
+      "intensity": 0.031930439948014804,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#18",
+      "ps_percent": 3.780511307964994
+    },
+    {
+      "energy": 106.93804705348086,
+      "intensity": 0.012325868168531914,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#19",
+      "ps_percent": 1.372918348970846
+    },
+    {
+      "energy": 108.6252240253069,
+      "intensity": 0.029948153604005517,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#20",
+      "ps_percent": 3.8941281730571022
+    },
+    {
+      "energy": 109.55294157759539,
+      "intensity": 0.03780117867100057,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#21",
+      "ps_percent": 4.3393171584341985
+    },
+    {
+      "energy": 111.95614092976739,
+      "intensity": 0.01180490690099235,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#22",
+      "ps_percent": 1.6901271990581848
+    },
+    {
+      "energy": 112.65197496238794,
+      "intensity": 0.010773204191156925,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#23",
+      "ps_percent": 1.6097320273494258
+    },
+    {
+      "energy": 115.68343101071493,
+      "intensity": 0.010242957836977587,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#24",
+      "ps_percent": 1.0528249288952982
+    },
+    {
+      "energy": 118.40439044312542,
+      "intensity": 0.011636923444295802,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#25",
+      "ps_percent": 1.2734169218127191
+    },
+    {
+      "energy": 119.52044679742092,
+      "intensity": 0.021826006256660993,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#26",
+      "ps_percent": 2.4827537225244325
+    },
+    {
+      "energy": 120.74987975060081,
+      "intensity": 0.012198087779488298,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#27",
+      "ps_percent": 1.3909131845611913
+    },
+    {
+      "energy": 126.50046420873863,
+      "intensity": 0.015340670099081756,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#28",
+      "ps_percent": 1.6513297744450566
+    },
+    {
+      "energy": 126.8339473593475,
+      "intensity": 0.012440058997771961,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#29",
+      "ps_percent": 1.5089558298934604
+    },
+    {
+      "energy": 134.96330704552042,
+      "intensity": 0.017073307181949566,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#30",
+      "ps_percent": 2.0976526897497743
+    },
+    {
+      "energy": 143.25193762439147,
+      "intensity": 0.01175912472906843,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#31",
+      "ps_percent": 1.3558043997502989
+    },
+    {
+      "energy": 152.22005740757882,
+      "intensity": 0.07522592644257813,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#32",
+      "ps_percent": 9.026601611109838
+    },
+    {
+      "energy": 155.5104464650756,
+      "intensity": 0.008656346905772357,
+      "channel": "Auger@wat",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#33",
+      "ps_percent": 1.1837214600270276
+    },
+    {
+      "energy": 60.693938241590416,
+      "intensity": 0.6956791160725937,
+      "channel": "Auger@wat",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#1",
+      "ps_percent": 81.61527609586031
+    },
+    {
+      "energy": 66.86333971314586,
+      "intensity": 0.011162849243132648,
+      "channel": "Auger@wat",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#2",
+      "ps_percent": 1.309596625723156
+    },
+    {
+      "energy": 107.31979214379383,
+      "intensity": 0.009322868472602924,
+      "channel": "Auger@wat",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#3",
+      "ps_percent": 1.0937348366764552
+    },
+    {
+      "energy": 107.5250988496756,
+      "intensity": 0.018533935282489495,
+      "channel": "Auger@wat",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#4",
+      "ps_percent": 2.1743533912053534
+    },
+    {
+      "energy": 117.76598894345015,
+      "intensity": 0.030864246110204382,
+      "channel": "Auger@wat",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#5",
+      "ps_percent": 3.620913593030808
+    },
+    {
+      "energy": 121.89202876698977,
+      "intensity": 0.01058765566026823,
+      "channel": "Auger@wat",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#6",
+      "ps_percent": 1.2421164010197483
+    }
+  ]
+}

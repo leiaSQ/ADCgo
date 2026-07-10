@@ -1,0 +1,171 @@
+{
+  "meta": {
+    "molecule": "H2O",
+    "initial_ionization": {
+      "atom": "O",
+      "orbital": "1s"
+    },
+    "energy_unit": "eV",
+    "singlet_triplet_ratio": 3.0,
+    "data_kind": "reference",
+    "method": "theory (Stieltjes imaging)",
+    "source": "V. Carravetta and H. Agren, 'Stieltjes imaging method for molecular Auger transition rates - application to the Auger spectrum of water', Phys. Rev. A 35, 1022 (1987). Values as tabulated in the 'from Ref. 2' columns of the corrected Table IV of Inhester et al., J. Chem. Phys. 141, 069904 (2014) (erratum).",
+    "doi": "10.1103/PhysRevA.35.1022",
+    "intensity_meaning": "partial Auger transition rate Gamma (from Ref. 2), in 1e-4 a.u.",
+    "energy_inversion": {
+      "note": "Table reports Auger-electron kinetic energy E_kin. Converted to vertical double-ionization energy via DIP = core_binding_energy - E_kin. Energies are 'this work' (Inhester et al.) values; the reference columns tabulate per-final-state intensities only, so they are plotted at the same energies, matched row-by-row to the final state.",
+      "core_binding_energy_eV": 539.83,
+      "core_binding_energy_source": "experimental vertical O 1s ionization energy of gas-phase H2O (539.827 eV).",
+      "formula": "energy = 539.83 - kinetic_energy"
+    }
+  },
+  "channels": [
+    "Auger@O"
+  ],
+  "lines": [
+    {
+      "energy": 39.16,
+      "intensity": 0.11,
+      "channel": "Auger@O",
+      "spin": 3,
+      "config": "3a1^-1 1b1^-1 T",
+      "kinetic_energy": 500.67,
+      "relative_intensity": 2
+    },
+    {
+      "energy": 40.44,
+      "intensity": 5.79,
+      "channel": "Auger@O",
+      "spin": 1,
+      "config": "1b1^-2 S",
+      "kinetic_energy": 499.39,
+      "relative_intensity": 100
+    },
+    {
+      "energy": 41.85,
+      "intensity": 5.57,
+      "channel": "Auger@O",
+      "spin": 1,
+      "config": "3a1^-1 1b1^-1 S",
+      "kinetic_energy": 497.98,
+      "relative_intensity": 96
+    },
+    {
+      "energy": 43.23,
+      "intensity": 0.0,
+      "channel": "Auger@O",
+      "spin": 3,
+      "config": "1b2^-1 1b1^-1 T",
+      "kinetic_energy": 496.6,
+      "relative_intensity": 0
+    },
+    {
+      "energy": 45.15,
+      "intensity": 5.33,
+      "channel": "Auger@O",
+      "spin": 1,
+      "config": "1b2^-1 1b1^-1 S",
+      "kinetic_energy": 494.68,
+      "relative_intensity": 92
+    },
+    {
+      "energy": 45.19,
+      "intensity": 3.93,
+      "channel": "Auger@O",
+      "spin": 1,
+      "config": "3a1^-2 S",
+      "kinetic_energy": 494.64,
+      "relative_intensity": 68
+    },
+    {
+      "energy": 45.2,
+      "intensity": 0.09,
+      "channel": "Auger@O",
+      "spin": 3,
+      "config": "3a1^-1 1b2^-1 T",
+      "kinetic_energy": 494.63,
+      "relative_intensity": 2
+    },
+    {
+      "energy": 47.47,
+      "intensity": 5.57,
+      "channel": "Auger@O",
+      "spin": 1,
+      "config": "3a1^-1 1b2^-1 S",
+      "kinetic_energy": 492.36,
+      "relative_intensity": 96
+    },
+    {
+      "energy": 52.38,
+      "intensity": 3.45,
+      "channel": "Auger@O",
+      "spin": 1,
+      "config": "1b2^-2 S",
+      "kinetic_energy": 487.45,
+      "relative_intensity": 60
+    },
+    {
+      "energy": 57.53,
+      "intensity": 1.19,
+      "channel": "Auger@O",
+      "spin": 3,
+      "config": "2a1^-1 1b1^-1 T",
+      "kinetic_energy": 482.3,
+      "relative_intensity": 21
+    },
+    {
+      "energy": 59.25,
+      "intensity": 1.66,
+      "channel": "Auger@O",
+      "spin": 3,
+      "config": "2a1^-1 3a1^-1 T",
+      "kinetic_energy": 480.58,
+      "relative_intensity": 29
+    },
+    {
+      "energy": 63.01,
+      "intensity": 1.19,
+      "channel": "Auger@O",
+      "spin": 3,
+      "config": "2a1^-1 1b2^-1 T",
+      "kinetic_energy": 476.82,
+      "relative_intensity": 21
+    },
+    {
+      "energy": 64.07,
+      "intensity": 3.35,
+      "channel": "Auger@O",
+      "spin": 1,
+      "config": "2a1^-1 1b1^-1 S",
+      "kinetic_energy": 475.76,
+      "relative_intensity": 58
+    },
+    {
+      "energy": 66.56,
+      "intensity": 3.74,
+      "channel": "Auger@O",
+      "spin": 1,
+      "config": "2a1^-1 3a1^-1 S",
+      "kinetic_energy": 473.27,
+      "relative_intensity": 65
+    },
+    {
+      "energy": 71.08,
+      "intensity": 2.58,
+      "channel": "Auger@O",
+      "spin": 1,
+      "config": "2a1^-1 1b2^-1 S",
+      "kinetic_energy": 468.75,
+      "relative_intensity": 45
+    },
+    {
+      "energy": 82.64,
+      "intensity": 3.54,
+      "channel": "Auger@O",
+      "spin": 1,
+      "config": "2a1^-2 S",
+      "kinetic_energy": 457.19,
+      "relative_intensity": 61
+    }
+  ]
+}

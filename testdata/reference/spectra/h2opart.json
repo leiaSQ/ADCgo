@@ -1,0 +1,1711 @@
+{
+  "meta": {
+    "molecule": "h2o",
+    "basis": "dzp",
+    "initial_ionization": {
+      "atom": "O"
+    },
+    "irreps": [
+      "1",
+      "2",
+      "3",
+      "4"
+    ],
+    "energy_unit": "eV",
+    "singlet_triplet_ratio": 3,
+    "source_files": [
+      "adcdip1.out",
+      "adcdip2.out",
+      "adcdip3.out",
+      "adcdip4.out"
+    ]
+  },
+  "channels": [
+    "Meitner@O"
+  ],
+  "lines": [
+    {
+      "energy": 39.660357,
+      "intensity": 0.8196000000000001,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#1",
+      "ps_percent": 83.39
+    },
+    {
+      "energy": 44.275297,
+      "intensity": 0.7423,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#2",
+      "ps_percent": 84.65
+    },
+    {
+      "energy": 52.717802,
+      "intensity": 0.5648,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#3",
+      "ps_percent": 86.53
+    },
+    {
+      "energy": 65.298014,
+      "intensity": 0.673,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#4",
+      "ps_percent": 75.99
+    },
+    {
+      "energy": 70.392018,
+      "intensity": 0.0463,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#5",
+      "ps_percent": 5.16
+    },
+    {
+      "energy": 76.346164,
+      "intensity": 0.0097,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#7",
+      "ps_percent": 1.06
+    },
+    {
+      "energy": 83.421133,
+      "intensity": 0.1906,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#9",
+      "ps_percent": 24.32
+    },
+    {
+      "energy": 84.111724,
+      "intensity": 0.1322,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#10",
+      "ps_percent": 16.47
+    },
+    {
+      "energy": 84.625268,
+      "intensity": 0.22329999999999997,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#11",
+      "ps_percent": 28.8
+    },
+    {
+      "energy": 85.76132,
+      "intensity": 0.057300000000000004,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#12",
+      "ps_percent": 6.79
+    },
+    {
+      "energy": 86.051995,
+      "intensity": 0.0378,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#13",
+      "ps_percent": 4.44
+    },
+    {
+      "energy": 86.916914,
+      "intensity": 0.0073,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#14",
+      "ps_percent": 0.82
+    },
+    {
+      "energy": 88.247016,
+      "intensity": 0.0116,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#15",
+      "ps_percent": 1.47
+    },
+    {
+      "energy": 90.994474,
+      "intensity": 0.0098,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#17",
+      "ps_percent": 1.26
+    },
+    {
+      "energy": 92.257108,
+      "intensity": 0.0045,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#19",
+      "ps_percent": 0.69
+    },
+    {
+      "energy": 92.315445,
+      "intensity": 0.0061,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#20",
+      "ps_percent": 0.91
+    },
+    {
+      "energy": 92.685087,
+      "intensity": 0.0048,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#21",
+      "ps_percent": 0.65
+    },
+    {
+      "energy": 93.068762,
+      "intensity": 0.0039,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#22",
+      "ps_percent": 0.58
+    },
+    {
+      "energy": 95.155614,
+      "intensity": 0.016300000000000002,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#23",
+      "ps_percent": 1.74
+    },
+    {
+      "energy": 96.134359,
+      "intensity": 0.026400000000000003,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#24",
+      "ps_percent": 3.18
+    },
+    {
+      "energy": 96.93166,
+      "intensity": 0.0095,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#25",
+      "ps_percent": 1.13
+    },
+    {
+      "energy": 99.076652,
+      "intensity": 0.0051,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#28",
+      "ps_percent": 0.55
+    },
+    {
+      "energy": 102.743429,
+      "intensity": 0.006599999999999999,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#34",
+      "ps_percent": 0.7
+    },
+    {
+      "energy": 103.413393,
+      "intensity": 0.048400000000000006,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#36",
+      "ps_percent": 4.96
+    },
+    {
+      "energy": 103.911905,
+      "intensity": 0.0063,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#37",
+      "ps_percent": 0.77
+    },
+    {
+      "energy": 105.317986,
+      "intensity": 0.0251,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#38",
+      "ps_percent": 3
+    },
+    {
+      "energy": 105.820729,
+      "intensity": 0.0112,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#39",
+      "ps_percent": 1.25
+    },
+    {
+      "energy": 105.884584,
+      "intensity": 0.0096,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#40",
+      "ps_percent": 1.04
+    },
+    {
+      "energy": 106.531031,
+      "intensity": 0.0054,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#41",
+      "ps_percent": 0.65
+    },
+    {
+      "energy": 108.663448,
+      "intensity": 0.020499999999999997,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#44",
+      "ps_percent": 3.1
+    },
+    {
+      "energy": 109.08994,
+      "intensity": 0.0077,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#45",
+      "ps_percent": 0.94
+    },
+    {
+      "energy": 111.170918,
+      "intensity": 0.011600000000000001,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#47",
+      "ps_percent": 1.29
+    },
+    {
+      "energy": 111.80977,
+      "intensity": 0.007300000000000001,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#48",
+      "ps_percent": 0.88
+    },
+    {
+      "energy": 112.068789,
+      "intensity": 0.006299999999999999,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#49",
+      "ps_percent": 0.95
+    },
+    {
+      "energy": 112.208402,
+      "intensity": 0.004,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#50",
+      "ps_percent": 0.59
+    },
+    {
+      "energy": 112.739866,
+      "intensity": 0.0070999999999999995,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#51",
+      "ps_percent": 0.89
+    },
+    {
+      "energy": 113.09818,
+      "intensity": 0.006999999999999999,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#52",
+      "ps_percent": 0.94
+    },
+    {
+      "energy": 113.875822,
+      "intensity": 0.0062,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#53",
+      "ps_percent": 0.79
+    },
+    {
+      "energy": 114.760876,
+      "intensity": 0.0043,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#55",
+      "ps_percent": 0.64
+    },
+    {
+      "energy": 115.688363,
+      "intensity": 0.010400000000000001,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#56",
+      "ps_percent": 1.08
+    },
+    {
+      "energy": 116.743525,
+      "intensity": 0.004399999999999999,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#57",
+      "ps_percent": 0.68
+    },
+    {
+      "energy": 118.202142,
+      "intensity": 0.0075,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#59",
+      "ps_percent": 0.91
+    },
+    {
+      "energy": 121.822929,
+      "intensity": 0.0046,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#64",
+      "ps_percent": 0.59
+    },
+    {
+      "energy": 123.535935,
+      "intensity": 0.0040999999999999995,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#66",
+      "ps_percent": 0.5
+    },
+    {
+      "energy": 123.543507,
+      "intensity": 0.0064,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#67",
+      "ps_percent": 0.69
+    },
+    {
+      "energy": 124.41578,
+      "intensity": 0.0068,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#69",
+      "ps_percent": 0.71
+    },
+    {
+      "energy": 128.071582,
+      "intensity": 0.0063,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#74",
+      "ps_percent": 0.68
+    },
+    {
+      "energy": 128.518359,
+      "intensity": 0.0107,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#75",
+      "ps_percent": 1.3
+    },
+    {
+      "energy": 128.788857,
+      "intensity": 0.0051,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#76",
+      "ps_percent": 0.66
+    },
+    {
+      "energy": 129.624526,
+      "intensity": 0.021299999999999996,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#77",
+      "ps_percent": 2.54
+    },
+    {
+      "energy": 129.973488,
+      "intensity": 0.0222,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#78",
+      "ps_percent": 2.56
+    },
+    {
+      "energy": 132.152572,
+      "intensity": 0.0211,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#82",
+      "ps_percent": 2.18
+    },
+    {
+      "energy": 133.703727,
+      "intensity": 0.004,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#83",
+      "ps_percent": 0.52
+    },
+    {
+      "energy": 134.090896,
+      "intensity": 0.0044,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#84",
+      "ps_percent": 0.52
+    },
+    {
+      "energy": 134.59352,
+      "intensity": 0.004299999999999999,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#85",
+      "ps_percent": 0.53
+    },
+    {
+      "energy": 135.000769,
+      "intensity": 0.017800000000000003,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#86",
+      "ps_percent": 2.14
+    },
+    {
+      "energy": 140.266659,
+      "intensity": 0.0148,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#94",
+      "ps_percent": 1.53
+    },
+    {
+      "energy": 143.324042,
+      "intensity": 0.012700000000000001,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#96",
+      "ps_percent": 1.47
+    },
+    {
+      "energy": 152.467633,
+      "intensity": 0.08560000000000001,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#105",
+      "ps_percent": 10.32
+    },
+    {
+      "energy": 154.424504,
+      "intensity": 0.0046,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 1,
+      "state_ref": "irrep1/s1/#107",
+      "ps_percent": 0.6
+    },
+    {
+      "energy": 58.884973,
+      "intensity": 0.6803000000000001,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#1",
+      "ps_percent": 79.8
+    },
+    {
+      "energy": 66.824401,
+      "intensity": 0.008199999999999999,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#2",
+      "ps_percent": 0.96
+    },
+    {
+      "energy": 72.237971,
+      "intensity": 0.0055,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#4",
+      "ps_percent": 0.64
+    },
+    {
+      "energy": 105.873767,
+      "intensity": 0.011,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#29",
+      "ps_percent": 1.29
+    },
+    {
+      "energy": 109.857926,
+      "intensity": 0.010899999999999998,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#31",
+      "ps_percent": 1.28
+    },
+    {
+      "energy": 118.534997,
+      "intensity": 0.0042,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#37",
+      "ps_percent": 0.5
+    },
+    {
+      "energy": 121.093594,
+      "intensity": 0.0077,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#38",
+      "ps_percent": 0.9
+    },
+    {
+      "energy": 122.016643,
+      "intensity": 0.0085,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#39",
+      "ps_percent": 0.99
+    },
+    {
+      "energy": 122.716648,
+      "intensity": 0.017300000000000003,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#40",
+      "ps_percent": 2.02
+    },
+    {
+      "energy": 125.777505,
+      "intensity": 0.0224,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#41",
+      "ps_percent": 2.62
+    },
+    {
+      "energy": 126.413003,
+      "intensity": 0.029500000000000002,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 1,
+      "state_ref": "irrep1/s3/#42",
+      "ps_percent": 3.47
+    },
+    {
+      "energy": 45.147566,
+      "intensity": 0.6925999999999999,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#1",
+      "ps_percent": 84.88
+    },
+    {
+      "energy": 86.14305,
+      "intensity": 0.0051,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#10",
+      "ps_percent": 0.63
+    },
+    {
+      "energy": 86.860995,
+      "intensity": 0.0099,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#11",
+      "ps_percent": 1.21
+    },
+    {
+      "energy": 89.049028,
+      "intensity": 0.005,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#14",
+      "ps_percent": 0.62
+    },
+    {
+      "energy": 99.777624,
+      "intensity": 0.0078000000000000005,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#24",
+      "ps_percent": 0.96
+    },
+    {
+      "energy": 102.522872,
+      "intensity": 0.0091,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#26",
+      "ps_percent": 1.12
+    },
+    {
+      "energy": 104.107279,
+      "intensity": 0.004700000000000001,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#27",
+      "ps_percent": 0.58
+    },
+    {
+      "energy": 105.651123,
+      "intensity": 0.0041,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#28",
+      "ps_percent": 0.51
+    },
+    {
+      "energy": 106.373388,
+      "intensity": 0.0241,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#29",
+      "ps_percent": 2.95
+    },
+    {
+      "energy": 109.156143,
+      "intensity": 0.005399999999999999,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#31",
+      "ps_percent": 0.67
+    },
+    {
+      "energy": 115.165259,
+      "intensity": 0.0046,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#35",
+      "ps_percent": 0.56
+    },
+    {
+      "energy": 118.834459,
+      "intensity": 0.0042,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 2,
+      "state_ref": "irrep2/s1/#38",
+      "ps_percent": 0.52
+    },
+    {
+      "energy": 43.217135,
+      "intensity": 0.6874,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 2,
+      "state_ref": "irrep2/s3/#1",
+      "ps_percent": 84.23
+    },
+    {
+      "energy": 84.839975,
+      "intensity": 0.014199999999999999,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 2,
+      "state_ref": "irrep2/s3/#13",
+      "ps_percent": 1.75
+    },
+    {
+      "energy": 99.384395,
+      "intensity": 0.0051,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 2,
+      "state_ref": "irrep2/s3/#27",
+      "ps_percent": 0.63
+    },
+    {
+      "energy": 102.428047,
+      "intensity": 0.014600000000000002,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 2,
+      "state_ref": "irrep2/s3/#29",
+      "ps_percent": 1.79
+    },
+    {
+      "energy": 103.150622,
+      "intensity": 0.009600000000000001,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 2,
+      "state_ref": "irrep2/s3/#30",
+      "ps_percent": 1.18
+    },
+    {
+      "energy": 104.537845,
+      "intensity": 0.006999999999999999,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 2,
+      "state_ref": "irrep2/s3/#31",
+      "ps_percent": 0.86
+    },
+    {
+      "energy": 105.01148,
+      "intensity": 0.0113,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 2,
+      "state_ref": "irrep2/s3/#32",
+      "ps_percent": 1.38
+    },
+    {
+      "energy": 108.491871,
+      "intensity": 0.0069,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 2,
+      "state_ref": "irrep2/s3/#34",
+      "ps_percent": 0.85
+    },
+    {
+      "energy": 41.127936,
+      "intensity": 0.7820999999999999,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#1",
+      "ps_percent": 83.65
+    },
+    {
+      "energy": 64.171643,
+      "intensity": 0.6877000000000001,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#2",
+      "ps_percent": 76.35
+    },
+    {
+      "energy": 69.150436,
+      "intensity": 0.0091,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#3",
+      "ps_percent": 0.97
+    },
+    {
+      "energy": 72.520902,
+      "intensity": 0.0369,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#4",
+      "ps_percent": 4.1
+    },
+    {
+      "energy": 84.055048,
+      "intensity": 0.015500000000000002,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#8",
+      "ps_percent": 1.58
+    },
+    {
+      "energy": 84.801365,
+      "intensity": 0.009699999999999999,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#9",
+      "ps_percent": 1.06
+    },
+    {
+      "energy": 86.490829,
+      "intensity": 0.0102,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#12",
+      "ps_percent": 1.13
+    },
+    {
+      "energy": 95.518771,
+      "intensity": 0.009600000000000001,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#21",
+      "ps_percent": 1.05
+    },
+    {
+      "energy": 103.073458,
+      "intensity": 0.0139,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#33",
+      "ps_percent": 1.65
+    },
+    {
+      "energy": 104.027113,
+      "intensity": 0.038900000000000004,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#35",
+      "ps_percent": 4.05
+    },
+    {
+      "energy": 106.142426,
+      "intensity": 0.0063,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#37",
+      "ps_percent": 0.67
+    },
+    {
+      "energy": 110.069059,
+      "intensity": 0.0079,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#43",
+      "ps_percent": 0.83
+    },
+    {
+      "energy": 110.624595,
+      "intensity": 0.0075,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#44",
+      "ps_percent": 0.79
+    },
+    {
+      "energy": 116.044549,
+      "intensity": 0.0074,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#51",
+      "ps_percent": 0.88
+    },
+    {
+      "energy": 116.32299,
+      "intensity": 0.0068,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#53",
+      "ps_percent": 0.69
+    },
+    {
+      "energy": 122.592533,
+      "intensity": 0.005,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#59",
+      "ps_percent": 0.51
+    },
+    {
+      "energy": 123.004138,
+      "intensity": 0.014599999999999998,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#60",
+      "ps_percent": 1.6
+    },
+    {
+      "energy": 127.846758,
+      "intensity": 0.0095,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#69",
+      "ps_percent": 1.06
+    },
+    {
+      "energy": 129.220038,
+      "intensity": 0.0325,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#72",
+      "ps_percent": 3.55
+    },
+    {
+      "energy": 130.258998,
+      "intensity": 0.009500000000000001,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#73",
+      "ps_percent": 1.05
+    },
+    {
+      "energy": 139.868978,
+      "intensity": 0.0065,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#84",
+      "ps_percent": 0.7
+    },
+    {
+      "energy": 145.082537,
+      "intensity": 0.0048000000000000004,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#87",
+      "ps_percent": 0.52
+    },
+    {
+      "energy": 153.724622,
+      "intensity": 0.004599999999999999,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 3,
+      "state_ref": "irrep3/s1/#95",
+      "ps_percent": 0.51
+    },
+    {
+      "energy": 38.436487,
+      "intensity": 0.7837999999999999,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#1",
+      "ps_percent": 82.75
+    },
+    {
+      "energy": 57.191779,
+      "intensity": 0.7165999999999999,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#2",
+      "ps_percent": 80.63
+    },
+    {
+      "energy": 71.295728,
+      "intensity": 0.009300000000000001,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#5",
+      "ps_percent": 1.02
+    },
+    {
+      "energy": 82.100354,
+      "intensity": 0.0122,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#9",
+      "ps_percent": 1.3
+    },
+    {
+      "energy": 82.953708,
+      "intensity": 0.014700000000000001,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#10",
+      "ps_percent": 1.56
+    },
+    {
+      "energy": 84.457208,
+      "intensity": 0.0048,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#12",
+      "ps_percent": 0.54
+    },
+    {
+      "energy": 88.525394,
+      "intensity": 0.0057,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#18",
+      "ps_percent": 0.59
+    },
+    {
+      "energy": 93.344842,
+      "intensity": 0.005899999999999999,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#26",
+      "ps_percent": 0.61
+    },
+    {
+      "energy": 99.528709,
+      "intensity": 0.0088,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#38",
+      "ps_percent": 0.92
+    },
+    {
+      "energy": 99.911911,
+      "intensity": 0.0162,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#39",
+      "ps_percent": 1.72
+    },
+    {
+      "energy": 101.032436,
+      "intensity": 0.0065,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#42",
+      "ps_percent": 0.69
+    },
+    {
+      "energy": 103.395174,
+      "intensity": 0.014600000000000002,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#46",
+      "ps_percent": 1.73
+    },
+    {
+      "energy": 105.810037,
+      "intensity": 0.0087,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#51",
+      "ps_percent": 0.89
+    },
+    {
+      "energy": 109.148843,
+      "intensity": 0.012700000000000001,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#56",
+      "ps_percent": 1.33
+    },
+    {
+      "energy": 111.053268,
+      "intensity": 0.0099,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#58",
+      "ps_percent": 1.02
+    },
+    {
+      "energy": 113.02501,
+      "intensity": 0.004600000000000001,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#64",
+      "ps_percent": 0.51
+    },
+    {
+      "energy": 117.199642,
+      "intensity": 0.0066,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#69",
+      "ps_percent": 0.66
+    },
+    {
+      "energy": 121.035889,
+      "intensity": 0.0049,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#75",
+      "ps_percent": 0.51
+    },
+    {
+      "energy": 121.457418,
+      "intensity": 0.0078,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#77",
+      "ps_percent": 0.87
+    },
+    {
+      "energy": 121.537484,
+      "intensity": 0.0049,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#78",
+      "ps_percent": 0.55
+    },
+    {
+      "energy": 122.337649,
+      "intensity": 0.0196,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#79",
+      "ps_percent": 2.13
+    },
+    {
+      "energy": 123.054255,
+      "intensity": 0.0063999999999999994,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#80",
+      "ps_percent": 0.73
+    },
+    {
+      "energy": 124.50079,
+      "intensity": 0.0058000000000000005,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#83",
+      "ps_percent": 0.59
+    },
+    {
+      "energy": 125.246449,
+      "intensity": 0.0065,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#84",
+      "ps_percent": 0.75
+    },
+    {
+      "energy": 125.422479,
+      "intensity": 0.012900000000000002,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#85",
+      "ps_percent": 1.5
+    },
+    {
+      "energy": 125.852526,
+      "intensity": 0.004699999999999999,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#86",
+      "ps_percent": 0.51
+    },
+    {
+      "energy": 126.154192,
+      "intensity": 0.021,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 3,
+      "state_ref": "irrep3/s3/#87",
+      "ps_percent": 2.22
+    },
+    {
+      "energy": 47.252255,
+      "intensity": 0.6608,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#1",
+      "ps_percent": 85.14
+    },
+    {
+      "energy": 69.762261,
+      "intensity": 0.0684,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#2",
+      "ps_percent": 9.61
+    },
+    {
+      "energy": 70.938023,
+      "intensity": 0.29400000000000004,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#3",
+      "ps_percent": 40.79
+    },
+    {
+      "energy": 72.904444,
+      "intensity": 0.1865,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#4",
+      "ps_percent": 25.76
+    },
+    {
+      "energy": 74.094007,
+      "intensity": 0.027000000000000003,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#5",
+      "ps_percent": 3.61
+    },
+    {
+      "energy": 78.758485,
+      "intensity": 0.0156,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#6",
+      "ps_percent": 2.26
+    },
+    {
+      "energy": 88.427624,
+      "intensity": 0.018799999999999997,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#13",
+      "ps_percent": 2.51
+    },
+    {
+      "energy": 89.51715,
+      "intensity": 0.0051,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#14",
+      "ps_percent": 0.66
+    },
+    {
+      "energy": 100.507679,
+      "intensity": 0.0057,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#28",
+      "ps_percent": 0.79
+    },
+    {
+      "energy": 102.717541,
+      "intensity": 0.0053,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#31",
+      "ps_percent": 0.65
+    },
+    {
+      "energy": 103.090523,
+      "intensity": 0.005,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#32",
+      "ps_percent": 0.63
+    },
+    {
+      "energy": 107.283764,
+      "intensity": 0.0073,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#39",
+      "ps_percent": 0.92
+    },
+    {
+      "energy": 107.581176,
+      "intensity": 0.030200000000000005,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#40",
+      "ps_percent": 3.89
+    },
+    {
+      "energy": 115.313,
+      "intensity": 0.007,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#51",
+      "ps_percent": 0.97
+    },
+    {
+      "energy": 116.228361,
+      "intensity": 0.0046,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#53",
+      "ps_percent": 0.56
+    },
+    {
+      "energy": 120.159444,
+      "intensity": 0.0060999999999999995,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#58",
+      "ps_percent": 0.84
+    },
+    {
+      "energy": 120.691188,
+      "intensity": 0.0078,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#59",
+      "ps_percent": 1.05
+    },
+    {
+      "energy": 130.171702,
+      "intensity": 0.0034000000000000002,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#74",
+      "ps_percent": 0.51
+    },
+    {
+      "energy": 132.938551,
+      "intensity": 0.0179,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#77",
+      "ps_percent": 2.44
+    },
+    {
+      "energy": 135.543008,
+      "intensity": 0.0252,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#81",
+      "ps_percent": 3.38
+    },
+    {
+      "energy": 137.185494,
+      "intensity": 0.005900000000000001,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#83",
+      "ps_percent": 0.86
+    },
+    {
+      "energy": 140.033931,
+      "intensity": 0.0047,
+      "channel": "Meitner@O",
+      "spin": 1,
+      "irrep": 4,
+      "state_ref": "irrep4/s1/#86",
+      "ps_percent": 0.69
+    },
+    {
+      "energy": 45.053283,
+      "intensity": 0.6577999999999999,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#1",
+      "ps_percent": 84.65
+    },
+    {
+      "energy": 63.556198,
+      "intensity": 0.5704,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#2",
+      "ps_percent": 79.5
+    },
+    {
+      "energy": 67.200057,
+      "intensity": 0.0082,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#3",
+      "ps_percent": 1.11
+    },
+    {
+      "energy": 69.727292,
+      "intensity": 0.0126,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#4",
+      "ps_percent": 1.73
+    },
+    {
+      "energy": 72.533045,
+      "intensity": 0.0043,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#5",
+      "ps_percent": 0.64
+    },
+    {
+      "energy": 75.149667,
+      "intensity": 0.005899999999999999,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#6",
+      "ps_percent": 0.73
+    },
+    {
+      "energy": 85.796358,
+      "intensity": 0.0162,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#13",
+      "ps_percent": 2.13
+    },
+    {
+      "energy": 96.957806,
+      "intensity": 0.004700000000000001,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#29",
+      "ps_percent": 0.58
+    },
+    {
+      "energy": 100.191399,
+      "intensity": 0.004700000000000001,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#34",
+      "ps_percent": 0.58
+    },
+    {
+      "energy": 103.279718,
+      "intensity": 0.0064,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#39",
+      "ps_percent": 0.89
+    },
+    {
+      "energy": 103.303994,
+      "intensity": 0.0081,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#40",
+      "ps_percent": 0.98
+    },
+    {
+      "energy": 105.339987,
+      "intensity": 0.0043,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#45",
+      "ps_percent": 0.65
+    },
+    {
+      "energy": 105.518282,
+      "intensity": 0.0063,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#46",
+      "ps_percent": 0.79
+    },
+    {
+      "energy": 106.338644,
+      "intensity": 0.0087,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#47",
+      "ps_percent": 1.19
+    },
+    {
+      "energy": 108.429815,
+      "intensity": 0.006999999999999999,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#50",
+      "ps_percent": 0.98
+    },
+    {
+      "energy": 109.589638,
+      "intensity": 0.009500000000000001,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#53",
+      "ps_percent": 1.14
+    },
+    {
+      "energy": 113.413297,
+      "intensity": 0.0072,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#59",
+      "ps_percent": 0.9
+    },
+    {
+      "energy": 122.596077,
+      "intensity": 0.0092,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#74",
+      "ps_percent": 1.32
+    },
+    {
+      "energy": 124.762716,
+      "intensity": 0.0046,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#79",
+      "ps_percent": 0.58
+    },
+    {
+      "energy": 125.845345,
+      "intensity": 0.0078,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#81",
+      "ps_percent": 1.13
+    },
+    {
+      "energy": 126.491833,
+      "intensity": 0.0069,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#83",
+      "ps_percent": 0.92
+    },
+    {
+      "energy": 127.498525,
+      "intensity": 0.020999999999999998,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#85",
+      "ps_percent": 2.79
+    },
+    {
+      "energy": 129.060045,
+      "intensity": 0.0087,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#87",
+      "ps_percent": 1.08
+    },
+    {
+      "energy": 130.073639,
+      "intensity": 0.006300000000000001,
+      "channel": "Meitner@O",
+      "spin": 3,
+      "irrep": 4,
+      "state_ref": "irrep4/s3/#89",
+      "ps_percent": 0.9
+    }
+  ]
+}
