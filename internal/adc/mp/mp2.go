@@ -4,7 +4,7 @@
 // orbital energies from the Fock diagonal (FCIDUMP does not store them).
 package mp
 
-import "adcgo/internal/adc/fcidump"
+import "github.com/leiaSQ/ADCgo/internal/adc/fcidump"
 
 // NOcc returns the number of doubly occupied spatial orbitals for a
 // closed-shell (RHF) reference.

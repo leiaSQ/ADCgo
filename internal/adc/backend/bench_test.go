@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"adcgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
 )
 
 // Sizes bracket the real Lanczos working set: sector dimensions run from ~10^3

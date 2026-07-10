@@ -28,14 +28,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"adcgo/internal/adc/analyze"
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/dip"
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/integrals"
-	"adcgo/internal/adc/lanczos"
-	"adcgo/internal/adc/mp"
-	"adcgo/internal/adc/refout"
+	"github.com/leiaSQ/ADCgo/internal/adc/analyze"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/dip"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/refout"
 )
 
 // Tolerances. The energy band is one-sided and wide to absorb pyscf-vs-GAMESS

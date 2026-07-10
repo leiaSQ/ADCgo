@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"adcgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
 )
 
 type reference struct {

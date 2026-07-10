@@ -24,8 +24,8 @@
 package integrals
 
 import (
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
 )
 
 // Store wraps the FCIDUMP integrals with occ/vir + symmetry metadata.

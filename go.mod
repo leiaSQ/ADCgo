@@ -1,4 +1,4 @@
-module adcgo
+module github.com/leiaSQ/ADCgo
 
 go 1.26
 

@@ -1,6 +1,6 @@
 package sip
 
-import "adcgo/internal/adc/backend"
+import "github.com/leiaSQ/ADCgo/internal/adc/backend"
 
 // The spectroscopic (transition) amplitudes: the effective one-hole overlap of a
 // final cationic state is a = F·Y, where Y is the state's 1h (main-block)
@@ -34,7 +34,9 @@ func (e *elements) f2(i, j int) float64 {
 
 // FMatrix builds the symmetric dim_1h × dim_1h F-matrix (transition amplitudes)
 // for this sector: F = 1 + F⁽²⁾ (+ F⁽³⁾ at order 3, the hermitian (f_ij+f_ji)/2
-// contribution from calc_c11_3).
+// contribution from calc_c11_3). For order 4 the ≤3rd-order F is reused; the F⁽⁴⁾
+// spectroscopic-amplitude term is not yet ported (it does not affect the secular
+// matrix, only pole strengths).
 func (mx *Matrix) FMatrix() backend.Mat {
 	sp := mx.sp
 	n := sp.BeginSat

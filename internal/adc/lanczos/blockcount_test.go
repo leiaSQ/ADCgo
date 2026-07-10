@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/dip"
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/dip"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
 )
 
 // The block count is the one solver parameter that has to mean the same thing here as

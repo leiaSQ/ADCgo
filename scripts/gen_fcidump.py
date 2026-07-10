@@ -5,18 +5,27 @@ validate against.
 
 Run with the `adcgo` conda env:
     /home/leia/miniconda3/envs/adcgo/bin/python scripts/gen_fcidump.py
+
+With --sidecar-only, only the dipole/geometry keys of the existing sidecar are
+refreshed; the FCIDUMP and the golden reference are left alone. Use that to extend
+the committed fixtures, whose FCIDUMP several bit-exact gates depend on.
 """
 import json
 import os
+import sys
 
 from pyscf import gto, scf, mp
 from pyscf.tools import fcidump
 
+import fcidump_common
 from gamess_orbsym import gamess_orbsym, rewrite_fcidump_orbsym
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TESTDATA = os.path.join(os.path.dirname(HERE), "testdata")
 os.makedirs(TESTDATA, exist_ok=True)
+
+SIDECAR_ONLY = "--sidecar-only" in sys.argv[1:]
+MO_PATH = os.path.join(TESTDATA, "h2o.mo.json")
 
 BASIS = "cc-pvdz"
 
@@ -42,6 +51,13 @@ mf = scf.RHF(mol)
 mf.conv_tol = 1e-12
 mf.conv_tol_grad = 1e-9
 mf.run()
+
+if SIDECAR_ONLY:
+    doc, err = fcidump_common.augment_sidecar(MO_PATH, mol, dm=mf.make_rdm1())
+    print(f"AO-basis gate OK: stored overlap matches this mol to {err:.2e}")
+    print(f"augmented {MO_PATH}  dip_origin={doc['dip_origin']} scf_dip={doc['scf_dip']}")
+    raise SystemExit(0)
+
 mp2 = mp.MP2(mf).run()
 
 fcidump_path = os.path.join(TESTDATA, "h2o.fcidump")
@@ -72,44 +88,12 @@ with open(os.path.join(TESTDATA, "h2o.ref.json"), "w") as fh:
     json.dump(ref, fh, indent=2)
     fh.write("\n")
 
-# C/S sidecar: MO coefficients, AO overlap, and AO->atom map. Needed for the
-# atom-resolved two-hole population (Tarantelli U-transform) — FCIDUMP carries
-# none of this. mo_coeff is (nAO, nMO); overlap is (nAO, nAO), both row-major.
-C = mf.mo_coeff
-S = mf.get_ovlp()
-
-# Distinct atom labels: element symbol, suffixed with a 1-based per-element index
-# when that element occurs more than once (O, H1, H2), matching the popana style.
-from collections import Counter
-elem_counts = Counter(mol.atom_symbol(a) for a in range(mol.natm))
-seen = Counter()
-atom_names = []
-for a in range(mol.natm):
-    sym = mol.atom_symbol(a)
-    if elem_counts[sym] > 1:
-        seen[sym] += 1
-        atom_names.append(f"{sym}{seen[sym]}")
-    else:
-        atom_names.append(sym)
-
-# AO -> atom index via the per-atom AO slices.
-ao_atom = [0] * C.shape[0]
-for a, (_, _, ao0, ao1) in enumerate(mol.aoslice_by_atom()):
-    for p in range(ao0, ao1):
-        ao_atom[p] = a
-
-mo = {
-    "nao": int(C.shape[0]),
-    "nmo": int(C.shape[1]),
-    "mo_coeff": [[float(x) for x in row] for row in C],
-    "overlap": [[float(x) for x in row] for row in S],
-    "ao_atom": [int(x) for x in ao_atom],
-    "atom_names": atom_names,
-}
-with open(os.path.join(TESTDATA, "h2o.mo.json"), "w") as fh:
-    json.dump(mo, fh)
-    fh.write("\n")
-print(f"wrote {os.path.join(TESTDATA, 'h2o.mo.json')}  nAO={mo['nao']} atoms={atom_names}")
+# Sidecar: MO coefficients, AO overlap, AO->atom map, dipole integrals and geometry.
+# FCIDUMP carries none of this. The full MO set is dumped here (no frozen core), so
+# the sidecar's scf_dip gate is reproducible from mo_coeff alone.
+mo = fcidump_common.write_sidecar(MO_PATH, mol, mf.mo_coeff, mf.get_ovlp(),
+                                  dm=mf.make_rdm1())
+print(f"wrote {MO_PATH}  nAO={mo['nao']} atoms={mo['atom_names']}")
 
 print(f"wrote {fcidump_path}")
 print(f"NORB={ref['norb']} NELEC={ref['nelec']}")

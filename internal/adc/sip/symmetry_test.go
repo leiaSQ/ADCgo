@@ -6,10 +6,10 @@ import (
 	"sort"
 	"testing"
 
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/integrals"
-	"adcgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
 )
 
 func symSetup(t *testing.T) (*fcidump.Data, int, []float64) {

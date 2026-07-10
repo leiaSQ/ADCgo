@@ -5,13 +5,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"adcgo/internal/adc/backend"
-	"adcgo/internal/adc/dip"
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/integrals"
-	"adcgo/internal/adc/lanczos"
-	"adcgo/internal/adc/mo"
-	"adcgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/dip"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
+	"github.com/leiaSQ/ADCgo/internal/adc/mo"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
 )
 
 // TestPopSumMatchesPS is the M1 population oracle: the atom-resolved two-hole

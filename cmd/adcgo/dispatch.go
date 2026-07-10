@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"adcgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
 )
 
 // Per-sector backend selection for -backend auto.

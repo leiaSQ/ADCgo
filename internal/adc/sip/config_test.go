@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"adcgo/internal/adc/fcidump"
-	"adcgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
 )
 
 // H2O/cc-pVDZ (symmetry off): nocc=5, norb=24, nvir=19.

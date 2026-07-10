@@ -11,20 +11,28 @@ prove the basis + geometry are transcribed correctly before trusting the FCIDUMP
 
 Run with the `adcgo` conda env:
     /home/leia/miniconda3/envs/adcgo/bin/python scripts/gen_ref_fcidump.py
+
+With --sidecar-only, only the dipole/geometry keys of the existing sidecar are
+refreshed; the matched FCIDUMP that the DIP and ADC(4) gates compare against is left
+alone.
 """
 import json
 import os
-from collections import Counter
+import sys
 
 import numpy as np
 from pyscf import gto, scf, mcscf
 from pyscf.tools import fcidump
 
+import fcidump_common
 from gamess_orbsym import gamess_orbsym
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TESTDATA = os.path.join(os.path.dirname(HERE), "testdata")
 os.makedirs(TESTDATA, exist_ok=True)
+
+SIDECAR_ONLY = "--sidecar-only" in sys.argv[1:]
+MO_PATH = os.path.join(TESTDATA, "h2o_dzp.mo.json")
 
 # --- reference constants (from ../ADCanalysis/examples/DIP_h2o) ---------------
 REF_SCF_ENERGY = -76.0498071428  # gamess_scf.out "total energy"
@@ -102,6 +110,12 @@ if abs(mf.e_tot - REF_SCF_ENERGY) > 1e-4:
 print(f"SCF gate OK: E(SCF)={mf.e_tot:.10f} Ha  (ref {REF_SCF_ENERGY:.10f}, "
       f"nAO={mol.nao_cart()})")
 
+if SIDECAR_ONLY:
+    doc, err = fcidump_common.augment_sidecar(MO_PATH, mol, dm=mf.make_rdm1())
+    print(f"AO-basis gate OK: stored overlap matches this mol to {err:.2e}")
+    print(f"augmented {MO_PATH}  dip_origin={doc['dip_origin']} scf_dip={doc['scf_dip']}")
+    raise SystemExit(0)
+
 # Frozen-core active space (MOs 2..30). CASCI defaults ncore=(10-8)/2=1 and, with
 # ncas=29, leaves MO 31 out -> exactly "2 to 30".
 mc = mcscf.CASCI(mf, NCAS, NELECAS)
@@ -122,41 +136,13 @@ fcidump.from_integrals(fcidump_path, h1e, h2e, NCAS, NELECAS, nuc=ecore,
                        ms=0, orbsym=orbsym, tol=1e-18, float_format="% .17g")
 print(f"wrote {fcidump_path}  NORB={NCAS} NELEC={NELECAS} nocc={NELECAS // 2}")
 
-# C/S sidecar for the atom-resolved two-hole populations: active-space MO coeffs
-# (nAO x 29), the full AO overlap, and the AO->atom map named O/H1/H2 to match the
-# reference popana columns.
-C = mo_act
-S = mf.get_ovlp()
-
-elem_counts = Counter(mol.atom_symbol(a) for a in range(mol.natm))
-seen = Counter()
-atom_names = []
-for a in range(mol.natm):
-    s = mol.atom_symbol(a)
-    if elem_counts[s] > 1:
-        seen[s] += 1
-        atom_names.append(f"{s}{seen[s]}")
-    else:
-        atom_names.append(s)
-
-ao_atom = [0] * C.shape[0]
-for a, (_, _, ao0, ao1) in enumerate(mol.aoslice_by_atom()):
-    for p in range(ao0, ao1):
-        ao_atom[p] = a
-
-mo = {
-    "nao": int(C.shape[0]),
-    "nmo": int(C.shape[1]),
-    "mo_coeff": [[float(x) for x in row] for row in C],
-    "overlap": [[float(x) for x in row] for row in S],
-    "ao_atom": [int(x) for x in ao_atom],
-    "atom_names": atom_names,
-}
-mo_path = os.path.join(TESTDATA, "h2o_dzp.mo.json")
-with open(mo_path, "w") as fh:
-    json.dump(mo, fh)
-    fh.write("\n")
-print(f"wrote {mo_path}  nAO={mo['nao']} atoms={atom_names}")
+# Sidecar for the atom-resolved two-hole populations: active-space MO coeffs
+# (nAO x 29), the full AO overlap, the AO->atom map named O/H1/H2 to match the
+# reference popana columns, plus dipole integrals and geometry. scf_dip is the
+# whole-molecule RHF dipole; it is *not* reproducible from these frozen-core MOs.
+mo = fcidump_common.write_sidecar(MO_PATH, mol, mo_act, mf.get_ovlp(),
+                                  dm=mf.make_rdm1())
+print(f"wrote {MO_PATH}  nAO={mo['nao']} atoms={mo['atom_names']}")
 
 # Small manifest recording provenance + the gate value.
 ref = {

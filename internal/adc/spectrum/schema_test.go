@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"adcgo/internal/adc/analyze"
+	"github.com/leiaSQ/ADCgo/internal/adc/analyze"
 )
 
 // TestSchemaKeys pins the JSON key contract with ADCanalysis's plotspec (which
