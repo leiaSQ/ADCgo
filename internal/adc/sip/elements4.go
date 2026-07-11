@@ -384,6 +384,270 @@ func ns3(cfg Config3) int {
 	}
 }
 
+// wert3elem is the 3h2p↔3h2p secular block element −K(IJKLM,I'J'K'L'M') −
+// C(IJKLM,I'J'K'L'M') for CVS IP-ADC(4) (Giuliana's thesis Eq. A.12–A.13), a verbatim
+// port of ../ADC/adc4core/adc4_constr/wert3.F. row is the bra (I,J,K,L,M), col the ket
+// (I',J',K',L',M'). theADCcode evaluates this only on the diagonal (bra==ket, selec.F:120),
+// where it is the 3h2p effective diagonal EIGAB = the 0th-order orbital-energy sum plus the
+// 5th-order CI diagonal correction. Returned as the [5][5] intermediate-spin block; the
+// caller (sat3Diag) takes W[Spin-1][Spin-1].
+//
+// INDVZ(a,b,c,d) → e.v(a,b,c,d); exchange = swap the last two args. The reference tracks
+// which VINT slots are active via IQUAL; here the inactive slots stay zero, so the spin
+// contraction simply sums over all 52 (0·coeff = 0), dropping the IQUAL bookkeeping.
+func (e *elements) wert3elem(row, col Config3) [5][5]float64 {
+	i, j := e.nocc+row.I, e.nocc+row.J // particles I,J (absolute)
+	k, l, m := row.Core, row.L, row.M  // core hole K, valence holes L,M
+	ii, jj := e.nocc+col.I, e.nocc+col.J
+	kk, ll, mm := col.Core, col.L, col.M
+	maxs := maxS3(row.L == row.M, row.I == row.J)
+	maxss := maxS3(col.L == col.M, col.I == col.J)
+	ns, nss := ns3(row), ns3(col)
+	v, ep := e.v, e.eps
+
+	var w [5][5]float64
+	var vint [53]float64 // 1-indexed (slot 0 unused), mirrors wert3.F VINT(1..52)
+
+	// 0th-order K matrix: diagonal in the configuration indices (wert3.F:79-85).
+	if i == ii && j == jj && k == kk && l == ll && m == mm {
+		d := ep[i] + ep[j] - ep[k] - ep[l] - ep[m]
+		for s := 0; s < 5; s++ {
+			w[s][s] = d
+		}
+	}
+
+	// 5th-order CI matrix (wert3.F:95-424). Near-verbatim: labels Lnnn mirror the
+	// Fortran statement numbers; goto follows the reference's branch cascade exactly.
+	if k != kk || l != ll || m != mm {
+		goto L101
+	}
+	vint[1] = v(i, j, ii, jj)
+	vint[2] = v(i, j, jj, ii)
+L101:
+	if i != ii || j != jj {
+		goto L200
+	}
+	if k != kk {
+		goto L105
+	}
+	vint[3] = v(ll, mm, l, m)
+	vint[4] = v(ll, mm, m, l)
+L105:
+	if l != ll {
+		goto L106
+	}
+	vint[5] = v(kk, mm, k, m)
+	vint[6] = v(kk, mm, m, k)
+L106:
+	if m != ll {
+		goto L108
+	}
+	vint[7] = v(kk, mm, k, l)
+	vint[8] = v(kk, mm, l, k)
+L108:
+	if l != mm {
+		goto L109
+	}
+	vint[9] = v(kk, ll, k, m)
+	vint[10] = v(kk, ll, m, k)
+L109:
+	if m != mm {
+		goto L200
+	}
+	vint[11] = v(kk, ll, k, l)
+	vint[12] = v(kk, ll, l, k)
+L200:
+	if i != ii {
+		goto L300
+	}
+	if k != kk || l != ll {
+		goto L201
+	}
+	vint[13] = v(j, mm, jj, m)
+	vint[14] = v(j, mm, m, jj)
+L201:
+	if k != kk || m != ll {
+		goto L205
+	}
+	vint[15] = v(j, mm, jj, l)
+	vint[16] = v(j, mm, l, jj)
+L205:
+	if l != ll || m != mm {
+		goto L206
+	}
+	vint[17] = v(j, kk, jj, k)
+	vint[18] = v(j, kk, k, jj)
+L206:
+	if k != kk || l != mm {
+		goto L207
+	}
+	vint[19] = v(j, ll, jj, m)
+	vint[20] = v(j, ll, m, jj)
+L207:
+	if k != kk || m != mm {
+		goto L209
+	}
+	vint[21] = v(j, ll, jj, l)
+	vint[22] = v(j, ll, l, jj)
+L209:
+	if i == j && ii == jj {
+		goto L301
+	}
+	if i == j {
+		goto L302
+	}
+	if ii == jj {
+		goto L303
+	}
+	goto L700
+L301:
+	for ms := 1; ms <= 10; ms++ {
+		vint[22+ms] = vint[12+ms]
+		vint[32+ms] = vint[12+ms]
+		vint[42+ms] = vint[12+ms]
+	}
+	goto L1000
+L302:
+	for ms := 1; ms <= 10; ms++ {
+		vint[22+ms] = vint[12+ms]
+	}
+	goto L1000
+L303:
+	for ms := 1; ms <= 10; ms++ {
+		vint[32+ms] = vint[12+ms]
+	}
+	goto L1000
+L300:
+	if j != ii {
+		goto L500
+	}
+	if k != kk || l != ll {
+		goto L401
+	}
+	vint[23] = v(i, mm, jj, m)
+	vint[24] = v(i, mm, m, jj)
+L401:
+	if k != kk || m != ll {
+		goto L405
+	}
+	vint[25] = v(i, mm, jj, l)
+	vint[26] = v(i, mm, l, jj)
+L405:
+	if l != ll || m != mm {
+		goto L406
+	}
+	vint[27] = v(i, kk, jj, k)
+	vint[28] = v(i, kk, k, jj)
+L406:
+	if k != kk || l != mm {
+		goto L407
+	}
+	vint[29] = v(i, ll, jj, m)
+	vint[30] = v(i, ll, m, jj)
+L407:
+	if k != kk || m != mm {
+		goto L409
+	}
+	vint[31] = v(i, ll, jj, l)
+	vint[32] = v(i, ll, l, jj)
+L409:
+	if ii != jj {
+		goto L1000
+	}
+	for ms := 1; ms <= 10; ms++ {
+		vint[42+ms] = vint[22+ms]
+	}
+	goto L1000
+L500:
+	if i != jj {
+		goto L700
+	}
+	if k != kk || l != ll {
+		goto L601
+	}
+	vint[33] = v(j, mm, ii, m)
+	vint[34] = v(j, mm, m, ii)
+L601:
+	if k != kk || m != ll {
+		goto L605
+	}
+	vint[35] = v(j, mm, ii, l)
+	vint[36] = v(j, mm, l, ii)
+L605:
+	if l != ll || m != mm {
+		goto L606
+	}
+	vint[37] = v(j, kk, ii, k)
+	vint[38] = v(j, kk, k, ii)
+L606:
+	if k != kk || l != mm {
+		goto L607
+	}
+	vint[39] = v(j, ll, ii, m)
+	vint[40] = v(j, ll, m, ii)
+L607:
+	if k != kk || m != mm {
+		goto L609
+	}
+	vint[41] = v(j, ll, ii, l)
+	vint[42] = v(j, ll, l, ii)
+L609:
+	if i != j {
+		goto L1000
+	}
+	for ms := 1; ms <= 10; ms++ {
+		vint[42+ms] = vint[32+ms]
+	}
+	goto L1000
+L700:
+	if j != jj {
+		goto L1000
+	}
+	if k != kk || l != ll {
+		goto L801
+	}
+	vint[43] = v(i, mm, ii, m)
+	vint[44] = v(i, mm, m, ii)
+L801:
+	if k != kk || m != ll {
+		goto L805
+	}
+	vint[45] = v(i, mm, ii, l)
+	vint[46] = v(i, mm, l, ii)
+L805:
+	if l != ll || m != mm {
+		goto L806
+	}
+	vint[47] = v(i, kk, ii, k)
+	vint[48] = v(i, kk, k, ii)
+L806:
+	if k != kk || l != mm {
+		goto L807
+	}
+	vint[49] = v(i, ll, ii, m)
+	vint[50] = v(i, ll, m, ii)
+L807:
+	if k != kk || m != mm {
+		goto L1000
+	}
+	vint[51] = v(i, ll, ii, l)
+	vint[52] = v(i, ll, l, ii)
+L1000:
+	// Spin contraction W(MS,MSS) += Σ_n VINT(n)·SPIN(NS+MS, NSS+MSS, n) (wert3.F:415-423).
+	for ms := 0; ms < maxs; ms++ {
+		for mss := 0; mss < maxss; mss++ {
+			var add float64
+			for n := 1; n <= 52; n++ {
+				if vint[n] != 0 {
+					add += vint[n] * coeff2[ns+ms][nss+mss][n-1]
+				}
+			}
+			w[ms][mss] += add
+		}
+	}
+	return w
+}
+
 // kopp4 is the 4th-order 1h<->3h2p coupling <P|Ĥ|I J K L M,S> (kopp4.F, Eq. A.6).
 // p is the external core hole (absolute occ index); cfg the 3h2p satellite. Two
 // contributions: a sum over an intermediate particle KKK (SUM2+SUM5) and over an

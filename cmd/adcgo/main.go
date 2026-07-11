@@ -41,6 +41,9 @@ func main() {
 	sym := flag.String("sym", "all", "target dication irrep: all | none | <0-based index>")
 	coreOrb := flag.String("core", "", "CVS core orbitals for -order 4: comma-separated 0-based occupied indices (e.g. 0)")
 	backendName := flag.String("backend", "gonum", "linear-algebra backend: gonum | hip | cuda | auto (auto calibrates and picks per sector; build-tag gated)")
+	matfree := flag.String("matfree", "off", "matrix-free apply of large CVS-ADC(4) coupling blocks (recompute vs store): off | auto | on. Trades resident memory for per-mat-vec recompute; auto switches per block using -maxmem")
+	maxMemGB := flag.Float64("maxmem", 4.0, "matrix-free -matfree=auto threshold: a coupling block whose dense size exceeds this many GB is applied matrix-free")
+	wert3 := flag.Bool("wert3", false, "include the WERT3 5th-order 3h2p-diagonal correction in CVS-ADC(4) (full EIGAB effective diagonal; opt-in pending the theADCcode EIGAB value-gate)")
 	out := flag.String("out", "", "write JSON to this file (default stdout)")
 	profile := flag.Bool("profile", false, "print per-sector solver phase timings to stderr")
 
@@ -136,6 +139,14 @@ func main() {
 			core:    core,
 			moPath:  *moPath, tdm: *doTDM, tdmOsc: *tdmOsc,
 		}
+		mfMode, err := parseMatFree(*matfree)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "adcgo:", err)
+			os.Exit(2)
+		}
+		cfg.matFree = mfMode
+		cfg.matFreeBudget = int64(*maxMemGB * (1 << 30))
+		cfg.wert3 = *wert3
 		if err := runSIP(d, cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
 			os.Exit(1)
@@ -322,6 +333,24 @@ type sipConfig struct {
 	moPath string  // MO/dipole sidecar (required by -tdm)
 	tdm    bool    // emit transition dipole moments instead of the solver document
 	tdmOsc float64 // photoionization channel oscillator-strength cutoff
+
+	matFree       sip.MatFreeMode // dense (default) vs matrix-free large ADC(4) blocks
+	matFreeBudget int64           // -matfree=auto per-block dense-size threshold (bytes)
+	wert3         bool            // include the WERT3 5th-order 3h2p-diagonal correction
+}
+
+// parseMatFree maps the -matfree flag to a sip.MatFreeMode.
+func parseMatFree(s string) (sip.MatFreeMode, error) {
+	switch s {
+	case "off", "":
+		return sip.MatFreeOff, nil
+	case "auto":
+		return sip.MatFreeAuto, nil
+	case "on":
+		return sip.MatFreeOn, nil
+	default:
+		return sip.MatFreeOff, fmt.Errorf("bad -matfree %q (want off, auto, or on)", s)
+	}
 }
 
 // parseCoreOrbitals parses the -core flag: comma-separated 0-based occupied indices.

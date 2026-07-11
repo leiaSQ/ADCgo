@@ -84,7 +84,8 @@ def dump(cfg):
     mf = run_scf(cfg, mol)
 
     nmo = mf.mo_coeff.shape[1]
-    sel = orbital_select.resolve(nmo, mol.nelectron, cfg.active, cfg.frozen_core)
+    sel = orbital_select.resolve(nmo, mol.nelectron, cfg.active, cfg.frozen_core,
+                                 cfg.frozen_list)
     fcidump_path = cfg.resolve(cfg.fcidump)
 
     if sel.full:
@@ -158,7 +159,8 @@ def config_from_args(args):
         basis_file=args.basis_file, basis_name=args.basis,
         cartesian=args.cartesian,
         charge=args.charge, spin=args.spin, symmetry=sym, gate=args.gate,
-        frozen_core=args.frozen_core, active=args.active,
+        frozen_core=args.frozen_core, frozen_list=args.frozen_list,
+        active=args.active,
         fcidump=args.fcidump, sidecar=args.sidecar, manifest=args.manifest,
     )
 
@@ -180,6 +182,9 @@ def main(argv=None):
     p.add_argument("--gate", type=float, help="reference E(SCF) gate (Ha)")
     p.add_argument("--frozen-core", type=int, dest="frozen_core",
                    help="freeze N lowest MOs")
+    p.add_argument("--frozen-list", dest="frozen_list",
+                   help='freeze an explicit 1-based MO set, e.g. "2 to 6" (need not '
+                        'be the lowest; for CVS on a non-lowest core)')
     p.add_argument("--active", help='GAMESS active list, e.g. "2 to 30"')
     p.add_argument("--fcidump", help="output FCIDUMP path")
     p.add_argument("--sidecar", help="output C/S sidecar JSON path")

@@ -27,6 +27,27 @@ func TestGemvNT(t *testing.T) {
 	}
 }
 
+// TestAxpyDiag: y += d ⊙ x with accumulate semantics, and through a Slice view (the
+// mechanism the CVS-ADC(4) 3h2p diagonal block uses to apply over its row band).
+func TestAxpyDiag(t *testing.T) {
+	b := Gonum{}
+	d := b.Upload(Vec{2, 3, 4})
+	x := b.Upload(Vec{5, 6, 7})
+	y := b.Upload(Vec{1, 1, 1}) // non-zero start: must accumulate
+	b.AxpyDiag(d, x, y)
+	if gy := b.Download(y); gy[0] != 11 || gy[1] != 19 || gy[2] != 29 {
+		t.Fatalf("AxpyDiag = %v, want [11 19 29]", gy)
+	}
+
+	// Applied to rows [1,4) of a length-5 vector, leaving the rest untouched.
+	out := b.Upload(Vec{9, 0, 0, 0, 9})
+	xin := b.Upload(Vec{9, 5, 6, 7, 9})
+	b.AxpyDiag(d, xin.Slice(1, 3), out.Slice(1, 3))
+	if got := b.Download(out); got[0] != 9 || got[1] != 10 || got[2] != 18 || got[3] != 28 || got[4] != 9 {
+		t.Fatalf("AxpyDiag slice = %v, want [9 10 18 28 9]", got)
+	}
+}
+
 // TestSliceView: a GEMV into a Slice view must write through to the parent
 // vector's sub-range (the mechanism the DIP mat-vec uses for block offsets).
 func TestSliceView(t *testing.T) {

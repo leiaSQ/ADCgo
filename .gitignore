@@ -12,3 +12,4 @@ __pycache__/
 # editors
 .idea/
 .vscode/
+internal/adc/backend/adc4_kernels.o
