@@ -112,26 +112,39 @@ func (mx *Matrix) coupling24_4() backend.Mat {
 	return C
 }
 
-// satBlock3_4 is the 3h2p/3h2p block: 0th-order diagonal ε_I+ε_J−ε_K−ε_L−ε_M (the
-// reference's WERT3 5th-order 3h2p-CI matrix folded to an effective diagonal via ELIM
-// is deferred — it is not on the B2 tape). This is the physically-leading ADC(4) term
-// and is self-consistent under the internal oracles (dense==Lanczos, symmetry).
-func (mx *Matrix) satBlock3_4() backend.Mat {
+// sat3Diag is the 3h2p/3h2p block, the reference's EIGAB effective diagonal. By default
+// it is the 0th-order orbital-energy sum ε_I+ε_J−ε_K−ε_L−ε_M. With WERT3 enabled
+// (SetWert3, -wert3) it is the full EIGAB: that sum plus the 5th-order 3h2p-CI diagonal
+// correction (elements4.go wert3elem). theADCcode evaluates WERT3 only on the diagonal
+// (selec.F:120), so the block stays strictly diagonal either way — returned as its diagonal
+// vector and applied via backend.AxpyDiag, never a dense n×n upload (which would be ~2.5 TB
+// for pyridine's N K-edge, vs ~5 MB as a vector). ELIM's center-of-gravity fold is a
+// truncation device (inactive below MAXSTA) and is not needed for the untruncated space.
+//
+// WERT3 is opt-in because its definitive bit-exact gate — theADCcode's EIGAB dump — is
+// blocked by the pre-existing MAXB3-on-rebuild issue (see docs/adc4_sip_spec.md). It is
+// validated by self-consistency (dense==Lanczos, symmetry) and the diagonal spin-block
+// Hermiticity of wert3elem (elements4_test.go).
+func (mx *Matrix) sat3Diag() []float64 {
 	sp := mx.sp
 	ep := mx.el.eps
-	n := len(sp.Sat3)
-	S := backend.NewMat(n, n)
-	for r := range n {
+	nocc := mx.el.nocc
+	d := make([]float64, len(sp.Sat3))
+	for r := range d {
 		c := sp.Sat3[r]
-		i, j := mx.el.nocc+c.I, mx.el.nocc+c.J
-		S.Set(r, r, ep[i]+ep[j]-ep[c.Core]-ep[c.L]-ep[c.M])
+		if mx.wert3 {
+			d[r] = mx.el.wert3elem(c, c)[c.Spin-1][c.Spin-1]
+		} else {
+			d[r] = ep[nocc+c.I] + ep[nocc+c.J] - ep[c.Core] - ep[c.L] - ep[c.M]
+		}
 	}
-	return S
+	return d
 }
 
 // finalizeOp plans the batches and sizes the scratch slices for parts (shared with
-// the order-2/3 assemble()).
-func finalizeOp(parts []placement) *assembledOp {
+// the order-2/3 assemble()); diags carries any purely diagonal blocks applied
+// elementwise outside the GEMM batches.
+func finalizeOp(parts []placement, diags []diagPart, mf []matFreePart) *assembledOp {
 	batches := backend.PlanBatches(parts)
 	widest := 0
 	for _, b := range batches {
@@ -140,7 +153,7 @@ func finalizeOp(parts []placement) *assembledOp {
 		}
 	}
 	return &assembledOp{
-		parts: parts, batches: batches,
+		parts: parts, batches: batches, diags: diags, mf: mf,
 		sa: make([]backend.DeviceMat, widest),
 		sb: make([]backend.BlockView, widest),
 		sc: make([]backend.BlockView, widest),
@@ -154,6 +167,8 @@ func (mx *Matrix) assemble4() *assembledOp {
 	n2 := sp.Begin3h2p - main // 2h1p count
 	n3 := len(sp.Sat3)
 	var parts []placement
+	var diags []diagPart
+	var mfree []matFreePart
 	add := func(m backend.Mat, r0, c0 int, diag bool) {
 		parts = append(parts, placement{A: mx.be.UploadMat(m), RowOff: r0, ColOff: c0, Diag: diag})
 	}
@@ -167,15 +182,29 @@ func (mx *Matrix) assemble4() *assembledOp {
 		}
 	}
 	if n2 > 0 {
-		add(mx.satBlock2_4(), main, main, true)
-	}
-	if n3 > 0 {
-		add(mx.satBlock3_4(), sp.Begin3h2p, sp.Begin3h2p, true)
-		if n2 > 0 {
-			add(mx.coupling24_4(), main, sp.Begin3h2p, false)
+		// The 2h1p×2h1p satellite block: dense by default; matrix-free only when its
+		// n2²·8 residency exceeds the budget (it is far smaller than the coupling block).
+		if mx.matFreeC22(int64(n2) * int64(n2) * 8) {
+			mfree = append(mfree, mx.newC22MatFree())
+		} else {
+			add(mx.satBlock2_4(), main, main, true)
 		}
 	}
-	return finalizeOp(parts)
+	if n3 > 0 {
+		// The 3h2p/3h2p block is diagonal (WERT3 deferred): keep it as a resident vector
+		// instead of a dense n3×n3 upload, which would be terabytes for a large sector.
+		diags = append(diags, diagPart{off: sp.Begin3h2p, d: mx.be.Upload(mx.sat3Diag())})
+		if n2 > 0 {
+			// The 2h1p×3h2p WERT2 coupling is the memory ceiling (n2·n3·8 bytes). Apply
+			// it matrix-free when requested/oversized, else assemble it densely.
+			if mx.matFreeWert2(int64(n2) * int64(n3) * 8) {
+				mfree = append(mfree, mx.newWert2MatFree())
+			} else {
+				add(mx.coupling24_4(), main, sp.Begin3h2p, false)
+			}
+		}
+	}
+	return finalizeOp(parts, diags, mfree)
 }
 
 // buildMatrix4 materializes the full symmetric order-4 matrix (both triangles).
@@ -212,7 +241,9 @@ func (mx *Matrix) buildMatrix4() backend.Mat {
 	}
 	if len(sp.Sat3) > 0 {
 		place(mx.coupling3_4(), 0, sp.Begin3h2p)
-		diag(mx.satBlock3_4(), sp.Begin3h2p)
+		for r, v := range mx.sat3Diag() { // 3h2p/3h2p is diagonal
+			M.Set(sp.Begin3h2p+r, sp.Begin3h2p+r, v)
+		}
 		if sp.Begin3h2p-main > 0 {
 			place(mx.coupling24_4(), main, sp.Begin3h2p)
 		}

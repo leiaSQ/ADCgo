@@ -14,7 +14,16 @@ type Matrix struct {
 	be    backend.Backend
 	op    *assembledOp // built lazily on the first ApplyFull, reused thereafter
 	sigma func(i, j int) float64
+
+	matFree       MatFreeMode // dense (default) vs matrix-free for large ADC(4) blocks
+	matFreeBudget int64       // Auto threshold: dense block bytes above which to go matrix-free
+	wert3         bool        // include the WERT3 5th-order 3h2p-diagonal correction (opt-in)
 }
+
+// SetWert3 enables the WERT3 5th-order 3h2p-CI diagonal correction (the full EIGAB
+// effective diagonal). Off by default; opt-in until the theADCcode EIGAB value-gate is
+// unblocked. See sat3Diag / elements4.go wert3elem.
+func (mx *Matrix) SetWert3(on bool) { mx.wert3 = on }
 
 // SetStaticSelfEnergy supplies the static self-energy Σ_ij (a.u.) for the CVS-ADC(4)
 // 1h/1h block, indexed by absolute core-orbital indices; the block becomes
@@ -44,6 +53,17 @@ type assembledOp struct {
 	batches []backend.Batch
 	sa      []backend.DeviceMat
 	sb, sc  []backend.BlockView
+	diags   []diagPart    // purely diagonal blocks, applied elementwise (not via GEMM)
+	mf      []matFreePart // blocks applied by on-the-fly element recompute (not stored)
+}
+
+// diagPart is a diagonal operator block on the main diagonal at offset off: the resident
+// vector d holds its diagonal entries, applied as out[off:] += d ⊙ in[off:]. It exists so
+// the CVS-ADC(4) 3h2p/3h2p block (diagonal until WERT3 is added) never materializes as a
+// dense n×n matrix — the difference between MB and TB for a large satellite space.
+type diagPart struct {
+	off int
+	d   backend.Vector
 }
 
 // mainBlock builds the dense symmetric 1h/1h main block.
@@ -140,6 +160,14 @@ func (mx *Matrix) Release() {
 	for _, p := range mx.op.parts {
 		mx.be.FreeMat(p.A)
 	}
+	for _, dg := range mx.op.diags {
+		mx.be.Free(dg.d)
+	}
+	for _, p := range mx.op.mf {
+		if p.release != nil {
+			p.release()
+		}
+	}
 	mx.op = nil
 }
 
@@ -203,6 +231,18 @@ func (mx *Matrix) ApplyFull(out, in backend.Vector) {
 			mx.be.GemvT(1, p.A, in.Slice(p.RowOff, rows), out.Slice(p.ColOff, cols))
 		}
 	}
+	for _, dg := range mx.op.diags {
+		n := dg.d.Len()
+		mx.be.AxpyDiag(dg.d, in.Slice(dg.off, n), out.Slice(dg.off, n))
+	}
+	if len(mx.op.mf) > 0 {
+		n := mx.sp.Size()
+		inV := backend.BlockView{V: in, Rows: n, Cols: 1, Ld: n}
+		outV := backend.BlockView{V: out, Rows: n, Cols: 1, Ld: n}
+		for _, p := range mx.op.mf {
+			p.apply(inV, outV)
+		}
+	}
 }
 
 // ApplyBlock computes out = M·in for every column of in at once, streaming the
@@ -229,5 +269,18 @@ func (mx *Matrix) ApplyBlock(out, in backend.BlockView) {
 			}
 		}
 		mx.be.GemmMatBatched(bt.Trans, 1, op.sa[:n], op.sb[:n], 1, op.sc[:n])
+	}
+	// Diagonal blocks: apply d ⊙ (each column) over the block's row band. Columns are
+	// independent, so this is a per-column AxpyDiag on the sub-panel.
+	for _, dg := range op.diags {
+		n := dg.d.Len()
+		inSub := in.RowRange(dg.off, n)
+		outSub := out.RowRange(dg.off, n)
+		for j := range inSub.Cols {
+			mx.be.AxpyDiag(dg.d, inSub.Col(j), outSub.Col(j))
+		}
+	}
+	for _, p := range op.mf {
+		p.apply(in, out)
 	}
 }

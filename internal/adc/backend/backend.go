@@ -12,6 +12,8 @@
 package backend
 
 import (
+	"unsafe"
+
 	"gonum.org/v1/gonum/blas"
 	"gonum.org/v1/gonum/blas/blas64"
 	"gonum.org/v1/gonum/mat"
@@ -195,6 +197,13 @@ type Backend interface {
 	Nrm2(x Vector) float64           // ‖x‖₂
 	Scal(alpha float64, x Vector)    // x *= alpha
 
+	// AxpyDiag applies a resident diagonal operator block: y += d ⊙ x (elementwise
+	// product accumulate), with d, x, y equal-length views. It lets a purely diagonal
+	// block — e.g. the CVS-ADC(4) 3h2p/3h2p block, whose off-diagonal WERT3 coupling is
+	// deferred — be stored and applied as an O(n) vector instead of a dense n×n matrix,
+	// which is the difference between a few MB and terabytes for a large satellite space.
+	AxpyDiag(d, x, y Vector)
+
 	// BLAS-2 on resident vectors: y += alpha*a*x (GemvN) or y += alpha*aᵀ*x
 	// (GemvT). x and y are typically Slice views onto the block offsets.
 	GemvN(alpha float64, a DeviceMat, x, y Vector)
@@ -227,6 +236,50 @@ type Backend interface {
 	// read. Used for the dense validation path and to diagonalize the (small)
 	// projected matrix inside Lanczos — always small, hence host-side.
 	SymEig(a Mat) (evals []float64, evecs Mat)
+}
+
+// HostData is an optional capability implemented by host-resident backends (Gonum):
+// it exposes the raw backing slice of a resident Vector so a matrix-free operator
+// block can read/write panel data in place, without Download/Upload copies. Device
+// backends deliberately do not implement it (their vectors have no host copy) — a
+// matrix-free block selects a device-kernel path instead (see internal/adc/sip
+// matfree.go).
+type HostData interface {
+	HostSlice(v Vector) []float64
+}
+
+// DeviceKernels is the optional capability a device backend implements to run a
+// matrix-free operator block on-device: the element recompute (wert2elem4) is a custom
+// CUDA kernel reading a device-resident ERI tensor, so the large ADC(4) 2h1p×3h2p
+// coupling never occupies VRAM. Device counterpart of HostData. Implemented by the cuda
+// backend (cuda_kernels.go, kernel in adc4_kernels.cu); the hip backend and Gonum do not
+// implement it, so those take the dense / HostData paths. See docs/adc4_matfree_gpu.md.
+type DeviceKernels interface {
+	// SetCoeff1 uploads the flattened [3][13][30] spin table to constant memory (once).
+	SetCoeff1(coeff1 []float64)
+	// DeviceERI uploads a flat norb⁴ ERI tensor to the device; returns its pointer. The
+	// caller frees it via FreeDev.
+	DeviceERI(eri []float64) unsafe.Pointer
+	// UploadInts uploads an int32 config-SoA array to the device; freed via FreeDev.
+	UploadInts(x []int32) unsafe.Pointer
+	// FreeDev frees a DeviceERI/UploadInts buffer.
+	FreeDev(p unsafe.Pointer)
+	// DevPtr is the device pointer backing a resident float64 Vector.
+	DevPtr(v Vector) unsafe.Pointer
+	// Wert2Apply launches the matrix-free 2h1p×3h2p coupling apply (forward + transpose),
+	// accumulating into a.Out.
+	Wert2Apply(a Wert2Args)
+}
+
+// Wert2Args carries the device buffers and dimensions for DeviceKernels.Wert2Apply. The
+// R* / C* pointers are UploadInts results (row/col config struct-of-arrays); ERI is a
+// DeviceERI result; In/Out are resident panels (their device pointers via DevPtr).
+type Wert2Args struct {
+	N2, N3, B, LdIn, LdOut, MainOff, Off3, Norb, Nocc int
+	RVir, RK, RL, RTyp                                unsafe.Pointer
+	CI, CJ, CK, CL, CM, CSpin                         unsafe.Pointer
+	ERI                                               unsafe.Pointer
+	In, Out                                           Vector
 }
 
 // hostVec is the Gonum backend's Vector: a plain host slice. Slice shares storage.
@@ -279,6 +332,11 @@ func (Gonum) Free(Vector)          {}
 func (Gonum) UploadMat(m Mat) DeviceMat { return hostMat{m: m} }
 func (Gonum) FreeMat(DeviceMat)         {}
 
+// HostSlice exposes the resident vector's backing slice (Gonum vectors are host
+// slices, so this is zero-copy). Lets a matrix-free operator block read/write panels
+// in place. See backend.HostData.
+func (Gonum) HostSlice(v Vector) []float64 { return host(v) }
+
 // Gemm computes c := alpha*op(a)*op(b) + beta*c on column-major panels.
 //
 // gonum's blas64 is row-major, and the row-major reading of a column-major panel is
@@ -295,6 +353,13 @@ func (Gonum) Gemm(transA, transB bool, alpha float64, a, b BlockView, beta float
 	}
 	blas64.Gemm(t(transB), t(transA), alpha,
 		b.general(host(b.V)), a.general(host(a.V)), beta, c.general(host(c.V)))
+}
+
+func (Gonum) AxpyDiag(d, x, y Vector) {
+	dd, xd, yd := host(d), host(x), host(y)
+	for i, dv := range dd {
+		yd[i] += dv * xd[i]
+	}
 }
 
 func (Gonum) Axpy(alpha float64, x, y Vector) { blas64.Axpy(alpha, vector(host(x)), vector(host(y))) }

@@ -60,11 +60,14 @@ func solveSIPSpace(ch *chooser, label string, sp *sip.Space, ints *integrals.Sto
 		be = ch.pickLanczos(label, n, b, lanczos.SubspaceDim(n, b, lopts),
 			func(cand backend.Backend) time.Duration {
 				m := sip.New(sp, ints, eps, order, cand)
+				m.SetMatFree(cfg.matFree, cfg.matFreeBudget)
 				defer m.Release()
 				return timeApplyBlock(cand, n, b, m.ApplyBlock)
 			})
 	}
 	mx := sip.New(sp, ints, eps, order, be)
+	mx.SetMatFree(cfg.matFree, cfg.matFreeBudget)
+	mx.SetWert3(cfg.wert3)
 
 	var res lanczos.Result
 	switch cfg.solver {

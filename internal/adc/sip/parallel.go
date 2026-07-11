@@ -48,3 +48,41 @@ func parRows(rows int, body func(r int)) {
 	}
 	wg.Wait()
 }
+
+// chunkWorkers is the worker count parChunks will use for n items: GOMAXPROCS,
+// capped at n and floored at 1. Exposed so a caller can pre-size per-worker
+// accumulators before the parallel region.
+func chunkWorkers(n int) int {
+	w := runtime.GOMAXPROCS(0)
+	if w < 1 {
+		w = 1
+	}
+	if w > n {
+		w = n
+	}
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
+// parChunks statically partitions [0,n) into `workers` contiguous ranges and runs
+// body(worker, lo, hi) once per range, each on its own goroutine. Unlike parRows the
+// partition is fixed (not work-stealing), so a reduction over per-worker accumulators
+// indexed by `worker` is deterministic run-to-run. Pass workers = chunkWorkers(n).
+// body(worker, lo, hi) must write only storage owned by columns [lo,hi) or by its own
+// worker slot. Runs serially when workers <= 1.
+func parChunks(n, workers int, body func(worker, lo, hi int)) {
+	if workers <= 1 || n == 0 {
+		if n > 0 {
+			body(0, 0, n)
+		}
+		return
+	}
+	var wg sync.WaitGroup
+	for w := range workers {
+		lo, hi := w*n/workers, (w+1)*n/workers
+		wg.Go(func() { body(w, lo, hi) })
+	}
+	wg.Wait()
+}

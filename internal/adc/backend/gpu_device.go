@@ -209,6 +209,20 @@ func (b *gpuBackend) Axpy(alpha float64, x, y Vector) {
 	b.do(func() { blasAxpy(b.h, dx.ptr(), dy.ptr(), dx.n, alpha) })
 }
 
+// AxpyDiag applies a diagonal operator block: y += d ⊙ x. cuBLAS/hipBLAS expose no
+// elementwise product, so this host-round-trips. It is used only for the large diagonal
+// 3h2p block, once per apply — a cublasDdgmm-based device kernel is a future optimization
+// — and keeps the device build correct in the meantime.
+func (b *gpuBackend) AxpyDiag(d, x, y Vector) {
+	hd, hx, hy := b.Download(d), b.Download(x), b.Download(y)
+	for i, dv := range hd {
+		hy[i] += dv * hx[i]
+	}
+	up := b.Upload(hy)
+	b.Copy(y, up)
+	b.Free(up)
+}
+
 func (b *gpuBackend) Dot(x, y Vector) float64 {
 	dx, dy := x.(devVec), y.(devVec)
 	var r float64

@@ -14,6 +14,12 @@ Semantics (well-defined; documented in the plan):
                            virtuals). e.g. "2 to 30", "1 3 to 18", "2 5 to 20".
   * ``frozen-core N``   -- freeze the N lowest MOs into the effective core (not in
                            the FCIDUMP). Must be disjoint from ``active``.
+  * ``frozen-list <list>`` -- freeze an *explicit* set of 1-based MOs (need not be the
+                           lowest), mirroring theADCcode's ``CORE 2 4 END``. Needed for
+                           CVS on a non-lowest core, e.g. pyridine's N K-edge freezes the
+                           five C 1s cores (MOs 2..6) while keeping the *lowest* MO (N 1s)
+                           active as the CVS core hole. When ``active`` is omitted, every
+                           non-frozen MO is correlated, in ascending order.
   * A bare contiguous ``active lo to hi`` with no explicit ``frozen-core`` implies
     ``frozen-core = lo-1`` (so "2 to 30" freezes MO 1 -> the validated DZP case).
 """
@@ -58,17 +64,55 @@ def _is_contiguous(idx):
     return all(b - a == 1 for a, b in zip(idx, idx[1:]))
 
 
-def resolve(nmo, nelec, active_text=None, frozen_core=None):
+def resolve(nmo, nelec, active_text=None, frozen_core=None, frozen_list=None):
     """Resolve a selection into frozen-core + active MO columns.
 
     ``nmo``  total MOs; ``nelec`` total electrons (RHF, so ``nelec`` is even).
-    Returns a :class:`Selection`. With no ``active_text`` and no ``frozen_core``
-    the result is ``full`` (caller dumps the whole space via from_scf).
+    ``frozen_list`` an explicit list of 1-based MOs to freeze (need not be the lowest;
+    mutually exclusive with ``frozen_core``). Returns a :class:`Selection`. With no
+    ``active_text``, ``frozen_core`` nor ``frozen_list`` the result is ``full`` (caller
+    dumps the whole space via from_scf).
     """
-    if active_text is None and not frozen_core:
+    if active_text is None and not frozen_core and not frozen_list:
         return Selection(True, [], [], 0, 0, 0)
 
     nocc = nelec // 2
+
+    # Explicit frozen list: an arbitrary (not necessarily lowest) core set. The active
+    # space is either an explicit `active` list or every remaining MO in ascending order.
+    # The frozen columns keep their given order; CASCI folds them via mc.ncore regardless
+    # of energy ordering, so freezing a non-lowest block (the C 1s above N 1s) is valid.
+    if frozen_list is not None:
+        if frozen_core:
+            raise ValueError("give either frozen-core or frozen-list, not both")
+        core1 = parse_index_list(frozen_list) if isinstance(frozen_list, str) \
+            else list(frozen_list)
+        core0 = [i - 1 for i in core1]
+        if len(set(core0)) != len(core0):
+            raise ValueError(f"frozen-list has duplicate MOs: {core1}")
+        for i in core0:
+            if not 0 <= i < nmo:
+                raise ValueError(f"frozen MO {i + 1} out of range 1..{nmo}")
+        if active_text is not None:
+            active0 = [i - 1 for i in parse_index_list(active_text)]
+        else:
+            coreset = set(core0)
+            active0 = [i for i in range(nmo) if i not in coreset]
+        ncore = len(core0)
+        overlap = sorted(i + 1 for i in set(core0) & set(active0))
+        if overlap:
+            raise ValueError(f"frozen-list and active overlap at MO(s) {overlap}")
+        dropped_occ = sorted(i + 1 for i in range(nocc)
+                             if i not in set(core0) and i not in set(active0))
+        if dropped_occ:
+            raise ValueError(
+                f"occupied MO(s) {dropped_occ} are neither frozen nor active")
+        ncas = len(active0)
+        nelecas = nelec - 2 * ncore
+        if nelecas < 0 or nelecas > 2 * ncas:
+            raise ValueError(
+                f"active electron count {nelecas} inconsistent with {ncas} active MOs")
+        return Selection(False, core0, active0, ncore, ncas, nelecas)
 
     if active_text is not None:
         active1 = parse_index_list(active_text)

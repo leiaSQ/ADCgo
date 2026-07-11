@@ -19,7 +19,8 @@ Grammar (``#`` starts a comment; blank lines ignored):
       symmetry auto              # auto | off | C2v | Cs | ...
       gate   -76.0498071428      # optional SCF-energy gate
     &active
-      frozen-core 1              # optional
+      frozen-core 1              # optional: freeze the N lowest MOs
+      frozen-list 2 to 6         # optional: freeze an explicit (non-lowest) MO set
       active 2 to 30             # optional; omit for the full MO space
     &output
       fcidump  h2o_dzp.fcidump
@@ -57,6 +58,7 @@ class Config:
     conv_tol_grad: float = 1e-9
     # orbital selection
     frozen_core: int = None
+    frozen_list: str = None
     active: str = None
     # output
     fcidump: str = None
@@ -158,6 +160,8 @@ def _apply(cfg, section, key, val):
     elif section == "active":
         if key in ("frozen-core", "frozen_core", "core"):
             cfg.frozen_core = int(val)
+        elif key in ("frozen-list", "frozen_list", "core-list"):
+            cfg.frozen_list = val
         elif key == "active":
             cfg.active = val
         else:
