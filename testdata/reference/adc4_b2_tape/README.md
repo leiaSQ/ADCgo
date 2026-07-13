@@ -13,8 +13,13 @@ These are FORTRAN unformatted tapes (`adc4.in` = the run's keyword input):
   `ab3.F`/`ab5.F`; the last symmetry computed (B2, `nrsym=4`) is what survives.
 - **`FT18F001.ADC`** — diagonal. Record 1 = header `nh12 i4 | mcore i4 | nrsym i4 |
   nbuf i4 | mtxid char*4` (20 bytes); record 2 = `nh12` f8 = the **2h1p** diagonal.
-  (`adc.F:383` overwrites the 3h2p `EIGAB` diagonal with this header+2h1p diag, so
-  the 3h2p effective diagonal is NOT on the tape.)
+  (`RSCRT1` rewrites this tape with only the first `nh12` entries, discarding the 3h2p
+  `EIGAB` diagonal — which is why FT19 below exists.)
+- **`FT19F001.ADC`** — the 3h2p effective diagonal (EIGAB = 0th-order orbital-energy sum +
+  the 5th-order WERT3 correction), dumped by `ab5.F` before RSCRT1 can truncate it.
+  Record 1 = `IDIM NCOL NECORE N3H2P` (4× i4); record 2 = `N3H2P` f8. Columns carry the
+  same pam/ELIM permutation as FT21's, so compare as a multiset. See `TestADC4EigabGate`
+  and `../adc4_a1_tape/README.md` for regeneration.
 
 B2 has no core hole in its own irrep, so there is **no 1h main block** — the matrix
 is 42 (2h1p) + 1646 (3h2p) = 1688. This tape therefore validates the 2h1p/2h1p block

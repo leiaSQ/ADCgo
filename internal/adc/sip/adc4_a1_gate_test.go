@@ -18,13 +18,13 @@ import (
 // couplings KOPP1/KOPP2 (1h↔2h1p), KOPP4 (1h↔3h2p) and the 1h diagonal. Reference
 // tape: testdata/reference/adc4_a1_tape (see README). Complements TestADC4MatchedGate.
 //
-// Bit-exact (asserted): 2h1p/2h1p (WERT1), 2h1p↔3h2p (WERT2, multiset), 1h↔3h2p
-// (KOPP4, multiset). Not yet bit-exact (pinned as documented bounds, will tighten):
-//   - 1h↔2h1p carries a 4th-order piece KOPP3 (K2P2H+K1P3H+K3P1H) not yet ported;
-//     kopp1+kopp2 reproduce it through 3rd order (residual ~6.7e-3).
-//   - the 1h diagonal is −ε_core − Σ with Σ the external static self-energy
-//     (&self-energy infinite, computed outside the ADC4 matrix); ADCgo uses −ε_core
-//     only, leaving the fixed offset Σ(1,1) ≈ −0.0116 a.u.
+// Bit-exact (asserted): 2h1p/2h1p (WERT1), 2h1p↔3h2p (WERT2, multiset), 1h↔3h2p (KOPP4,
+// multiset) and 1h↔2h1p (KOPP1/2/3, element-wise).
+//
+// The 1h diagonal is −ε_core − Σ with Σ the external static self-energy (&self-energy
+// infinite, computed outside the ADC4 matrix). Here Σ is still *back-solved* from the tape
+// entry, which only exercises the SetStaticSelfEnergy wiring, not the value —
+// TestADC4StaticSigmaGate gates the value itself against theADCcode's Σ dump.
 func TestADC4MatchedGateA1(t *testing.T) {
 	fc := filepath.Join("..", "..", "..", "testdata", "reference", "h2o_dzp.matched.fcidump")
 	d, err := fcidump.ReadFile(fc)

@@ -25,11 +25,13 @@ type Matrix struct {
 // unblocked. See sat3Diag / elements4.go wert3elem.
 func (mx *Matrix) SetWert3(on bool) { mx.wert3 = on }
 
-// SetStaticSelfEnergy supplies the static self-energy Σ_ij (a.u.) for the CVS-ADC(4)
-// 1h/1h block, indexed by absolute core-orbital indices; the block becomes
-// −ε_i δ_ij − Σ_ij. This mirrors theADCcode, whose EGF reads Σ from an external
-// self-energy module (&self-energy) rather than the ADC(4) matrix code. Pass nil (the
-// default) for the bare −ε_i diagonal. See docs/adc4_sip_spec.md and TestADC4MatchedGateA1.
+// SetStaticSelfEnergy supplies the static self-energy Σ_ij (a.u.) for the 1h/1h block,
+// indexed by absolute occupied-orbital indices. It is subtracted from the main block in
+// both paths: CVS-ADC(4) (−ε_i δ_ij − Σ_ij, mainBlock4) and ADC(2)/(3) (c11 − Σ,
+// mainBlock). This mirrors theADCcode, which in both propagators reads Σ from a separate
+// self-energy module (&self-energy) rather than from the ADC matrix code — for ndadc3ip
+// the omission is worth ~0.2 eV on the main lines. Pass nil (the default) for no Σ.
+// See docs/adc4_sip_spec.md, TestADC4StaticSigmaGate and TestSIPMatchedReference.
 func (mx *Matrix) SetStaticSelfEnergy(sigma func(i, j int) float64) { mx.sigma = sigma }
 
 // New builds the IP-ADC(order) matrix engine for space sp. order is 2 or 3.
@@ -66,7 +68,12 @@ type diagPart struct {
 	d   backend.Vector
 }
 
-// mainBlock builds the dense symmetric 1h/1h main block.
+// mainBlock builds the dense symmetric 1h/1h main block: c11 (= k1 + c11_2 [+ c11_3])
+// minus the external static self-energy Σ when one is supplied via SetStaticSelfEnergy.
+// theADCcode assembles exactly this — nd_adc3_matrix.cpp build_main_block() calls
+// calc_k1 + calc_c11_2 (+ calc_c11_3) and then does main_block->daxpy(-1., *sigma_) —
+// with Σ coming from its separate self-energy module (&self-energy), not from the ADC
+// matrix code. With Σ nil (the default) this is the bare c11 block.
 func (mx *Matrix) mainBlock() backend.Mat {
 	sp := mx.sp
 	M := backend.NewMat(sp.BeginSat, sp.BeginSat)
@@ -75,6 +82,9 @@ func (mx *Matrix) mainBlock() backend.Mat {
 		for c := 0; c <= r; c++ {
 			j := sp.Configs[c].Occ[0]
 			el := mx.el.c11(i, j)
+			if mx.sigma != nil {
+				el -= mx.sigma(i, j)
+			}
 			M.Set(r, c, el)
 			if r != c {
 				M.Set(c, r, el)

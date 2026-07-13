@@ -5,13 +5,12 @@ import (
 	"testing"
 )
 
-// WERT3 (the 5th-order 3h2p-diagonal correction, elements4.go wert3elem) has no
-// committed theADCcode reference — theADCcode overwrites the EIGAB diagonal on its tape
-// (adc.F:383) and a rebuilt binary misreads MAXB3, so the bit-exact value-gate is blocked.
-// These are the strongest theADCcode-free checks: the diagonal spin block must be symmetric
-// (a real-Hermitian 3h2p block; catches coeff2↔VINT misalignment and branch-port errors),
-// the off-diagonal CI matrix must be Hermitian, and ApplyFull must equal BuildMatrix with
-// WERT3 enabled (dense==Lanczos self-consistency).
+// WERT3 (the 5th-order 3h2p-diagonal correction, elements4.go wert3elem) is value-gated
+// against theADCcode's own EIGAB diagonal in TestADC4EigabGate — ../ADC now dumps it to
+// FT19F001.ADC before RSCRT1 truncates the diagonal tape. These remain as the
+// theADCcode-free structural checks, which cover ground the value gate cannot: theADCcode
+// only ever evaluates WERT3 on the diagonal, so the off-diagonal CI branch cascade has no
+// reference at all and is pinned by Hermiticity alone.
 
 // TestWert3DiagSpinSymmetric: for every 3h2p config the diagonal intermediate-spin block
 // W[s][u] must be symmetric. If coeff2 columns were misaligned to the VINT slots, this

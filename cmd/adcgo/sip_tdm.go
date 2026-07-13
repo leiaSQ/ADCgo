@@ -68,6 +68,9 @@ func solveSIPSpace(ch *chooser, label string, sp *sip.Space, ints *integrals.Sto
 	mx := sip.New(sp, ints, eps, order, be)
 	mx.SetMatFree(cfg.matFree, cfg.matFreeBudget)
 	mx.SetWert3(cfg.wert3)
+	if cfg.sig != nil {
+		mx.SetStaticSelfEnergy(cfg.sig)
+	}
 
 	var res lanczos.Result
 	switch cfg.solver {

@@ -10,12 +10,15 @@ import "github.com/leiaSQ/ADCgo/internal/adc/backend"
 //	[1h , 3h2p] coupling −kopp4                         — A1 tape bit-exact
 //	[2h1p,2h1p] c22elem4 (WERT1 3rd+4th, SUM1/3/4)      — B2 tape bit-exact
 //	[2h1p,3h2p] coupling wert2elem4 (WERT2)             — B2 tape bit-exact (mod pam)
-//	[3h2p,3h2p] 0th-order diagonal ε_I+ε_J−ε_K−ε_L−ε_M  (WERT3+ELIM EIGAB fold: deferred)
+//	[3h2p,3h2p] EIGAB effective diagonal (WERT3)        — FT19 tape bit-exact (mod pam)
 //
-// Every off-diagonal block is validated bit-exact against theADCcode (A1+B2 tapes; see
-// TestADC4MatchedGate*). Remaining: the 3h2p effective diagonal (WERT3 IORDER=6 CI +
-// ELIM fold), not present on either tape; the static Σ *value* is the self-energy
-// module's job (theADCcode also supplies it externally).
+// Every block is now validated bit-exact against theADCcode on matched integrals (A1+B2
+// tapes; TestADC4MatchedGate*, TestADC4EigabGate, TestADC4StaticSigmaGate). The 3h2p
+// effective diagonal and the static Σ used to be unreachable — theADCcode's RSCRT1
+// truncates the diagonal tape to the 1h+2h1p entries, and Σ is an *input* to adc_() that
+// no tape records — so ../ADC now dumps both (ab5.F → FT19F001.ADC, egf.F →
+// SIGMA_STATIC.dat). The Σ *value* remains the self-energy module's job: ADCgo consumes
+// one via SetStaticSelfEnergy, it does not compute Σ(∞) itself.
 //
 // The reference stores the couplings and 1h/1h off-diagonal as −(value) (egf.F,
 // ab3.F line 275) so the 2h1p/3h2p block diagonals stay positive (ionization
@@ -121,10 +124,10 @@ func (mx *Matrix) coupling24_4() backend.Mat {
 // for pyridine's N K-edge, vs ~5 MB as a vector). ELIM's center-of-gravity fold is a
 // truncation device (inactive below MAXSTA) and is not needed for the untruncated space.
 //
-// WERT3 is opt-in because its definitive bit-exact gate — theADCcode's EIGAB dump — is
-// blocked by the pre-existing MAXB3-on-rebuild issue (see docs/adc4_sip_spec.md). It is
-// validated by self-consistency (dense==Lanczos, symmetry) and the diagonal spin-block
-// Hermiticity of wert3elem (elements4_test.go).
+// WERT3 is gated bit-exact against theADCcode's own EIGAB (TestADC4EigabGate, both
+// sectors, multiset maxdiff ~4e-15) now that ../ADC dumps it to FT19F001.ADC. It stays
+// opt-in only so that -order 4 keeps its established default behaviour; enable it with
+// SetWert3/-wert3 for the order-consistent 3h2p diagonal theADCcode itself uses.
 func (mx *Matrix) sat3Diag() []float64 {
 	sp := mx.sp
 	ep := mx.el.eps
