@@ -43,7 +43,10 @@ func main() {
 	backendName := flag.String("backend", "gonum", "linear-algebra backend: gonum | hip | cuda | auto (auto calibrates and picks per sector; build-tag gated)")
 	matfree := flag.String("matfree", "off", "matrix-free apply of large CVS-ADC(4) coupling blocks (recompute vs store): off | auto | on. Trades resident memory for per-mat-vec recompute; auto switches per block using -maxmem")
 	maxMemGB := flag.Float64("maxmem", 4.0, "matrix-free -matfree=auto threshold: a coupling block whose dense size exceeds this many GB is applied matrix-free")
-	wert3 := flag.Bool("wert3", false, "include the WERT3 5th-order 3h2p-diagonal correction in CVS-ADC(4) (full EIGAB effective diagonal; opt-in pending the theADCcode EIGAB value-gate)")
+	wert3 := flag.Bool("wert3", true, "include the WERT3 5th-order 3h2p-diagonal correction in CVS-ADC(4) (the full EIGAB effective diagonal theADCcode itself uses; bit-exact vs its FT19 tape). -wert3=false for the bare 0th-order 3h2p diagonal.")
+	sigma := flag.String("sigma", "auto", "static self-energy added to the SIP main block: auto | off | three | four | fplus | infinite. The ADC matrix code does not build Σ (theADCcode keeps it in a separate &self-energy module and subtracts it); omitting it shifts every main line by ~0.2-0.35 eV. auto = infinite, the all-order resolvent resummation, bit-exact vs theADCcode.")
+	sigmaAkrit := flag.Float64("sigma-akrit", 0, "Σ(∞) resolvent convergence threshold on Σ(Δx)² (0 = converge tightly; theADCcode's own default is 1e-9)")
+	sigmaMaxIt := flag.Int("sigma-maxit", 0, "Σ(∞) resolvent iteration cap (0 = 200; theADCcode's own default is 30)")
 	out := flag.String("out", "", "write JSON to this file (default stdout)")
 	profile := flag.Bool("profile", false, "print per-sector solver phase timings to stderr")
 
@@ -147,6 +150,9 @@ func main() {
 		cfg.matFree = mfMode
 		cfg.matFreeBudget = int64(*maxMemGB * (1 << 30))
 		cfg.wert3 = *wert3
+		cfg.sigma = *sigma
+		cfg.sigmaAkrit = *sigmaAkrit
+		cfg.sigmaMaxIt = *sigmaMaxIt
 		if err := runSIP(d, cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
 			os.Exit(1)
@@ -334,9 +340,13 @@ type sipConfig struct {
 	tdm    bool    // emit transition dipole moments instead of the solver document
 	tdmOsc float64 // photoionization channel oscillator-strength cutoff
 
-	matFree       sip.MatFreeMode // dense (default) vs matrix-free large ADC(4) blocks
-	matFreeBudget int64           // -matfree=auto per-block dense-size threshold (bytes)
-	wert3         bool            // include the WERT3 5th-order 3h2p-diagonal correction
+	matFree       sip.MatFreeMode        // dense (default) vs matrix-free large ADC(4) blocks
+	matFreeBudget int64                  // -matfree=auto per-block dense-size threshold (bytes)
+	wert3         bool                   // include the WERT3 5th-order 3h2p-diagonal correction
+	sigma         string                 // static self-energy scheme: auto | off | three | four | fplus | infinite
+	sigmaAkrit    float64                // Σ(∞) resolvent convergence threshold (0 = converge tightly)
+	sigmaMaxIt    int                    // Σ(∞) resolvent iteration cap
+	sig           func(i, j int) float64 // resolved Σ, built once per run (nil = off)
 }
 
 // parseMatFree maps the -matfree flag to a sip.MatFreeMode.
@@ -393,6 +403,12 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 		return err
 	}
 	ints := integrals.New(d, nocc, orbSym)
+
+	// The static self-energy is a property of the orbital space, not of a sector, so build it
+	// once and let every sector's main block subtract the same Σ.
+	if cfg.sig, err = buildSigma(cfg, ints, eps, nocc, d.NORB); err != nil {
+		return err
+	}
 
 	var md *mo.Data
 	if cfg.moPath != "" {
