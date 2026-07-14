@@ -1,0 +1,31 @@
+# ADCgo CVS-ADC(4) core ionization of nitrosobenzene at the N 1s edge (6-31G).
+#
+# Recreates /mnt/worka/alexk/NSOB/adc_1holes (theADCcode adc4_constr.x + adc4_diag.x,
+# MCORE=1, NROOT=15 -> NSOB.N1s.res / dav.NSOB.N1s.out).
+#
+#   scripts/adcgo_run.sh examples/CVS_NSOB/n1s.in ./adcgo
+#
+&geometry
+  file   _zmatrix.dat
+&basis
+  file   _basisset.dat
+  cartesian on                 # GAMESS-UK 6d -> 109 basis functions
+&scf
+  charge 0
+  symmetry auto                # -> Cs; irrep 1 = a', 2 = a''
+  gate   -359.2734223925       # GAMESS-UK RHF total energy (nsob.631G.out)
+  max_cycle 200                # nitrosobenzene needs >50 cycles to hit conv_tol 1e-12
+&active
+  # 56 electrons / 28 occupied MOs. The legacy run correlated 102 orbitals with 21
+  # occupied (NSOB.N1s.res: "77 25" functions, "17 4" occupied per symmetry), i.e. it
+  # froze 7 core MOs: the six C 1s (MOs 3-8) and — since this is the N edge — the
+  # O 1s (MO 1, -20.628 Ha). MO 2 (N 1s, -15.709 Ha) stays active as the CVS core
+  # hole, and lands at active index 0 -> `-core 0` below.
+  frozen-list 1 3 to 8
+&output
+  fcidump  nsob_n1s.fcidump
+  sidecar  nsob_n1s.mo.json    # C/S + dipoles: enables -tdm (core->valence XES)
+  manifest nsob_n1s.ref.json
+&adc
+  args   -sip -order 4 -core 0 -solver lanczos -matfree auto
+  sym    1                     # a' only: the core hole is 1 A' (adc_1holes' "7 1")

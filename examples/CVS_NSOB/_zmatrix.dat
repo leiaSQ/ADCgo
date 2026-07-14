@@ -1,0 +1,43 @@
+# Nitrosobenzene (C6H5NO), planar (Cs).
+# Verbatim from the GAMESS-UK z-matrix in /mnt/worka/alexk/NSOB/nsob.631G.in.
+# The three leading `xx` centres are dummies: geometry scaffolding only, no charge
+# and no basis functions (gamess_zmat.py drops them after the internal->Cartesian
+# conversion, so the 1-based references below stay valid).
+zmat angstrom
+xx
+xx    1 1.0
+xx    1 1.0         2 90.0
+ c    1 cxx1        3 90.0        2  90.0
+ c    1 cxx21       3 90.0        4  dih21
+ c    1 cxx22       3 90.0        4 -dih22
+ c    1 cxx31       3 90.0        4  dih31
+ c    1 cxx32       3 90.0        4 -dih32
+ c    1 cxx4        3 90.0        2 -90.0
+ n    1 nxx1        3 90.0        2  dih4
+ o   10 on          4 onc         6  0.0
+ h    1 hxx21       3 90.0        4  dih21
+ h    1 hxx22       3 90.0        4 -dih22
+ h    1 hxx31       3 90.0        4  dih31
+ h    1 hxx32       3 90.0        4 -dih32
+ h    1 hxx4        3 90.0        2 -90.0
+variables
+ cxx1         1.4155
+ cxx21        1.4206
+ cxx22        1.4281
+ cxx31        1.3991
+ cxx32        1.3959
+ cxx4         1.3872
+ dih21       59.4438
+ dih22       59.4348
+ dih31      119.3442
+ dih32      119.0732
+ dih4        92.3725
+ nxx1         2.8639
+  on          1.2393
+  onc       114.1307
+ hxx21        2.5145
+ hxx22        2.521
+ hxx31        2.4928
+ hxx32        2.4898
+ hxx4         2.481
+end

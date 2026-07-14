@@ -18,6 +18,7 @@ Grammar (``#`` starts a comment; blank lines ignored):
       spin   0                   # 2S (number of unpaired electrons)
       symmetry auto              # auto | off | C2v | Cs | ...
       gate   -76.0498071428      # optional SCF-energy gate
+      max_cycle 200              # optional; pyscf's 50 can be short of conv_tol=1e-12
     &active
       frozen-core 1              # optional: freeze the N lowest MOs
       frozen-list 2 to 6         # optional: freeze an explicit (non-lowest) MO set
@@ -56,6 +57,7 @@ class Config:
     gate: float = None
     conv_tol: float = 1e-12
     conv_tol_grad: float = 1e-9
+    max_cycle: int = 50             # pyscf's default; raise it for slow-converging SCF
     # orbital selection
     frozen_core: int = None
     frozen_list: str = None
@@ -155,6 +157,8 @@ def _apply(cfg, section, key, val):
             cfg.conv_tol = float(val)
         elif key == "conv_tol_grad":
             cfg.conv_tol_grad = float(val)
+        elif key in ("max_cycle", "max-cycle", "maxcycle"):
+            cfg.max_cycle = int(val)
         else:
             raise ValueError(f"unknown &scf key {key!r}")
     elif section == "active":
