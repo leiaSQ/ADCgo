@@ -89,16 +89,35 @@ type dterm struct {
 	d sdet
 }
 
+// opTerm is one term of a configuration's spin function: a coefficient and the
+// second-quantized operator string that produces it.
+type opTerm struct {
+	c   float64
+	ops []op
+}
+
 // configDets expands configuration idx of sp into determinants, using exactly the spin
-// functions documented in isrdipole.go.
+// functions documented in isrdipole.go — that is, it applies configOps to the reference.
 func configDets(sp *Space, idx int) []dterm {
 	ref := sdet{a: uint64(1)<<sp.Nocc - 1, b: uint64(1)<<sp.Nocc - 1}
-	push := func(out []dterm, c float64, ops ...op) []dterm {
-		d, s := apply(ref, ops...)
+	var out []dterm
+	for _, t := range configOps(sp, idx) {
+		d, s := apply(ref, t.ops...)
 		if s == 0 {
 			panic("configDets: operator string annihilates the reference")
 		}
-		return append(out, dterm{c * s, d})
+		out = append(out, dterm{t.c * s, d})
+	}
+	return out
+}
+
+// configOps gives configuration idx's spin function as operator strings, detached from any
+// particular determinant. configDets applies them to the Hartree–Fock reference; the ISR
+// oracle (isrdipole_corr_test.go) applies the very same strings to a *correlated* ground
+// state, which is the whole difference between a configuration and an intermediate state.
+func configOps(sp *Space, idx int) []opTerm {
+	push := func(out []opTerm, c float64, ops ...op) []opTerm {
+		return append(out, opTerm{c, ops})
 	}
 	cfg := sp.Configs[idx]
 	if idx < sp.BeginSat { // |i> = −c_iβ |0>

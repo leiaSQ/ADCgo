@@ -53,6 +53,7 @@ func main() {
 	doTDM := flag.Bool("tdm", false, "emit RASSI-like transition dipole moments instead of the solver document: ion→ion emission (element 1), Dyson photoionization (element 2), and — for -order 4 — core→valence X-ray emission; needs -sip -mo (with dipole integrals)")
 	flag.BoolVar(doTDM, "rassi", false, "alias for -tdm")
 	tdmOsc := flag.Float64("tdm-osc-thresh", 1e-6, "drop photoionization channels with oscillator strength below this")
+	tdmISR := flag.Int("tdm-isr", -1, "order of the ISR property matrix behind -tdm: 0 = zeroth (uncorrelated), 2 = correlation-corrected. Default: 2 for -order 2/3, where it is order-consistent with the secular matrix; 0 for -order 4, where it is not (an ADC(4)-consistent property matrix needs 3rd/4th-order terms that do not exist yet) — pass -tdm-isr 2 to opt in anyway")
 
 	doSpectrum := flag.Bool("spectrum", false, "emit the decay-channel stick spectrum instead of the solver document (needs -dip or -sip; DIP needs -mo)")
 	initAtom := flag.String("init-atom", "O", "initial core-ionized site for DIP decay channels (overridden by the interactive prompt)")
@@ -99,6 +100,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "adcgo: -tdm needs -mo (a sidecar with dipole integrals)")
 			os.Exit(2)
 		}
+		if *tdmISR >= 0 && *tdmISR != 0 && *tdmISR != 2 {
+			fmt.Fprintf(os.Stderr, "adcgo: -tdm-isr %d is not available (want 0 or 2)\n", *tdmISR)
+			os.Exit(2)
+		}
 	}
 
 	specCfg := specConfig{
@@ -140,7 +145,7 @@ func main() {
 			profile: *profile,
 			spec:    specCfg,
 			core:    core,
-			moPath:  *moPath, tdm: *doTDM, tdmOsc: *tdmOsc,
+			moPath:  *moPath, tdm: *doTDM, tdmOsc: *tdmOsc, tdmISR: *tdmISR,
 		}
 		mfMode, err := parseMatFree(*matfree)
 		if err != nil {
@@ -339,6 +344,7 @@ type sipConfig struct {
 	moPath string  // MO/dipole sidecar (required by -tdm)
 	tdm    bool    // emit transition dipole moments instead of the solver document
 	tdmOsc float64 // photoionization channel oscillator-strength cutoff
+	tdmISR int     // ISR property-matrix order: 0 or 2; -1 = pick from -order
 
 	matFree       sip.MatFreeMode        // dense (default) vs matrix-free large ADC(4) blocks
 	matFreeBudget int64                  // -matfree=auto per-block dense-size threshold (bytes)
@@ -418,6 +424,10 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 	}
 	if cfg.tdm && !md.HasDipole {
 		return fmt.Errorf("-tdm needs an MO sidecar with dipole integrals (dip_ao); regenerate it with fcidump_common.py")
+	}
+	if cfg.tdm && len(syms) == 1 && orbSym != nil {
+		fmt.Fprintf(os.Stderr, "note: -tdm with a single -sym sector sees only the totally symmetric "+
+			"dipole component; the x/y-polarized lines are cross-irrep. Use -sym all for a spectrum.\n")
 	}
 
 	doc := SIPDocument{NORB: d.NORB, NELEC: d.NELEC, Order: cfg.order, Solver: cfg.solver}

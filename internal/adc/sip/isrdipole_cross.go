@@ -104,6 +104,7 @@ func NewISRDipoleCross(bra, ket *Space, dmo backend.Mat) (*ISRDipole, error) {
 	for i := range ket.Nocc {
 		o.d0 += 2 * dmo.At(i, i)
 	}
+	o.dnull = o.d0 // no correlation: (13a) is the reference moment
 	o.rows = o.sparsify()
 	return o, nil
 }

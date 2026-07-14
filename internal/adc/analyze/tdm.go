@@ -70,6 +70,10 @@ type SIPTDMOptions struct {
 	// pseudo-spectrum has one channel per virtual orbital, so a threshold keeps the
 	// output readable without discarding anything physical.
 	OscThresh float64
+
+	// ISR selects the correlation-corrected ISR property matrix (sip/isrdipole_corr.go).
+	// nil leaves the operator at zeroth order in the fluctuation potential.
+	ISR *sip.ISROptions
 }
 
 // colIndex maps each raw solver column to its 1-based position in cols.
@@ -86,11 +90,11 @@ func colIndex(cols []int) map[int]int {
 // (ω > 0). sp must be a plain (order ≤ 3) space — the square ISR dipole is not defined
 // over a 3h2p space; use BuildSIPCrossEmissions for a CVS run. md must carry dipole
 // integrals, and res must retain the satellite rows (lanczos.Options.WantFull).
-func BuildSIPEmissions(sp *sip.Space, res lanczos.Result, fmat backend.Mat, md *mo.Data, opts Options) ([]SIPTransition, error) {
+func BuildSIPEmissions(sp *sip.Space, res lanczos.Result, fmat backend.Mat, md *mo.Data, opts Options, tdm SIPTDMOptions) ([]SIPTransition, error) {
 	if !md.HasDipole {
 		return nil, fmt.Errorf("analyze: the MO sidecar has no dipole integrals")
 	}
-	ops, err := sip.NewISRDipoles(sp, md.DipMO)
+	ops, err := sip.NewISRDipolesWithCorr(sp, md.DipMO, tdm.ISR)
 	if err != nil {
 		return nil, err
 	}
@@ -167,20 +171,21 @@ func BuildSIPPhotoionization(sp *sip.Space, mx *sip.Matrix, res lanczos.Result, 
 	return out, nil
 }
 
-// BuildSIPCrossEmissions returns the core→valence X-ray emission dipoles between a CVS
-// ADC(4) bra sector and a plain valence ket sector (Chunk 5). Both results must retain
-// the satellite rows. Overlap is reported on each transition: it is zero when the two
-// sectors carry different irreps (the intended, gauge-independent case) and nonzero,
-// with an origin-dependent moment, when they share one.
+// BuildSIPCrossEmissions returns the emission dipoles between the states of two different
+// SIP spaces, in the two regimes isrdipole_cross.go describes: a CVS ADC(4) core bra
+// against a plain valence ket (Chunk 5), and one plain irrep sector against another. Both
+// results must retain the satellite rows. Overlap is reported on each transition: it is
+// zero when the two sectors carry different irreps (the intended, gauge-independent case)
+// and nonzero, with an origin-dependent moment, when they share one.
 func BuildSIPCrossEmissions(
 	bra *sip.Space, resBra lanczos.Result, fbra backend.Mat,
 	ket *sip.Space, resKet lanczos.Result, fket backend.Mat,
-	md *mo.Data, opts Options) ([]SIPTransition, error) {
+	md *mo.Data, opts Options, tdm SIPTDMOptions) ([]SIPTransition, error) {
 
 	if !md.HasDipole {
 		return nil, fmt.Errorf("analyze: the MO sidecar has no dipole integrals")
 	}
-	ops, err := sip.NewISRDipolesCross(bra, ket, md.DipMO)
+	ops, err := sip.NewISRDipolesCrossWithCorr(bra, ket, md.DipMO, tdm.ISR)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +200,15 @@ func BuildSIPCrossEmissions(
 	if err != nil {
 		return nil, err
 	}
+	// Cross marks a transition between two *different truncated Hamiltonians* — the CVS
+	// ADC(4) core space against a plain valence one. There the state overlap need not
+	// vanish and the ⟨3h2p|D̂|2h1p⟩ block is dropped. Two plain sectors are symmetry blocks
+	// of one and the same secular matrix: they share no configuration, so S ≡ 0 and the
+	// moment is exactly as well defined as a within-sector one. Those are not cross
+	// transitions, and the ω > 0 emission they carry is the ordinary x/y-polarized line
+	// that no square, single-sector D can see.
+	cross := len(bra.Sat3) != 0 || len(ket.Sat3) != 0
+
 	initIdx, midIdx := colIndex(braCols), colIndex(ketCols)
 	var out []SIPTransition
 	for _, e := range ems {
@@ -212,7 +226,7 @@ func BuildSIPCrossEmissions(
 			Mu:         e.Mu,
 			Osc:        e.Osc,
 			RatePerSec: e.Rate * auToPerSec,
-			Cross:      true,
+			Cross:      cross,
 			Overlap:    e.Overlap,
 		})
 	}

@@ -123,3 +123,44 @@ func TestSigmaFourPlus(t *testing.T) { checkScheme(t, FourPlus, 1e-10) }
 func TestSigmaInfinite(t *testing.T) {
 	checkSchemeOpts(t, Infinite, TheADCcodeDefaults, 1e-10)
 }
+
+// TestDensityIsWhatStaticUses pins the exported ρ to the one Static builds internally: Σ⁽³⁾ is
+// by definition ρ⁽²⁾ contracted with the integrals (eq. A25), so contracting the ρ that Density
+// hands out must reproduce Static(Three) exactly. Σ⁽³⁾ is itself bit-exact against theADCcode,
+// so this transfers that gate onto the object the ISR property matrix consumes.
+func TestDensityIsWhatStaticUses(t *testing.T) {
+	ints, eps, nocc, norb := loadH2O(t)
+
+	rho, err := Density(ints, eps, nocc, norb, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := newEngine(ints, eps, nocc, norb).rhoToSigma(rho)
+
+	want, err := Static(ints, eps, nocc, norb, Three, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range norb {
+		for j := range norb {
+			if got.At(i, j) != want.At(i, j) {
+				t.Fatalf("Σ from the exported ρ differs at (%d,%d): %.17g vs Static's %.17g",
+					i, j, got.At(i, j), want.At(i, j))
+			}
+		}
+	}
+
+	// ρ must carry a nonzero hole/particle block — that is the only block (13c) reads, and a
+	// ρ that silently lacked it would still pass a Σ-level check on the occupied block alone.
+	var maxPH float64
+	for a := nocc; a < norb; a++ {
+		for k := range nocc {
+			if v := math.Abs(rho.At(a, k)); v > maxPH {
+				maxPH = v
+			}
+		}
+	}
+	if maxPH < 1e-8 {
+		t.Errorf("ρ hole/particle block is empty (max |ρ_ak| = %.3e); (13c) would be inert", maxPH)
+	}
+}
