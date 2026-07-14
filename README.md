@@ -122,7 +122,10 @@ go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 4 -core 0 -sym 0 \
 `cmd/adcgo` writes JSON; `cmd/plotspec` turns that JSON into a figure. The output format
 follows the `-out` extension (`.png` / `.svg` / `.pdf`). By default each channel is
 Gaussian-broadened onto a shared grid and drawn as one curve; `-stick` draws bare sticks
-instead. The mode is picked with `-mode`:
+instead, `-overlay-broadened` draws the curves on top of those sticks, and `-stick-height F`
+scales the sticks (sticks and curves are normalised separately, so `-stick-height 0.6` keeps
+the bars under the envelope). Sticks are normalised to the tallest one *in the plotted
+window*, so `-xrange` zooms rescale them. The mode is picked with `-mode`:
 
 | `-mode` | Input | Plots |
 |---|---|---|
@@ -140,6 +143,10 @@ go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 3 \
     -mo testdata/h2o.mo.json -solver dense -tdm -out tdm.json
 go run ./cmd/plotspec -mode tdm -in tdm.json -out tdm.png
 go run ./cmd/plotspec -mode tdm -in tdm.json -out tdm_sticks.png -stick -xrange 500-560
+
+# Sticks with the broadened envelope over them, sticks scaled to 70% of the curve
+go run ./cmd/plotspec -mode tdm -in tdm.json -out tdm_both.png \
+    -stick -overlay-broadened -stick-height 0.7 -fwhm 1.5 -xrange 500-560
 ```
 
 ### `-mode tdm`
@@ -149,10 +156,11 @@ photon energy `omega_ev`, the height is the oscillator strength `osc`, and the t
 transition families become the plotted channels — **`emission`** (ion→ion),
 **`cross-emission`** (core→valence X-ray, `-order 4`), and **`photoionization`** (per-virtual
 Dyson channels). Dipole-forbidden lines (`osc ≤ 0`) are dropped. All the shared rendering
-controls apply: `-fwhm`, `-stick`, `-xrange`, `-absolute`, `-colorblind`, and the raster
-`-width` / `-height` / `-dpi`.
+controls apply: `-fwhm`, `-stick`, `-overlay-broadened`, `-stick-height`, `-xrange`,
+`-absolute`, `-colorblind`, and the raster `-width` / `-height` / `-dpi`.
 
 Common `plotspec` flags: `-in` / `-out`, `-fwhm F` (broadening FWHM, eV), `-stick`,
+`-overlay-broadened` (curves over the sticks), `-stick-height F` (scale the sticks),
 `-xrange LO-HI`, `-absolute` (raw instead of tallest-peak = 1), `-exp FILE` (dotted
 reference overlay, `spectrum` mode), `-colorblind` (Okabe–Ito palette). Reference spectra
 for overlays live in [`testdata/reference/spectra/`](testdata/reference/spectra).

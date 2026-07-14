@@ -151,14 +151,48 @@ func newEngine(ints *integrals.Store, eps []float64, nocc, norb int) *engine {
 	return e
 }
 
+// Density returns the ground-state one-particle density matrix ρ over the correlated space —
+// the same object Static builds internally before contracting it into Σ, exposed for the other
+// consumer of ρ: the ISR representation of a one-particle operator (sip/isrdipole_corr.go),
+// whose 1h/1h block carries a ρ-weighted term (theADCcode's ndadc3_prop (13c), which reads its ρ
+// from this very module — ND_ADC3_CAP_matrix::build_rho() calls Self_energy::density()).
+//
+// This is the *correlation part only*: the zeroth-order δ_ij n_i is never added, matching the
+// convention density2.go documents. Callers that need the full density add it themselves.
+//
+// order 2 gives ρ⁽²⁾ — what the legacy property module uses — and order 3 adds ρ⁽³⁾.
+func Density(ints *integrals.Store, eps []float64, nocc, norb, order int) (*Sigma, error) {
+	if err := checkSpace(eps, nocc, norb); err != nil {
+		return nil, err
+	}
+	if order != 2 && order != 3 {
+		return nil, fmt.Errorf("selfenergy: density order %d not available (want 2 or 3)", order)
+	}
+	e := newEngine(ints, eps, nocc, norb)
+	rho := newSigma(norb)
+	e.rho2(rho)
+	if order == 3 {
+		e.rho3(rho, e.dynamicSelfEnergy3())
+	}
+	return rho, nil
+}
+
+// checkSpace validates the orbital space both entry points share.
+func checkSpace(eps []float64, nocc, norb int) error {
+	if nocc <= 0 || nocc >= norb {
+		return fmt.Errorf("selfenergy: bad space (nocc=%d, norb=%d)", nocc, norb)
+	}
+	if len(eps) < norb {
+		return fmt.Errorf("selfenergy: need %d orbital energies, got %d", norb, len(eps))
+	}
+	return nil
+}
+
 // Static computes the static self-energy over the correlated space. eps are the canonical
 // orbital energies (mp.OrbitalEnergies); ints must carry the same orbSym the ADC space uses.
 func Static(ints *integrals.Store, eps []float64, nocc, norb int, scheme Scheme, opts Options) (*Sigma, error) {
-	if nocc <= 0 || nocc >= norb {
-		return nil, fmt.Errorf("selfenergy: bad space (nocc=%d, norb=%d)", nocc, norb)
-	}
-	if len(eps) < norb {
-		return nil, fmt.Errorf("selfenergy: need %d orbital energies, got %d", norb, len(eps))
+	if err := checkSpace(eps, nocc, norb); err != nil {
+		return nil, err
 	}
 	e := newEngine(ints, eps, nocc, norb)
 

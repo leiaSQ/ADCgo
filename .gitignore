@@ -16,3 +16,7 @@ internal/adc/backend/adc4_kernels.o
 
 # large local-only inputs: pyridine N K-edge demo (658 MB FCIDUMP), no test reads these
 testdata/pyridine_N.*
+
+# H2O aug-cc-pVTZ (405 MB FCIDUMP); regenerate with
+#   python scripts/dump_fcidump.py --input examples/h2o_augccpvtz.in
+testdata/h2o_augccpvtz.*

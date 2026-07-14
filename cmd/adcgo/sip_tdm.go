@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/analyze"
@@ -11,6 +12,7 @@ import (
 	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
 	"github.com/leiaSQ/ADCgo/internal/adc/mo"
 	"github.com/leiaSQ/ADCgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/selfenergy"
 	"github.com/leiaSQ/ADCgo/internal/adc/sip"
 )
 
@@ -34,6 +36,37 @@ type SIPTDMDocument struct {
 	Emissions       []analyze.SIPTransition      `json:"emissions,omitempty"`
 	Photoionization []analyze.SIPPhotoionization `json:"photoionization,omitempty"`
 	CrossEmissions  []analyze.SIPTransition      `json:"cross_emissions,omitempty"`
+}
+
+// isrOptions resolves -tdm-isr into the ISR property-matrix configuration, building the
+// ground-state density once for the whole run.
+//
+// The correlation corrections (sip/isrdipole_corr.go) are the O(2)/O(1) ISR expansion that
+// matches an ADC(2)/ADC(3) secular matrix, so they are on by default at those orders. They are
+// *not* order-consistent for ADC(4) — that would need the 3rd/4th-order terms built from
+// t₂⁽²⁾/t₁⁽²⁾/t₃⁽²⁾, which do not exist in the tree — so -order 4 leaves them off unless asked.
+func isrOptions(d *fcidump.Data, ints *integrals.Store, eps []float64, nocc int, cfg sipConfig) (*sip.ISROptions, error) {
+	order := cfg.tdmISR
+	if order < 0 {
+		order = 2
+		if cfg.order == 4 {
+			order = 0
+		}
+	}
+	if order == 0 {
+		return nil, nil
+	}
+	// ρ⁽²⁾: what the legacy property module uses, and the order the corrections are consistent
+	// with. It is the same object the static self-energy is built from.
+	rho, err := selfenergy.Density(ints, eps, nocc, d.NORB, 2)
+	if err != nil {
+		return nil, fmt.Errorf("ISR ground-state density: %w", err)
+	}
+	if cfg.order == 4 {
+		fmt.Fprintln(os.Stderr, "note: -tdm-isr 2 with -order 4 applies the 2nd-order ISR corrections to a "+
+			"CVS ADC(4) space; they are a partial, order-inconsistent improvement there (no 3h2p correction).")
+	}
+	return &sip.ISROptions{Ints: ints, Eps: eps, Rho: rho.Func()}, nil
 }
 
 // solvedSIP is one sector whose operator is kept live (not released) so the
@@ -96,6 +129,12 @@ func buildSIPTDMDoc(ch *chooser, d *fcidump.Data, ints *integrals.Store, orbSym 
 	nocc := mp.NOcc(d)
 	tdmOpts := analyze.SIPTDMOptions{OscThresh: cfg.tdmOsc}
 
+	isr, err := isrOptions(d, ints, eps, nocc, cfg)
+	if err != nil {
+		return nil, err
+	}
+	tdmOpts.ISR = isr
+
 	td := &SIPTDMDocument{NORB: d.NORB, NELEC: d.NELEC, Order: cfg.order, Solver: cfg.solver}
 	for _, s := range solved {
 		td.Sectors = append(td.Sectors, s.sector)
@@ -107,7 +146,7 @@ func buildSIPTDMDoc(ch *chooser, d *fcidump.Data, ints *integrals.Store, orbSym 
 	// photoionization, which skips its own 3h2p rows, runs for every order.
 	for _, s := range solved {
 		if len(s.sp.Sat3) == 0 {
-			ems, err := analyze.BuildSIPEmissions(s.sp, s.res, s.mx.FMatrix(), md, opts)
+			ems, err := analyze.BuildSIPEmissions(s.sp, s.res, s.mx.FMatrix(), md, opts, tdmOpts)
 			if err != nil {
 				return nil, err
 			}
@@ -120,7 +159,28 @@ func buildSIPTDMDoc(ch *chooser, d *fcidump.Data, ints *integrals.Store, orbSym 
 		td.Photoionization = append(td.Photoionization, ph...)
 	}
 
+	// Element 1 *across* sectors. Inside one sector the square D only sees the totally
+	// symmetric dipole component, but a deep hole and an outer-valence hole generally carry
+	// different irreps (O 1s is a₁ in H2O, 1b₁ is b₁), so the x/y-polarized lines — most of
+	// an X-ray emission spectrum — live entirely in the rectangular cross-sector D. The two
+	// sectors are symmetry blocks of one secular matrix, so these moments are exact, not an
+	// approximation: they land in Emissions alongside the within-sector ones. Ordered pairs
+	// with CrossEmissions' ω > 0 filter visit each transition exactly once.
 	if cfg.order != 4 {
+		for _, bra := range solved {
+			for _, ket := range solved {
+				if bra.sp.Sym == ket.sp.Sym {
+					continue
+				}
+				ems, err := analyze.BuildSIPCrossEmissions(
+					bra.sp, bra.res, bra.mx.FMatrix(),
+					ket.sp, ket.res, ket.mx.FMatrix(), md, opts, tdmOpts)
+				if err != nil {
+					return nil, err
+				}
+				td.Emissions = append(td.Emissions, ems...)
+			}
+		}
 		return td, nil
 	}
 
@@ -154,7 +214,7 @@ func buildSIPTDMDoc(ch *chooser, d *fcidump.Data, ints *integrals.Store, orbSym 
 		for _, k := range kets {
 			cem, err := analyze.BuildSIPCrossEmissions(
 				s.sp, s.res, s.mx.FMatrix(),
-				k.sp, k.res, k.mx.FMatrix(), md, opts)
+				k.sp, k.res, k.mx.FMatrix(), md, opts, tdmOpts)
 			if err != nil {
 				return nil, err
 			}

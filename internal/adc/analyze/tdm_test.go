@@ -3,6 +3,7 @@ package analyze
 import (
 	"math"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/backend"
@@ -45,7 +46,7 @@ func TestBuildSIPEmissions(t *testing.T) {
 	res := lanczos.SolveDense(mx, backend.Gonum{})
 
 	sec := BuildSIPSector(sp, res, mx.FMatrix(), opts)
-	ems, err := BuildSIPEmissions(sp, res, mx.FMatrix(), md, opts)
+	ems, err := BuildSIPEmissions(sp, res, mx.FMatrix(), md, opts, SIPTDMOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +140,7 @@ func TestBuildSIPCrossEmissions(t *testing.T) {
 	mxK := sip.New(ket, ints, eps, 3, backend.Gonum{})
 	resK := lanczos.SolveDense(mxK, backend.Gonum{})
 
-	ems, err := BuildSIPCrossEmissions(bra, resB, mxB.FMatrix(), ket, resK, mxK.FMatrix(), md, opts)
+	ems, err := BuildSIPCrossEmissions(bra, resB, mxB.FMatrix(), ket, resK, mxK.FMatrix(), md, opts, SIPTDMOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,4 +163,150 @@ func TestBuildSIPCrossEmissions(t *testing.T) {
 	if maxMu < 1e-3 {
 		t.Errorf("largest cross dipole %.3e is implausibly small", maxMu)
 	}
+}
+
+// emLine is one emission reduced to the quantities the identity below compares.
+type emLine struct {
+	init, mid float64 // the two state energies, eV — the identity's matching keys
+	mu        [3]float64
+	osc       float64
+}
+
+// collectEmissions solves every sector of one symmetry mode and returns the complete
+// emission line list — within-sector plus, when the sectors are symmetry-blocked, across —
+// together with the whole spectrum, sorted, in eV. orbSym == nil turns symmetry off, which
+// puts every configuration into a single space.
+func collectEmissions(t *testing.T, d *fcidump.Data, nocc int, eps []float64, md *mo.Data, orbSym []int, nsym int) ([]emLine, []float64) {
+	t.Helper()
+	opts := Options{PSThresh: 0, CoeffThresh: 0} // keep every root: the identity is over the full spectrum
+
+	type sector struct {
+		sp  *sip.Space
+		res lanczos.Result
+		f   backend.Mat
+	}
+	ints := integrals.New(d, nocc, orbSym)
+	var secs []sector
+	var levels []float64
+	for g := range nsym {
+		sp := sip.NewSpace(nocc, d.NORB, orbSym, g)
+		if sp.MainBlockSize() == 0 {
+			continue
+		}
+		mx := sip.New(sp, ints, eps, 3, backend.Gonum{})
+		defer mx.Release()
+		res := lanczos.SolveDense(mx, backend.Gonum{})
+		for _, v := range res.Values {
+			levels = append(levels, v*au2eV)
+		}
+		secs = append(secs, sector{sp, res, mx.FMatrix()})
+	}
+
+	var out []emLine
+	add := func(ems []SIPTransition) {
+		for _, e := range ems {
+			out = append(out, emLine{e.InitEV, e.MidEV, e.Mu, e.Osc})
+		}
+	}
+	for _, s := range secs {
+		ems, err := BuildSIPEmissions(s.sp, s.res, s.f, md, opts, SIPTDMOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		add(ems)
+	}
+	for _, bra := range secs {
+		for _, ket := range secs {
+			if bra.sp.Sym == ket.sp.Sym {
+				continue
+			}
+			ems, err := BuildSIPCrossEmissions(bra.sp, bra.res, bra.f, ket.sp, ket.res, ket.f, md, opts, SIPTDMOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			add(ems)
+		}
+	}
+	sort.Slice(out, func(a, b int) bool {
+		if out[a].init != out[b].init {
+			return out[a].init < out[b].init
+		}
+		return out[a].mid < out[b].mid
+	})
+	sort.Float64s(levels)
+	return out, levels
+}
+
+// TestSymmetryBlockedEmissionsMatchUnsymmetrized is the identity that symmetry blocking
+// must satisfy, and the gate that catches a missing cross-sector path.
+//
+// Turning symmetry off puts every configuration into one space; the per-irrep spaces of a
+// symmetry-on run partition exactly that same configuration set, and the secular matrix is
+// block-diagonal in the irrep. So the union of the sector spectra *is* the unsymmetrized
+// spectrum, and the two runs must produce the identical list of emission lines — energies,
+// dipole components and oscillator strengths alike.
+//
+// The symmetry-on list only closes if the cross-sector emissions are included: inside one
+// sector the square ISR dipole sees only the totally symmetric component, so without them
+// every x/y-polarized line is missing and the counts do not even match.
+func TestSymmetryBlockedEmissionsMatchUnsymmetrized(t *testing.T) {
+	d, nocc, eps, md := tdmFixture(t)
+
+	nsym := 1
+	for o := range d.NORB {
+		for nsym < d.OrbSym[o] {
+			nsym <<= 1
+		}
+	}
+
+	off, levels := collectEmissions(t, d, nocc, eps, md, nil, 1)
+	on, _ := collectEmissions(t, d, nocc, eps, md, d.OrbSym, nsym)
+
+	if len(off) != len(on) {
+		t.Fatalf("line count differs: symmetry off %d, symmetry on %d — a whole class of "+
+			"transitions is missing from one of them", len(off), len(on))
+	}
+
+	// Two states that happen to be degenerate across irreps come back from the unsymmetrized
+	// dense solver as an arbitrary mixture of the two, and the dipole of a mixture is not
+	// the dipole of either. That is a property of degenerate eigenvectors, not a defect, so
+	// skip any line built on such a level. levels is the full spectrum, sorted.
+	const degTol = 1e-6 // eV
+	isDegenerate := func(e float64) bool {
+		for i := 1; i < len(levels); i++ {
+			if levels[i]-levels[i-1] < degTol &&
+				(math.Abs(levels[i]-e) < degTol || math.Abs(levels[i-1]-e) < degTol) {
+				return true
+			}
+		}
+		return false
+	}
+
+	var compared, skipped int
+	for i := range off {
+		a, b := off[i], on[i]
+		if math.Abs(a.init-b.init) > 1e-6 || math.Abs(a.mid-b.mid) > 1e-6 {
+			t.Fatalf("line %d: energies differ: off (%.6f -> %.6f), on (%.6f -> %.6f)",
+				i, a.init, a.mid, b.init, b.mid)
+		}
+		if isDegenerate(a.init) || isDegenerate(a.mid) {
+			skipped++
+			continue
+		}
+		compared++
+		for c := range 3 {
+			// The overall sign of an eigenvector is arbitrary, so compare |μ| per component.
+			if math.Abs(math.Abs(a.mu[c])-math.Abs(b.mu[c])) > 1e-8 {
+				t.Errorf("line %d (%.4f -> %.4f eV): |μ_%d| off %.10f, on %.10f",
+					i, a.init, a.mid, c, a.mu[c], b.mu[c])
+			}
+		}
+		if math.Abs(a.osc-b.osc) > 1e-10 {
+			t.Errorf("line %d (%.4f -> %.4f eV): f off %.12f, on %.12f", i, a.init, a.mid, a.osc, b.osc)
+		}
+	}
+	if compared == 0 {
+		t.Fatal("every line was skipped as degenerate; the test compared nothing")
+	}
+	t.Logf("%d lines compared, %d skipped as degenerate", compared, skipped)
 }

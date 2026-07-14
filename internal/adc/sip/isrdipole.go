@@ -8,7 +8,7 @@ import (
 )
 
 // The intermediate-state representation of a one-electron operator over the SIP
-// configuration space, at leading order — the matrix of
+// configuration space — the matrix of
 //
 //	D̂ = Σ_pq d_pq Σ_σ c†_pσ c_qσ
 //
@@ -18,13 +18,13 @@ import (
 // so no Dyson orbital is involved and the moment is a plain μ = X_i† D X_m.
 //
 // Ported from theADCcode's ndadc3_prop (my_calc_d11.c/my_calc_d12.c/my_calc_d22_*.c,
-// reached through ND_ADC3_CAP_matrix), with the correlation corrections dropped: the
-// legacy 1h/1h block additionally carries the second-order self-energy terms (12a–c)
-// and a ground-state-density term that needs ρ from an external self-energy module,
-// and its 1h/2h1p block carries the first-order terms (8a–c). Those are deferred with
-// the rest of the order-consistent ISR property expansion (see the "new physics"
-// section of the plan); everything below is exact at zeroth order in the fluctuation
-// potential and complete — no term of that order is missing.
+// reached through ND_ADC3_CAP_matrix). This file is the zeroth order in the fluctuation
+// potential, and at that order it is complete — no term is missing. The *correlation*
+// corrections that carry the operator to the order its secular matrix is built at — the
+// second-order 1h/1h terms (12a–c), the ground-state-density term (13c), and the
+// first-order 1h/2h1p terms (8a–c) — live in isrdipole_corr.go, which needs the integrals
+// and the density and is therefore opt-in through ISROptions. A nil ISROptions leaves the
+// operator exactly as this file builds it.
 //
 // Spin functions. The eigenvectors X come from the secular matrix, so D must be built
 // over exactly the configurations elements.go uses. Those are, for the M_S = +1/2
@@ -63,6 +63,12 @@ type ISRDipole struct {
 	bra, ket *Space
 	d        backend.Mat // MO-basis d_pq, Norb × Norb, symmetric
 	d0       float64     // 2·Σ_{i<Nocc} d_ii — the closed-shell expectation ⟨0|D̂|0⟩
+
+	// The correlation corrections (isrdipole_corr.go). nil leaves the operator at zeroth
+	// order in the fluctuation potential, which is what it was before they existed.
+	corr  *isrCorr
+	dnull float64   // (13a)'s correlated moment 2·Tr(d·ρ), == d0 when corr is nil
+	t8    []float64 // the (8a)/(8b) ph sum, tabulated per (occupied, virtual)
 
 	rows [][]dipEntry // sparse D by bra row, built once
 }
@@ -134,22 +140,36 @@ func (o *ISRDipole) At(i, j int) float64 {
 	switch {
 	case bi && bj:
 		p, q := ri.Occ[0], cj.Occ[0]
-		v := -o.d.At(p, q)
+		v := -o.d.At(p, q) // (13b)
 		if p == q {
-			v += o.d0 // the same configuration, however each space indexes it
+			v += o.dnull // (13a); the same configuration, however each space indexes it
+		}
+		if o.corr != nil {
+			v += o.d11corr(p, q) // (13c) + (12a) + (12b) + (12c)
 		}
 		return v
 	case bi:
 		c, s := canonical(o.ket, cj)
-		return s * o.mainSat(ri.Occ[0], c)
+		return s * o.mainSatFull(ri.Occ[0], c)
 	case bj:
 		r, s := canonical(o.bra, ri)
-		return s * o.mainSat(cj.Occ[0], r)
+		return s * o.mainSatFull(cj.Occ[0], r)
 	default:
 		r, sr := canonical(o.bra, ri)
 		c, sc := canonical(o.ket, cj)
 		return sr * sc * o.satsat(r, c)
 	}
+}
+
+// mainSatFull is the whole 1h/2h1p element: the zeroth-order block plus, when corrections
+// are on, the first-order (8a)/(8b)/(8c) terms. Both halves take the *canonicalized* config,
+// so the caller's spin-function sign applies to the sum.
+func (o *ISRDipole) mainSatFull(i int, c Config) float64 {
+	v := o.mainSat(i, c)
+	if o.corr != nil {
+		v += o.mainSatCorr(i, c)
+	}
+	return v
 }
 
 // mainSat is ⟨i|D̂|c⟩ for a 1h main config i and a 2h1p config c. A one-particle
@@ -308,6 +328,15 @@ func (o *ISRDipole) sparsify() [][]dipEntry {
 		hole := bra.Configs[i].Occ[0]
 		for j := range ket.BeginSat {
 			push(i, j)
+		}
+		if o.corr != nil {
+			// (8c) carries no delta between the 1h hole and the satellite's holes, so with
+			// corrections on this block is dense and the zeroth-order reachability below
+			// would silently drop most of it.
+			for j := ket.BeginSat; j < len(ket.Configs); j++ {
+				push(i, j)
+			}
+			continue
 		}
 		for _, j := range holesOf[hole] {
 			push(i, j)

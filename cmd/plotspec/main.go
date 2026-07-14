@@ -20,9 +20,16 @@
 //	plotspec -in spec.json -exp h2o_auger_experimental.json -out spectrum.png
 //	plotspec -in spec.json -out spectrum.png -xrange 30-100
 //	plotspec -in sip.json  -out sip.png            # SIP: one curve per orbital
+//	plotspec -mode tdm -in tdm.json -out tdm.png -stick -overlay-broadened -stick-height 0.6
 //
-// The same renderer handles both DIP and SIP JSON (meta.kind): SIP channels are
+// The same renderer handles DIP, SIP and TDM JSON (meta.kind): SIP channels are
 // orbitals, and the axis/title switch to single-ionization wording.
+//
+// -stick draws one bar per state instead of the broadened curves; adding
+// -overlay-broadened draws the curves on top of the sticks as well, and
+// -stick-height scales the sticks (sticks and curves are normalised separately,
+// so -stick-height 0.6 keeps the bars under the envelope). Both work in every
+// single-spectrum mode (spectrum/SIP/DIP/tdm) as well as in panel mode.
 //
 // The Y axis defaults to relative intensity (tallest displayed peak = 1); pass
 // -absolute to plot the raw broadened intensity instead.
@@ -112,8 +119,8 @@ func run() error {
 		xRangeC     = flag.String("xrange-c", "0-14", "panel mode: X window (eV) for panel (c) electron-emission spectrum")
 		sipGroups   = multiFlag{}
 		sipGroupI   bool
-		overlay     = flag.Bool("overlay-broadened", false, "panel mode: overlay a thin Gaussian envelope (total spectrum) on the (a)/(b) sticks")
-		stickHeight = flag.Float64("stick-height", 1, "panel mode: scale factor for the normalised stick heights (the overlay envelope stays at 1); use <1 so the sticks sit below the -overlay-broadened curve")
+		overlay     = flag.Bool("overlay-broadened", false, "overlay the Gaussian-broadened curves on the -stick spectrum (spectrum/tdm mode: one curve per channel; panel mode: one total envelope on the (a)/(b) sticks)")
+		stickHeight = flag.Float64("stick-height", 1, "scale factor for the normalised stick heights (the broadened curves stay at 1); use <1 so the sticks sit below the -overlay-broadened curve")
 	)
 	flag.Var(sipGroupFlag{specs: &sipGroups, interactive: &sipGroupI}, "sip-group", "panel mode: group panel (a) MOs. Bare \"-sip-group\" opens an interactive dialogue listing every MO; or pass a spec \"-sip-group=core=1,2\" (MO numbers, or symN for a whole symmetry), append #RRGGBB to the label for a custom colour, e.g. \"-sip-group=core#e41a1c=1,2\" (repeatable)")
 	flag.Parse()
@@ -224,14 +231,18 @@ func run() error {
 		expOrder = channelOrder(*exp)
 	}
 
-	// Theory/overlay intensities are either Gaussian-broadened curves on the
-	// grid, or raw sticks (one vertical bar per state) when -stick is set. Both
-	// paths apply the same optional spin weighting, experimental scaling, and
-	// relative normalisation; only the geometry of what gets drawn differs.
-	var curves, expCurves map[string][]float64   // curve mode
-	var sticks, expSticks map[string]plotter.XYs // stick mode
+	// Theory/overlay intensities are Gaussian-broadened curves on the grid, raw
+	// sticks (one vertical bar per state) when -stick is set, or both when -stick
+	// is combined with -overlay-broadened. Each geometry applies the same optional
+	// spin weighting, experimental scaling and relative normalisation, but they are
+	// normalised independently (sticks and broadened intensities carry different
+	// units), so -stick-height can scale the sticks down under the curves.
+	var curves, expCurves map[string][]float64   // curves: broadened
+	var sticks, expSticks map[string]plotter.XYs // sticks: one bar per state
+	drawSticks := *stick
+	drawCurves := !*stick || *overlay
 
-	if *stick {
+	if drawSticks {
 		sticks = stickHeights(spec.Lines, order, *spinWeight, ratio)
 		if exp != nil {
 			// Measured rates already embed the singlet:triplet ratio, so spin
@@ -242,7 +253,7 @@ func run() error {
 			// single global factor preserves relative heights within the overlay.
 			scale := *expScale
 			if scale == 0 {
-				tMax, eMax := maxXY(sticks), maxXY(expSticks)
+				tMax, eMax := maxXYIn(sticks, lo, hi), maxXYIn(expSticks, lo, hi)
 				if tMax > 0 && eMax > 0 {
 					scale = tMax / eMax
 				} else {
@@ -257,29 +268,42 @@ func run() error {
 			fmt.Fprintf(os.Stderr, "Plotspec: experimental overlay scaled by %.4g\n", scale)
 		}
 
-		// Normalise so the tallest displayed stick = 1 (unless -absolute). The
-		// overlay shares the divisor so its calibrated relative height is kept.
+		// Normalise so the tallest displayed stick = 1 (unless -absolute), then
+		// apply -stick-height. The overlay shares both factors so its calibrated
+		// relative height is kept. Only sticks inside the plotted window count:
+		// under -xrange a taller line just outside it would otherwise squash the
+		// whole visible spectrum (the broadened curves, evaluated only on the
+		// in-window grid, are normalised the same way).
+		scale := 1.0
 		if !*absolute {
-			norm := maxXY(sticks)
+			norm := maxXYIn(sticks, lo, hi)
 			if exp != nil {
-				if m := maxXY(expSticks); m > norm {
+				if m := maxXYIn(expSticks, lo, hi); m > norm {
 					norm = m
 				}
 			}
 			if norm > 0 {
-				for _, xys := range sticks {
-					for i := range xys {
-						xys[i].Y /= norm
-					}
+				scale = 1 / norm
+			}
+		}
+		if *stickHeight > 0 {
+			scale *= *stickHeight
+		}
+		if scale != 1 {
+			for _, xys := range sticks {
+				for i := range xys {
+					xys[i].Y *= scale
 				}
-				for _, xys := range expSticks {
-					for i := range xys {
-						xys[i].Y /= norm
-					}
+			}
+			for _, xys := range expSticks {
+				for i := range xys {
+					xys[i].Y *= scale
 				}
 			}
 		}
-	} else {
+	}
+
+	if drawCurves {
 		// Broaden theory channels (canonical order; any stray channel appended).
 		curves = broaden(spec.Lines, order, grid, sigma, *spinWeight, ratio)
 
@@ -390,25 +414,27 @@ func run() error {
 		yQty = "oscillator strength"
 		yQtyCap = "Oscillator strength"
 	}
+	geom := fmt.Sprintf("Gaussian-broadened, FWHM %.2g %s", *fwhm, unit)
 	switch {
-	case *stick && *absolute:
-		p.Y.Label.Text = yQtyCap + " (sticks)"
-	case *stick:
-		p.Y.Label.Text = "Relative " + yQty + " (sticks)"
-	case *absolute:
-		p.Y.Label.Text = fmt.Sprintf("%s (Gaussian-broadened, FWHM %.2g %s)", yQtyCap, *fwhm, unit)
-	default:
-		p.Y.Label.Text = fmt.Sprintf("Relative %s (Gaussian-broadened, FWHM %.2g %s)", yQty, *fwhm, unit)
+	case drawSticks && drawCurves:
+		geom = fmt.Sprintf("sticks + Gaussian FWHM %.2g %s", *fwhm, unit)
+	case drawSticks:
+		geom = "sticks"
+	}
+	if *absolute {
+		p.Y.Label.Text = fmt.Sprintf("%s (%s)", yQtyCap, geom)
+	} else {
+		p.Y.Label.Text = fmt.Sprintf("Relative %s (%s)", yQty, geom)
 	}
 	p.Legend.Top = true
 
-	if *stick {
+	if drawSticks {
 		// All channels' sticks share one plotter so they can be drawn tallest
 		// first: a state shared by several channels has one stick per channel at
 		// the same energy and width, and drawing the shortest last keeps it on
 		// top so no taller stick of another channel hides it. Theory sticks are
 		// solid; the experimental overlay is dashed in the matching colour.
-		stem := &stemPlot{width: vg.Points(2)}
+		stem := newStemPlot(vg.Points(2), lo, hi)
 		for _, ch := range order {
 			col := palette(colorIdx[ch])
 			for _, pt := range sticks[ch] {
@@ -429,8 +455,11 @@ func run() error {
 			}
 		}
 		p.Add(stem)
-	} else {
-		// Theory curves: solid.
+	}
+
+	if drawCurves {
+		// Theory curves: solid. When they overlay sticks the channels already have
+		// a legend entry, so only the curve-only plot adds one here.
 		for _, ch := range order {
 			line, err := plotter.NewLine(asXYs(grid, curves[ch]))
 			if err != nil {
@@ -439,7 +468,9 @@ func run() error {
 			line.Color = palette(colorIdx[ch])
 			line.Width = vg.Points(1.5)
 			p.Add(line)
-			p.Legend.Add(ch, line)
+			if !drawSticks {
+				p.Legend.Add(ch, line)
+			}
 		}
 
 		// Experimental curves: dotted, same colour as the matching theory channel.
@@ -452,7 +483,9 @@ func run() error {
 			line.Width = vg.Points(1.5)
 			line.Dashes = []vg.Length{vg.Points(2), vg.Points(2)}
 			p.Add(line)
-			p.Legend.Add(ch+" (exp)", line)
+			if !drawSticks {
+				p.Legend.Add(ch+" (exp)", line)
+			}
 		}
 	}
 
@@ -911,11 +944,13 @@ func buildStickPanel(lines []specLine, order []string, grid []float64, sigma flo
 	sticks := stickHeights(lines, order, spinWeight, ratio)
 	norm := 1.0
 	if !absolute {
-		if m := maxXY(sticks); m > 0 {
+		// Only the sticks inside the panel's window (the grid's span) set the
+		// scale, so a taller line outside it cannot squash the visible ones.
+		if m := maxXYIn(sticks, grid[0], grid[len(grid)-1]); m > 0 {
 			norm = m
 		}
 	}
-	stem := &stemPlot{width: vg.Points(2)}
+	stem := newStemPlot(vg.Points(2), grid[0], grid[len(grid)-1])
 	for _, ch := range order {
 		col := colorOf(ch)
 		for _, pt := range sticks[ch] {
@@ -1653,10 +1688,24 @@ type stem3 struct {
 // Sticks are drawn tallest first, so where several channels carry a stick at the
 // same eigenvalue (same x and width) the shorter ones are painted last and stay
 // visible instead of being hidden behind a taller stick of another channel.
+//
+// xlo/xhi bound the plotted window: sticks outside it are clipped away when
+// drawn, and DataRange ignores them, so a tall line just off-screen cannot
+// stretch the Y axis and flatten everything the window does show.
 type stemPlot struct {
-	sticks []stem3
-	width  vg.Length
+	sticks   []stem3
+	width    vg.Length
+	xlo, xhi float64
 }
+
+// newStemPlot returns an empty stick plotter drawing at the given width over the
+// window [xlo, xhi].
+func newStemPlot(width vg.Length, xlo, xhi float64) *stemPlot {
+	return &stemPlot{width: width, xlo: xlo, xhi: xhi}
+}
+
+// inWindow reports whether stick st falls inside the plotted window.
+func (s *stemPlot) inWindow(st stem3) bool { return st.x >= s.xlo && st.x <= s.xhi }
 
 func (s *stemPlot) Plot(c draw.Canvas, plt *plot.Plot) {
 	trX, trY := plt.Transforms(&c)
@@ -1670,21 +1719,32 @@ func (s *stemPlot) Plot(c draw.Canvas, plt *plot.Plot) {
 	})
 	for _, idx := range order {
 		st := s.sticks[idx]
+		if !s.inWindow(st) {
+			continue
+		}
 		x := trX(st.x)
 		sty := draw.LineStyle{Color: st.color, Width: s.width, Dashes: st.dashes}
 		c.StrokeLine2(sty, x, y0, x, trY(st.y))
 	}
 }
 
-// DataRange reports the span of the sticks, pinning the lower Y bound to the
-// baseline so the stems are always drawn from zero.
+// DataRange reports the span of the sticks inside the plotted window, pinning the
+// lower Y bound to the baseline so the stems are always drawn from zero. With no
+// stick in the window it falls back to the window itself, leaving the axes to any
+// other plotter (e.g. an -overlay-broadened curve).
 func (s *stemPlot) DataRange() (xmin, xmax, ymin, ymax float64) {
 	xmin, ymin = math.Inf(1), 0
 	xmax, ymax = math.Inf(-1), 0
 	for _, st := range s.sticks {
+		if !s.inWindow(st) {
+			continue
+		}
 		xmin = math.Min(xmin, st.x)
 		xmax = math.Max(xmax, st.x)
 		ymax = math.Max(ymax, st.y)
+	}
+	if xmin > xmax {
+		xmin, xmax = s.xlo, s.xhi
 	}
 	return
 }
@@ -1725,12 +1785,14 @@ func stickHeights(lines []specLine, order []string, spinWeight bool, ratio float
 	return m
 }
 
-// maxXY returns the largest Y across all channels' sticks (0 if empty).
-func maxXY(sticks map[string]plotter.XYs) float64 {
+// maxXYIn returns the largest Y across all channels' sticks whose energy lies in
+// [lo, hi], i.e. the tallest stick actually drawn in the plotted window (0 if
+// none).
+func maxXYIn(sticks map[string]plotter.XYs, lo, hi float64) float64 {
 	max := 0.0
 	for _, xys := range sticks {
 		for _, pt := range xys {
-			if pt.Y > max {
+			if pt.X >= lo && pt.X <= hi && pt.Y > max {
 				max = pt.Y
 			}
 		}
