@@ -22,9 +22,11 @@ build the molecule with ``cart=True`` for parity.
 
 from pyscf import gto
 
-# Recognised angular-momentum letters (single-shell). SP/L compound shells carry an
-# extra coefficient column and are handled separately.
+# Recognised angular-momentum letters (single-shell). SP/L compound shells (the
+# GAMESS-UK spelling of a shared-exponent s+p shell, as in 6-31G) carry an extra
+# coefficient column and are split into equivalent separate S and P shells on output.
 _SHELL_LETTERS = set("SPDFGHI")
+_COMPOUND = {"SP", "L"}
 
 
 def _is_number(token):
@@ -58,22 +60,24 @@ def parse_gamess_basis(text):
         if all(_is_number(t) for t in tok):
             if cur is None:
                 raise ValueError(f"primitive row before any shell header: {line!r}")
-            if len(tok) != 2:
-                raise ValueError(
-                    f"expected '<coeff> <exponent>' (2 columns), got {line!r}")
-            coeff, exponent = float(tok[0]), float(tok[1])
-            cur[2].append((exponent, coeff))
+            # Plain shell: '<coeff> <exponent>'. SP/L compound shell: the exponent is
+            # shared by the s and p parts, so the row is '<coeff-s> <exponent> <coeff-p>'.
+            want = 3 if cur[1] in _COMPOUND else 2
+            if len(tok) != want:
+                cols = ("'<coeff-s> <exponent> <coeff-p>' (3 columns)" if want == 3
+                        else "'<coeff> <exponent>' (2 columns)")
+                raise ValueError(f"expected {cols}, got {line!r}")
+            if want == 3:
+                cur[2].append((float(tok[1]), float(tok[0]), float(tok[2])))
+            else:
+                cur[2].append((float(tok[1]), float(tok[0])))
             continue
 
         # Header row.
         if len(tok) != 2:
             raise ValueError(f"malformed shell header: {line!r}")
         shell, elem = tok[0].upper(), tok[1].capitalize()
-        if shell in ("SP", "L"):
-            raise NotImplementedError(
-                f"SP/L compound shell in basis ({line!r}) is not supported; "
-                "split it into separate S and P shells")
-        if shell not in _SHELL_LETTERS:
+        if shell not in _SHELL_LETTERS and shell not in _COMPOUND:
             raise ValueError(f"unknown shell type {tok[0]!r} in {line!r}")
         if elem not in shells:
             shells[elem] = []
@@ -85,16 +89,19 @@ def parse_gamess_basis(text):
         raise ValueError("no shells parsed from basis file")
 
     # Emit NWChem text per element: header "<elem> <L>", rows "<exponent> <coeff>".
+    # An SP/L shell becomes two blocks (S and P) over the shared exponents.
     out = {}
     for elem in order:
         blocks = []
         for _, shell, prims in shells[elem]:
             if not prims:
                 raise ValueError(f"shell {shell} on {elem} has no primitives")
-            rows = [f"{elem}    {shell}"]
-            for exponent, coeff in prims:
-                rows.append(f"    {exponent:.10f}   {coeff:.10f}")
-            blocks.append("\n".join(rows))
+            parts = ([("S", 1), ("P", 2)] if shell in _COMPOUND else [(shell, 1)])
+            for letter, col in parts:
+                rows = [f"{elem}    {letter}"]
+                for prim in prims:
+                    rows.append(f"    {prim[0]:.10f}   {prim[col]:.10f}")
+                blocks.append("\n".join(rows))
         out[elem] = "\n".join(blocks)
     return out
 

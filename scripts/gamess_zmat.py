@@ -135,12 +135,25 @@ def _looks_like_xyz(lines):
     return bool(lines) and lines[0].split()[0].lstrip("+").isdigit()
 
 
+# GAMESS-UK dummy centres: pure geometry scaffolding (they carry no charge and no
+# basis functions). pyscf normalises a leading-X symbol to its ghost form, so `xx`
+# comes back from from_zmatrix as `X-X`; match both spellings. `Xe` must not match.
+_DUMMY_SYMBOLS = {"x", "xx", "q", "dummy", "x-x", "x-xx"}
+
+
+def _is_dummy(sym):
+    return sym.strip().lower() in _DUMMY_SYMBOLS
+
+
 def read_geometry(path):
     """Read a geometry file -> ``(atom_spec, unit)`` for ``gto.M``.
 
     Supports GAMESS-UK z-matrix (default), ``.xyz`` (count + comment + rows), and a
     plain pyscf Cartesian atom list ("Sym x y z" per line). ``atom_spec`` is a list
     of ``[symbol, (x, y, z)]``; ``unit`` is the pyscf unit string.
+
+    Dummy centres (``xx``/``x``/``q``) are dropped, but only *after* the z-matrix is
+    converted to Cartesians, since the atom rows reference them by 1-based index.
     """
     with open(path) as fh:
         text = fh.read()
@@ -154,21 +167,24 @@ def read_geometry(path):
 
     if is_zmat:
         rows, unit = parse_gamess_zmat(text)
-        atoms = from_zmatrix("\n".join(rows))
-        return [[sym, tuple(float(x) for x in xyz)] for sym, xyz in atoms], unit
+        atoms = [[sym, tuple(float(x) for x in xyz)]
+                 for sym, xyz in from_zmatrix("\n".join(rows))]
+    else:
+        # Cartesian: skip the count/comment header for .xyz; else every row is an atom.
+        body = lines[2:] if is_xyz else lines
+        atoms = []
+        for line in body:
+            tok = line.split()
+            if len(tok) < 4:
+                raise ValueError(f"malformed Cartesian atom row: {line!r}")
+            atoms.append([tok[0], (float(tok[1]), float(tok[2]), float(tok[3]))])
+        # .xyz is Angstrom by convention; a bare Cartesian list we also treat as such.
+        unit = "Angstrom"
 
-    # Cartesian: skip the count/comment header for .xyz; otherwise every row is an atom.
-    body = lines[2:] if is_xyz else lines
-    atoms = []
-    for line in body:
-        tok = line.split()
-        if len(tok) < 4:
-            raise ValueError(f"malformed Cartesian atom row: {line!r}")
-        atoms.append([tok[0], (float(tok[1]), float(tok[2]), float(tok[3]))])
+    atoms = [a for a in atoms if not _is_dummy(a[0])]
     if not atoms:
         raise ValueError(f"no atoms parsed from {path}")
-    # .xyz is Angstrom by convention; a bare Cartesian list we also treat as Angstrom.
-    return atoms, "Angstrom"
+    return atoms, unit
 
 
 if __name__ == "__main__":  # quick manual check

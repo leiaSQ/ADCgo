@@ -60,7 +60,14 @@ def run_scf(cfg, mol):
     mf = scf.RHF(mol)
     mf.conv_tol = cfg.conv_tol
     mf.conv_tol_grad = cfg.conv_tol_grad
+    mf.max_cycle = cfg.max_cycle
     mf.run()
+    # An unconverged reference silently poisons every downstream ADC number, and the
+    # energy can still look right to ~1e-6 Ha while the orbitals are not stationary.
+    if not mf.converged:
+        raise SystemExit(
+            f"SCF did NOT converge in {cfg.max_cycle} cycles (E={mf.e_tot:.10f} Ha, "
+            f"conv_tol={cfg.conv_tol:g}). Raise `max_cycle` in &scf.")
     if cfg.gate is not None and abs(mf.e_tot - cfg.gate) > 1e-4:
         raise SystemExit(
             f"SCF gate FAILED: E(SCF)={mf.e_tot:.10f} Ha, reference {cfg.gate:.10f} "
@@ -159,6 +166,7 @@ def config_from_args(args):
         basis_file=args.basis_file, basis_name=args.basis,
         cartesian=args.cartesian,
         charge=args.charge, spin=args.spin, symmetry=sym, gate=args.gate,
+        max_cycle=args.max_cycle,
         frozen_core=args.frozen_core, frozen_list=args.frozen_list,
         active=args.active,
         fcidump=args.fcidump, sidecar=args.sidecar, manifest=args.manifest,
@@ -180,6 +188,8 @@ def main(argv=None):
     p.add_argument("--spin", type=int, default=0, help="2S (unpaired electrons)")
     p.add_argument("--sym-group", help="point group: auto|off|C2v|Cs|...")
     p.add_argument("--gate", type=float, help="reference E(SCF) gate (Ha)")
+    p.add_argument("--max-cycle", type=int, dest="max_cycle", default=50,
+                   help="SCF max iterations (default: pyscf's 50)")
     p.add_argument("--frozen-core", type=int, dest="frozen_core",
                    help="freeze N lowest MOs")
     p.add_argument("--frozen-list", dest="frozen_list",
