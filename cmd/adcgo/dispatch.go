@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/backend"
@@ -29,6 +30,12 @@ import (
 type chooser struct {
 	cands   []candidate
 	verbose bool
+
+	// pool holds one backend per visible device when a homogeneous GPU backend was
+	// pinned (-backend cuda|hip on a multi-GPU node). len(pool) >= 2 enables concurrent
+	// per-sector dispatch (one GPU per sector); nil/len<2 means run sectors serially
+	// through cands (the single-backend or -backend auto cost-picking path).
+	pool []backend.Backend
 }
 
 type candidate struct {
@@ -41,16 +48,29 @@ type candidate struct {
 // Returns the per-block-iteration apply cost.
 type applyProbe func(be backend.Backend) time.Duration
 
-// newChooser resolves cfgName into a chooser. Any name other than "auto" pins that one
-// backend, and no calibration runs. "auto" with a single available backend likewise
-// short-circuits: there is nothing to choose between, and calibration is not free.
-func newChooser(cfgName string, verbose bool) (*chooser, error) {
+// newChooser resolves cfgName into a chooser. Any name other than "auto" pins that
+// backend and runs no calibration; on a multi-GPU node it binds one instance per
+// visible device (capped by maxGPUs, 0 = all) so independent sectors run concurrently,
+// one per GPU. "auto" keeps the per-sector cost-picking path (single device per
+// backend); "auto" with a single available backend short-circuits.
+func newChooser(cfgName string, verbose bool, maxGPUs int) (*chooser, error) {
 	if cfgName != "auto" {
-		be, err := backend.New(cfgName)
+		bes, err := backend.NewAll(cfgName, maxGPUs)
 		if err != nil {
 			return nil, err
 		}
-		return &chooser{cands: []candidate{{name: cfgName, be: be}}, verbose: verbose}, nil
+		// One representative candidate drives the serial/single path (single() short-
+		// circuits pickLanczos/pickDense — no probe, no calibration). When more than one
+		// device is visible, pool holds them all for concurrent per-sector dispatch.
+		c := &chooser{cands: []candidate{{name: cfgName, be: bes[0]}}, verbose: verbose}
+		if len(bes) > 1 {
+			c.pool = bes
+			if verbose {
+				fmt.Fprintf(os.Stderr, "dispatch %s: %d devices, sectors run concurrently (one per GPU)\n",
+					cfgName, len(bes))
+			}
+		}
+		return c, nil
 	}
 
 	names := backend.Available()
@@ -203,4 +223,50 @@ func timeApplyBlock(be backend.Backend, n, b int, apply func(out, in backend.Blo
 	apply(w, q)
 	_ = be.Nrm2(w.V)
 	return time.Since(t0)
+}
+
+// workerChoosers derives one single-backend chooser per pooled device. Each has a
+// single candidate, so its pickLanczos/pickDense short-circuits (single()) to that
+// device's backend — no cross-device probe, exactly what a per-GPU worker wants.
+func (c *chooser) workerChoosers() []*chooser {
+	out := make([]*chooser, len(c.pool))
+	for i, be := range c.pool {
+		out[i] = &chooser{
+			cands:   []candidate{{name: fmt.Sprintf("%s#%d", c.cands[0].name, i), be: be}},
+			verbose: c.verbose,
+		}
+	}
+	return out
+}
+
+// runConcurrent dispatches nItems work items across the device pool, one item per free
+// device at a time, and blocks until all complete. job runs on a worker's own single-
+// device chooser and must write its result into caller-owned storage indexed by item
+// (workers touch disjoint indices, so no locking is needed there). Output ordering is
+// the caller's responsibility; runConcurrent imposes none. Returns the first error.
+func (c *chooser) runConcurrent(nItems int, job func(w *chooser, item int) error) error {
+	workers := c.workerChoosers()
+	jobs := make(chan int)
+	errs := make([]error, nItems)
+	var wg sync.WaitGroup
+	for _, w := range workers {
+		wg.Add(1)
+		go func(w *chooser) {
+			defer wg.Done()
+			for i := range jobs {
+				errs[i] = job(w, i)
+			}
+		}(w)
+	}
+	for i := 0; i < nItems; i++ {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
 }

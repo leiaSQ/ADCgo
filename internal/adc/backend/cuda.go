@@ -8,6 +8,10 @@
 package backend
 
 /*
+// CUDA install prefix defaults to /usr/local/cuda; override it for a module-based
+// toolkit (e.g. Helix's cuda/13.2) by exporting CGO_CFLAGS="-I$CUDA_HOME/include" and
+// CGO_LDFLAGS="-L$CUDA_HOME/lib64" before `go build -tags cuda` — cgo appends those to
+// the directives below.
 #cgo CFLAGS: -I/usr/local/cuda/include
 #cgo LDFLAGS: -L/usr/local/cuda/lib64 -lcublas -lcudart -lcusolver
 #include <cuda_runtime.h>
@@ -20,6 +24,13 @@ package backend
 // as a benchmark reporting throughput above the card's FP64 peak. Surface them.
 static int  dev_last_error(void)                       { return (int)cudaGetLastError(); }
 static int  dev_sync(void)                             { return (int)cudaDeviceSynchronize(); }
+
+// Multi-GPU: dev_count enumerates visible devices (honours CUDA_VISIBLE_DEVICES);
+// dev_set binds the CALLING thread's context to a device. Device is thread-current
+// state, so a backend that pins one OS thread for life needs only one dev_set (before
+// its handle is created) to route every later op to that device — see gpu_device.go.
+static int  dev_count(void)                            { int n = 0; cudaGetDeviceCount(&n); return n; }
+static int  dev_set(int dev)                           { return (int)cudaSetDevice(dev); }
 static void* dev_malloc(size_t bytes)                  { void* p = NULL; cudaMalloc(&p, bytes); return p; }
 static void  dev_free(void* p)                         { cudaFree(p); }
 static int   dev_zero(void* p, size_t bytes)           { return (int)cudaMemset(p, 0, bytes); }
@@ -120,6 +131,20 @@ func ckBlas(st C.int, op string) {
 		panic(fmt.Sprintf("backend: cublas %s failed (cublasStatus_t %d)", op, int(st)))
 	}
 }
+
+// devCount returns the number of visible CUDA devices, or 0 if the driver is absent
+// or reports an error — letting a build with no usable GPU fall back to a host backend.
+func devCount() int {
+	n := int(C.dev_count())
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// devSet binds the calling thread's CUDA context to device dev. Must run on the
+// backend's owning thread before blasCreate (see newGPUOn).
+func devSet(dev int) { ckCuda(C.dev_set(C.int(dev)), "cudaSetDevice") }
 
 func blasCreate() unsafe.Pointer {
 	var st C.int

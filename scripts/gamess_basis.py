@@ -54,6 +54,11 @@ def parse_gamess_basis(text):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
+        # GAMESS-UK wraps a basis block in `basis` ... `end` delimiters; a file pasted
+        # verbatim (e.g. from a GAMESS-UK input) keeps them. They are never shell headers
+        # (no element is named that), so skip them rather than force the user to strip them.
+        if line.lower() in ("basis", "end"):
+            continue
         tok = line.split()
 
         # A primitive row is all-numeric; a header row is <letter> <element>.

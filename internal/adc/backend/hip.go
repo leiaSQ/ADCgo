@@ -94,6 +94,12 @@ static int dev_read_int(const int* p) {
 static int dev_mem_info(size_t* freeB, size_t* totalB) {
 	return (int)hipMemGetInfo(freeB, totalB);
 }
+
+// Multi-GPU: enumerate visible devices and bind the calling thread's context to one.
+// Device is thread-current state, so a backend pinning one thread for life needs a
+// single dev_set before its handle is created (see gpu_device.go / cuda.go's twins).
+static int dev_count(void)  { int n = 0; hipGetDeviceCount(&n); return n; }
+static int dev_set(int dev) { return (int)hipSetDevice(dev); }
 */
 import "C"
 
@@ -103,6 +109,19 @@ import (
 )
 
 const backendName = "hip"
+
+// devCount returns the number of visible HIP devices, or 0 if none / on error.
+func devCount() int {
+	n := int(C.dev_count())
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// devSet binds the calling thread's HIP context to device dev. Must run on the
+// backend's owning thread before blasCreate (see newGPUOn).
+func devSet(dev int) { C.dev_set(C.int(dev)) }
 
 func blasCreate() unsafe.Pointer { return unsafe.Pointer(C.blas_create()) }
 

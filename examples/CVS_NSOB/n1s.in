@@ -27,5 +27,5 @@
   sidecar  nsob_n1s.mo.json    # C/S + dipoles: enables -tdm (core->valence XES)
   manifest nsob_n1s.ref.json
 &adc
-  args   -sip -order 4 -core 0 -solver lanczos -matfree auto -blocks 200
+  args   -sip -order 4 -core 0 -solver davidson -nroots 20 -convthr 1e-3 -matfree auto
   sym    1                     # a' only: the core hole is 1 A' (adc_1holes' "7 1")

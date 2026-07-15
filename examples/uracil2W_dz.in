@@ -1,0 +1,19 @@
+# ADCgo DIP run on H2O with a *named* basis (cc-pVDZ), full MO space (no active
+# selection). Shows the named-basis path; geometry is a plain .xyz.
+#
+#   scripts/adcgo_run.sh examples/h2o_ccpvdz.in ./adcgo
+#
+&geometry
+  file   uracil2W.zmat
+&basis
+  name   dz             # resolved by pyscf; spherical GTOs (cartesian off)
+&scf
+  charge 0
+  symmetry auto
+&output
+  fcidump  uracil2W.fcidump
+  sidecar  uracil2W.mo.json
+  manifest uracil2W.ref.json
+&adc
+  args   -dip -order 2 -solver lanczos -spin both -blocks 200
+  sym    all                 # single run over all irreps
