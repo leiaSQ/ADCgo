@@ -150,6 +150,49 @@ go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 4 -core 0 -sym 0 \
     -mo testdata/h2o.mo.json -solver dense -tdm
 ```
 
+## Solvers
+
+Every method above builds the same real-symmetric secular matrix; `-solver` only chooses
+how it is diagonalized. All three return identical energies and pole strengths on the
+states they resolve — pick by problem size and how much of the spectrum you need.
+
+### `-solver dense`
+
+Forms the full matrix and diagonalizes it directly (LAPACK `dsyev`). Exact and returns
+every state, but is O(N³) time / O(N²) memory — use it for small sectors, validation, and
+as the correctness oracle for the other two. Default for the examples above.
+
+### `-solver lanczos` (default)
+
+Matrix-free **block-Lanczos**: builds a Krylov subspace from the main-block start vectors
+and Rayleigh–Ritz-projects onto it, never storing the matrix. It sweeps the *whole*
+ionization band at once, so it is the right tool for a broad spectrum (Auger/ICD, full DIP
+band). `-blocks N` sets the subspace size (`N` × main-block, == theADCcode's `iter N`);
+more blocks = finer resolution. Because it matches spectral *moments* rather than
+individual eigenvalues, interior poles at a fixed `-blocks` can sit at a pole-strength
+centroid of a cluster rather than on any one true root.
+
+```sh
+go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -dip -solver lanczos -blocks 100
+```
+
+### `-solver davidson`
+
+Matrix-free **block Davidson–Liu**: root-targets the algebraically lowest `-nroots`
+eigenpairs, iterating each to a residual threshold with a diagonal `(θ−D)⁻¹`
+preconditioner. When you want a handful of converged interior eigenvalues (e.g. the lowest
+~20 core-edge roots) rather than a broad envelope, it hits the exact positions at a
+fraction of the Lanczos subspace size — this is what reproduces a legacy `adc4_diag.x`
+Davidson run directly. Flags: `-nroots` (roots to converge), `-convthr` (residual 2-norm
+threshold, a.u.), `-maxdavsp` (subspace cap before a thick restart), `-maxdavit`
+(iteration cap). Works for both `-sip` (including CVS `-order 4`) and `-dip`.
+
+```sh
+# lowest 8 O 1s core roots of a CVS-ADC(4) run, converged to 1e-3 a.u.
+go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 4 -core 0 -sym 0 \
+    -solver davidson -nroots 8 -convthr 1e-3
+```
+
 ## Plotting
 
 `cmd/adcgo` writes JSON; `cmd/plotspec` turns that JSON into a figure. The output format
