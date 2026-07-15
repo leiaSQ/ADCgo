@@ -15,6 +15,7 @@ import (
 // specConfig carries the -spectrum-mode options resolved from the CLI flags.
 type specConfig struct {
 	enabled     bool
+	bare        bool // emit the bare per-state spectrum (no channel/orbital classification)
 	initAtom    string
 	initOrbital string
 	stRatio     float64

@@ -22,6 +22,7 @@ stdout (or `-out FILE`). A companion CLI, `cmd/plotspec`, renders that JSON to a
 | Single ionization | non-Dyson IP-ADC(2) / IP-ADC(3) | `-sip -order 2\|3` |
 | Core single ionization | CVS Dyson IP-ADC(4) | `-sip -order 4 -core` |
 | Auger / ICD / ETMD spectrum | decay-channel classification | `-spectrum` |
+| Bare eigenvalue spectrum | one stick per state (energy + pole strength) | `-bare` |
 | Transition dipoles | RASSI-like ion→ion emission, Dyson photoionization, core→valence X-ray emission | `-tdm` |
 
 ## Quick start
@@ -89,6 +90,38 @@ go run ./cmd/adcgo -fcidump testdata/h2o_dzp.fcidump -dip -mo testdata/h2o_dzp.m
 # treat both H as a passive "water" site: only Auger@wat survives
 go run ./cmd/adcgo -fcidump testdata/h2o_dzp.fcidump -dip -mo testdata/h2o_dzp.mo.json \
     -solver dense -sym all -spectrum -group "wat=O,~H1,~H2" -init-atom wat
+```
+
+### Bare eigenvalue spectrum — `-bare`
+
+The plain solver output is just eigenvalues (energies + pole strengths), like legacy ADC.
+`-bare` turns that list directly into a stick-spectrum JSON — one line per state, energy =
+ionization energy, intensity = pole strength (ps/100), all on a single `states` channel —
+without any decay-channel or per-orbital classification. It works for both `-dip` and
+`-sip`, needs no `-mo` sidecar, and renders through [`cmd/plotspec`](#plotting) exactly like
+any other spectrum (one broadened curve). DIP `-spectrum` *without* `-mo` falls back to this
+same bare spectrum, since decay channels require atom-resolved populations.
+
+```sh
+# bare per-state DIP spectrum (no MO sidecar needed)
+go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -dip -bare -solver dense -out bare.json
+go run ./cmd/plotspec -in bare.json -out bare.png -fwhm 1.0
+
+# bare per-state SIP spectrum (vs. the per-orbital -spectrum decomposition)
+go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -bare -out sip_bare.json
+```
+
+`-convert FILE` post-processes an **already-emitted** solver document (the default
+`-dip`/`-sip` JSON, or the `-out` file from an earlier run) into the same bare spectrum,
+without re-solving — the document already carries every state's energy and pole strength.
+Pass `-dip` or `-sip` to say which kind of document it is. The result is byte-identical to
+running `-bare` on the original problem.
+
+```sh
+# solve once, keep the full document...
+go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -dip -solver dense -out dip.json
+# ...then derive the bare spectrum from that file whenever you need it
+go run ./cmd/adcgo -convert dip.json -dip -out bare.json
 ```
 
 ### Transition dipole moments — `-tdm` (`-rassi`)
@@ -182,7 +215,9 @@ for overlays live in [`testdata/reference/spectra/`](testdata/reference/spectra)
 | `-backend B` | gonum | `gonum` \| `hip` \| `cuda` \| `auto` (build-tag gated) |
 | `-ps-thresh P` | 1.0 | drop states with pole strength below P percent |
 | `-coeff-thresh C` | 0.1 | drop leading components with \|coeff\| below C |
-| `-spectrum` | off | emit the decay-channel stick spectrum |
+| `-spectrum` | off | emit a stick spectrum: decay channels (DIP + `-mo`) or per orbital (SIP); DIP without `-mo` falls back to `-bare` |
+| `-bare` | off | emit a bare per-state stick spectrum (energy + pole strength, one `states` channel); implies `-spectrum` |
+| `-convert FILE` | — | convert an existing `-dip`/`-sip` solver document JSON into its bare spectrum (no re-solve); needs `-dip` or `-sip` |
 | `-init-atom A` | O | initial core-ionized site (spectrum) |
 | `-group SPEC` | — | decay-site grouping `NAME=col,~col` (repeatable; bare = interactive) |
 | `-min-weight` / `-min-fraction` / `-include-zero` | 0 / 0 / off | channel thresholds (spectrum) |

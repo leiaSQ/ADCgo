@@ -168,6 +168,92 @@ func BuildSIP(secs []analyze.SIPSector, orbSym []int, opts SIPOptions) (*Spectru
 	return spec, nil
 }
 
+// BareOptions populates the Meta of a bare-eigenvalue spectrum (BuildBareDIP /
+// BuildBareSIP). It carries only run-level annotations; the bare spectrum has no
+// decay-channel thresholds, sites, initial site, or singlet:triplet ratio.
+type BareOptions struct {
+	Molecule    string
+	Basis       string
+	PointGroup  string
+	SourceFiles []string
+}
+
+// bareChannel is the single channel label a bare-eigenvalue spectrum uses: every
+// state is one stick on this one channel.
+const bareChannel = "states"
+
+// bareState is the minimal per-state information a bare spectrum needs — the same
+// fields DIP and SIP states share, so the two sector types feed one core.
+type bareState struct {
+	EnergyEV, PSPercent float64
+	Spin, Irrep, Index  int
+}
+
+// BuildBareDIP flattens solved DIP sectors into a bare-eigenvalue stick spectrum:
+// one Line per state, energy = EnergyEV, intensity = PSPercent/100, all on a single
+// "states" channel. Unlike BuildDIP it needs no MO sidecar or decay-channel
+// classification, so it turns the plain eigenvalue document into a plottable
+// Spectrum (same schema the renderer consumes).
+func BuildBareDIP(secs []analyze.Sector, opts BareOptions) *Spectrum {
+	var states []bareState
+	for _, sec := range secs {
+		for i := range sec.States {
+			s := &sec.States[i]
+			states = append(states, bareState{
+				EnergyEV: s.EnergyEV, PSPercent: s.PSPercent,
+				Spin: sec.Spin, Irrep: sec.Irrep, Index: s.Index,
+			})
+		}
+	}
+	return buildBare(states, "dip", dipIrrepLabels(secs), opts)
+}
+
+// BuildBareSIP is the single-ionization counterpart of BuildBareDIP: one Line per
+// SIP state, decomposed by nothing (no per-orbital split, unlike BuildSIP).
+func BuildBareSIP(secs []analyze.SIPSector, opts BareOptions) *Spectrum {
+	var states []bareState
+	for _, sec := range secs {
+		for i := range sec.States {
+			s := &sec.States[i]
+			states = append(states, bareState{
+				EnergyEV: s.EnergyEV, PSPercent: s.PSPercent,
+				Spin: sec.Spin, Irrep: sec.Irrep, Index: s.Index,
+			})
+		}
+	}
+	return buildBare(states, "sip", sipIrrepLabels(secs), opts)
+}
+
+// buildBare is the shared core: it emits one stick per flattened state on the single
+// bareChannel, mirroring the StateRef format and fraction intensity of BuildDIP /
+// BuildSIP so the bare spectrum plots identically as a one-channel curve.
+func buildBare(states []bareState, kind string, irreps []string, opts BareOptions) *Spectrum {
+	spec := &Spectrum{
+		Meta: Meta{
+			Kind:        kind,
+			Molecule:    opts.Molecule,
+			Basis:       opts.Basis,
+			PointGroup:  opts.PointGroup,
+			Irreps:      irreps,
+			EnergyUnit:  "eV",
+			SourceFiles: opts.SourceFiles,
+		},
+		Channels: []string{bareChannel},
+	}
+	for _, s := range states {
+		spec.Lines = append(spec.Lines, Line{
+			Energy:    s.EnergyEV,
+			Intensity: s.PSPercent / 100,
+			Channel:   bareChannel,
+			Spin:      s.Spin,
+			Irrep:     s.Irrep,
+			StateRef:  fmt.Sprintf("irrep%d/s%d/#%d", s.Irrep, s.Spin, s.Index),
+			PSPercent: s.PSPercent,
+		})
+	}
+	return spec
+}
+
 // canonicalChannels lists every channel the classifier can produce for these
 // sites, in the same stable order Classify emits them: Auger@A, one ICD:A->B per
 // other site (in site order), then ETMD(2) and ETMD(3). ETMD channels are only

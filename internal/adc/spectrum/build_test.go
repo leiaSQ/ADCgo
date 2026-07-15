@@ -147,3 +147,67 @@ func TestBuildSIPRejectsEmpty(t *testing.T) {
 		t.Error("expected error for no states")
 	}
 }
+
+// BuildBareDIP flattens every state onto one "states" channel with no MO sidecar,
+// intensity = ps/100.
+func TestBuildBareDIP(t *testing.T) {
+	secs := []analyze.Sector{{
+		Irrep: 1, Spin: 1,
+		States: []analyze.State{
+			{Index: 1, EnergyEV: 39.66, PSPercent: 83.39},
+			{Index: 2, EnergyEV: 41.20, PSPercent: 50.0},
+		},
+	}}
+	spec := BuildBareDIP(secs, BareOptions{})
+
+	if spec.Meta.Kind != "dip" || spec.Meta.EnergyUnit != "eV" {
+		t.Errorf("meta = %+v", spec.Meta)
+	}
+	if got := spec.Channels; len(got) != 1 || got[0] != bareChannel {
+		t.Errorf("channels = %v, want [%q]", got, bareChannel)
+	}
+	if len(spec.Lines) != 2 {
+		t.Fatalf("got %d lines, want 2: %+v", len(spec.Lines), spec.Lines)
+	}
+	l0 := spec.Lines[0]
+	if l0.Energy != 39.66 || l0.Channel != bareChannel || l0.Spin != 1 || l0.Irrep != 1 ||
+		l0.StateRef != "irrep1/s1/#1" || l0.PSPercent != 83.39 {
+		t.Errorf("line 0 fields wrong: %+v", l0)
+	}
+	if d := math.Abs(l0.Intensity - 0.8339); d > 1e-9 {
+		t.Errorf("line 0 intensity = %.6f, want ps/100 = 0.8339", l0.Intensity)
+	}
+	if d := math.Abs(spec.Lines[1].Intensity - 0.5); d > 1e-9 {
+		t.Errorf("line 1 intensity = %.6f, want 0.5", spec.Lines[1].Intensity)
+	}
+}
+
+// BuildBareSIP is the single-ionization counterpart: one line per state, not per
+// orbital, on the single "states" channel.
+func TestBuildBareSIP(t *testing.T) {
+	secs := []analyze.SIPSector{{
+		Irrep: 2, Spin: 2,
+		States: []analyze.SIPState{{
+			Index: 1, EnergyEV: 12.5, PSPercent: 91.0,
+			Main: []analyze.OrbWeight{{Orbital: 3, Coeff: 0.9}, {Orbital: 5, Coeff: -0.3}},
+		}},
+	}}
+	spec := BuildBareSIP(secs, BareOptions{})
+
+	if spec.Meta.Kind != "sip" {
+		t.Errorf("kind = %q, want sip", spec.Meta.Kind)
+	}
+	if got := spec.Channels; len(got) != 1 || got[0] != bareChannel {
+		t.Errorf("channels = %v, want [%q]", got, bareChannel)
+	}
+	if len(spec.Lines) != 1 {
+		t.Fatalf("got %d lines, want 1 (per-state, not per-orbital): %+v", len(spec.Lines), spec.Lines)
+	}
+	l := spec.Lines[0]
+	if l.Energy != 12.5 || l.Channel != bareChannel || l.Spin != 2 || l.StateRef != "irrep2/s2/#1" {
+		t.Errorf("line fields wrong: %+v", l)
+	}
+	if d := math.Abs(l.Intensity - 0.91); d > 1e-9 {
+		t.Errorf("intensity = %.6f, want ps/100 = 0.91", l.Intensity)
+	}
+}

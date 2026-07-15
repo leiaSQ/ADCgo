@@ -55,7 +55,8 @@ func main() {
 	tdmOsc := flag.Float64("tdm-osc-thresh", 1e-6, "drop photoionization channels with oscillator strength below this")
 	tdmISR := flag.Int("tdm-isr", -1, "order of the ISR property matrix behind -tdm: 0 = zeroth (uncorrelated), 2 = correlation-corrected. Default: 2 for -order 2/3, where it is order-consistent with the secular matrix; 0 for -order 4, where it is not (an ADC(4)-consistent property matrix needs 3rd/4th-order terms that do not exist yet) — pass -tdm-isr 2 to opt in anyway")
 
-	doSpectrum := flag.Bool("spectrum", false, "emit the decay-channel stick spectrum instead of the solver document (needs -dip or -sip; DIP needs -mo)")
+	doSpectrum := flag.Bool("spectrum", false, "emit a stick spectrum instead of the solver document (needs -dip or -sip). DIP with -mo gives decay channels; without -mo it falls back to the bare per-state spectrum. SIP decomposes per orbital")
+	doBare := flag.Bool("bare", false, "emit a bare per-state stick spectrum (energy + pole strength, one \"states\" channel) instead of decay-channel/per-orbital classification; implies -spectrum")
 	initAtom := flag.String("init-atom", "O", "initial core-ionized site for DIP decay channels (overridden by the interactive prompt)")
 	initOrbital := flag.String("init-orbital", "", "optional initial-orbital label recorded in the spectrum meta")
 	stRatio := flag.Float64("st-ratio", 3.0, "singlet:triplet ratio recorded in the spectrum meta for the plotting layer")
@@ -64,7 +65,22 @@ func main() {
 	includeZero := flag.Bool("include-zero", false, "emit the full canonical channel set per state, even at zero weight")
 	var groups groupFlag
 	flag.Var(&groups, "group", "decay-site grouping NAME=col1,col2 (repeatable; ~col makes a column passive); a bare -group prompts interactively; default each population column is its own site")
+	convert := flag.String("convert", "", "read a previously emitted solver document JSON (the default -dip/-sip output) and emit its bare stick spectrum without re-solving; needs -dip or -sip to say which kind")
 	flag.Parse()
+
+	// -convert post-processes an existing output file; it re-solves nothing and so
+	// needs no FCIDUMP.
+	if *convert != "" {
+		if *doDIP == *doSIP { // both set, or neither
+			fmt.Fprintln(os.Stderr, "adcgo: -convert needs exactly one of -dip or -sip")
+			os.Exit(2)
+		}
+		if err := runBareConvert(*convert, *doDIP, *out); err != nil {
+			fmt.Fprintln(os.Stderr, "adcgo:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *path == "" {
 		fmt.Fprintln(os.Stderr, "usage: adcgo -fcidump <file> [-dip ...]")
@@ -82,8 +98,11 @@ func main() {
 		os.Exit(2)
 	}
 
-	if *doSpectrum && !*doDIP && !*doSIP {
-		fmt.Fprintln(os.Stderr, "adcgo: -spectrum needs -dip or -sip")
+	// -bare is shorthand for a spectrum without decay-channel/per-orbital classification.
+	doSpec := *doSpectrum || *doBare
+
+	if doSpec && !*doDIP && !*doSIP {
+		fmt.Fprintln(os.Stderr, "adcgo: -spectrum/-bare needs -dip or -sip")
 		os.Exit(2)
 	}
 
@@ -92,8 +111,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "adcgo: -tdm needs -sip")
 			os.Exit(2)
 		}
-		if *doSpectrum {
-			fmt.Fprintln(os.Stderr, "adcgo: -tdm and -spectrum are mutually exclusive")
+		if doSpec {
+			fmt.Fprintln(os.Stderr, "adcgo: -tdm and -spectrum/-bare are mutually exclusive")
 			os.Exit(2)
 		}
 		if *moPath == "" {
@@ -107,7 +126,8 @@ func main() {
 	}
 
 	specCfg := specConfig{
-		enabled:     *doSpectrum,
+		enabled:     doSpec,
+		bare:        *doBare,
 		initAtom:    *initAtom,
 		initOrbital: *initOrbital,
 		stRatio:     *stRatio,
@@ -296,8 +316,11 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 	}
 
 	if cfg.spec.enabled {
-		if moData == nil {
-			return fmt.Errorf("-spectrum -dip needs -mo (decay channels require atom-resolved populations)")
+		// Without -mo (or with an explicit -bare) there are no atom-resolved
+		// populations to classify into decay channels, so fall back to the bare
+		// per-state eigenvalue spectrum.
+		if cfg.spec.bare || moData == nil {
+			return emitJSON(spectrum.BuildBareDIP(doc.Sectors, spectrum.BareOptions{}), cfg.out)
 		}
 		spec, err := buildDIPSpectrum(doc.Sectors, moData, cfg.spec)
 		if err != nil {
@@ -307,6 +330,39 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 	}
 
 	return emitJSON(doc, cfg.out)
+}
+
+// runBareConvert reads a previously emitted solver document JSON (a DIP Document or
+// SIP SIPDocument) and re-emits it as a bare per-state stick spectrum, reusing the
+// same spectrum.BuildBare* builders the -bare solve path uses — the document already
+// serializes the analyze.Sector / analyze.SIPSector slices they consume, so no
+// re-solving is needed. The caller passes dip=true for a DIP document, false for SIP.
+func runBareConvert(path string, dip bool, out string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var spec *spectrum.Spectrum
+	if dip {
+		var doc Document
+		if err := json.Unmarshal(b, &doc); err != nil {
+			return fmt.Errorf("parse %s as a DIP solver document: %w", path, err)
+		}
+		if len(doc.Sectors) == 0 {
+			return fmt.Errorf("%s has no sectors (is it a -dip solver document?)", path)
+		}
+		spec = spectrum.BuildBareDIP(doc.Sectors, spectrum.BareOptions{SourceFiles: []string{path}})
+	} else {
+		var doc SIPDocument
+		if err := json.Unmarshal(b, &doc); err != nil {
+			return fmt.Errorf("parse %s as a SIP solver document: %w", path, err)
+		}
+		if len(doc.Sectors) == 0 {
+			return fmt.Errorf("%s has no sectors (is it a -sip solver document?)", path)
+		}
+		spec = spectrum.BuildBareSIP(doc.Sectors, spectrum.BareOptions{SourceFiles: []string{path}})
+	}
+	return emitJSON(spec, out)
 }
 
 // emitJSON writes v as indented JSON to out (stdout when out == "").
@@ -469,6 +525,9 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 	}
 
 	if cfg.spec.enabled {
+		if cfg.spec.bare {
+			return emitJSON(spectrum.BuildBareSIP(doc.Sectors, spectrum.BareOptions{}), cfg.out)
+		}
 		spec, err := spectrum.BuildSIP(doc.Sectors, d.OrbSym, spectrum.SIPOptions{})
 		if err != nil {
 			return err
