@@ -32,11 +32,15 @@ func main() {
 	doDIP := flag.Bool("dip", false, "solve DIP-ADC(2) and emit dication states as JSON")
 	doSIP := flag.Bool("sip", false, "solve IP-ADC(n) (non-Dyson) and emit cation states as JSON")
 	order := flag.Int("order", 3, "SIP ADC order: 2, 3, or 4 (4 = CVS Dyson ADC(4), needs -core)")
-	solver := flag.String("solver", "lanczos", "eigensolver: lanczos | dense")
+	solver := flag.String("solver", "lanczos", "eigensolver: lanczos | davidson | dense")
 	spinSel := flag.String("spin", "both", "spin sector: both | singlet | triplet")
 	psThresh := flag.Float64("ps-thresh", 1.0, "drop states with pole strength below this (percent)")
 	coeffThresh := flag.Float64("coeff-thresh", 0.1, "drop leading components with |coeff| below this")
 	blocks := flag.Int("blocks", 100, "block-Lanczos iterations; Krylov subspace = blocks × 2h-space size (theADCcode's 'iter', whose reference DIP runs used 100)")
+	nroots := flag.Int("nroots", 20, "-solver davidson: number of lowest roots to converge (theADCcode's 'nroots')")
+	convthr := flag.Float64("convthr", 1e-3, "-solver davidson: residual 2-norm convergence threshold in a.u. (theADCcode's 'convthr')")
+	maxdavsp := flag.Int("maxdavsp", 100, "-solver davidson: maximum subspace dimension before a thick restart (theADCcode's 'maxdavsp')")
+	maxdavit := flag.Int("maxdavit", 200, "-solver davidson: iteration cap before giving up unconverged")
 	moPath := flag.String("mo", "", "MO-coefficient/overlap sidecar for atom-resolved 2h populations")
 	sym := flag.String("sym", "all", "target dication irrep: all | none | <0-based index>")
 	coreOrb := flag.String("core", "", "CVS core orbitals for -order 4: comma-separated 0-based occupied indices (e.g. 0)")
@@ -143,6 +147,7 @@ func main() {
 			solver: *solver, spinSel: *spinSel, moPath: *moPath, out: *out, sym: *sym,
 			backend:  *backendName,
 			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks,
+			nroots: *nroots, maxdavsp: *maxdavsp, maxdavit: *maxdavit, convthr: *convthr,
 			profile: *profile,
 			spec:    specCfg,
 		}
@@ -162,6 +167,7 @@ func main() {
 		cfg := sipConfig{
 			solver: *solver, out: *out, sym: *sym, backend: *backendName, order: *order,
 			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks,
+			nroots: *nroots, maxdavsp: *maxdavsp, maxdavit: *maxdavit, convthr: *convthr,
 			profile: *profile,
 			spec:    specCfg,
 			core:    core,
@@ -215,6 +221,8 @@ type dipConfig struct {
 	solver, spinSel, moPath, out, sym, backend string
 	psThresh, coeffThresh                      float64
 	blocks                                     int
+	nroots, maxdavsp, maxdavit                 int     // -solver davidson
+	convthr                                    float64 // -solver davidson
 	profile                                    bool
 	spec                                       specConfig
 }
@@ -236,6 +244,14 @@ func reportTiming(label string, n, main int, tm lanczos.Timing) {
 		tm.Proj.Seconds(), pct(tm.Proj),
 		tm.Eig.Seconds(), pct(tm.Eig),
 		tm.Back.Seconds(), pct(tm.Back))
+}
+
+// davidsonOpts assembles the block-Davidson options from the -nroots/-maxdavsp/-maxdavit/
+// -convthr flags. wantFull retains the full Ritz vectors (the SIP-TDM path needs them).
+func davidsonOpts(nroots, maxdavsp, maxdavit int, convthr float64, wantFull bool) lanczos.Options {
+	return lanczos.Options{
+		NRoots: nroots, MaxDim: maxdavsp, MaxIters: maxdavit, ConvThr: convthr, WantFull: wantFull,
+	}
 }
 
 func runDIP(d *fcidump.Data, cfg dipConfig) error {
@@ -276,13 +292,18 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 			}
 			label := fmt.Sprintf("dip spin=%d irrep=%d", spin, targetSym+1)
 			lopts := lanczos.Options{MaxBlocks: cfg.blocks}
+			davOpts := davidsonOpts(cfg.nroots, cfg.maxdavsp, cfg.maxdavit, cfg.convthr, false)
 			n, b := sp.Size(), sp.MainBlockSize()
+			subspace := lanczos.SubspaceDim(n, b, lopts)
+			if cfg.solver == "davidson" {
+				subspace = lanczos.DavidsonSubspaceDim(n, davOpts)
+			}
 
 			var be backend.Backend
 			if cfg.solver == "dense" {
 				be = ch.pickDense(label, n)
 			} else {
-				be = ch.pickLanczos(label, n, b, lanczos.SubspaceDim(n, b, lopts),
+				be = ch.pickLanczos(label, n, b, subspace,
 					func(cand backend.Backend) time.Duration {
 						m := dip.New(sp, ints, eps, cand)
 						defer m.Release()
@@ -297,8 +318,10 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 				res = lanczos.SolveDense(mx, be)
 			case "lanczos":
 				res = lanczos.Solve(mx, be, lopts)
+			case "davidson":
+				res = lanczos.SolveDavidson(mx, be, davOpts)
 			default:
-				return fmt.Errorf("unknown solver %q (want lanczos or dense)", cfg.solver)
+				return fmt.Errorf("unknown solver %q (want lanczos, davidson or dense)", cfg.solver)
 			}
 			// Reclaim the sector's resident operator before the next one is assembled;
 			// on a device this is up to 0.5 GB, and the memory check depends on it.
@@ -389,13 +412,15 @@ type SIPDocument struct {
 }
 
 type sipConfig struct {
-	solver, out, sym, backend string
-	order                     int
-	psThresh, coeffThresh     float64
-	blocks                    int
-	profile                   bool
-	spec                      specConfig
-	core                      []int // CVS core orbitals (order 4)
+	solver, out, sym, backend  string
+	order                      int
+	psThresh, coeffThresh      float64
+	blocks                     int
+	nroots, maxdavsp, maxdavit int     // -solver davidson
+	convthr                    float64 // -solver davidson
+	profile                    bool
+	spec                       specConfig
+	core                       []int // CVS core orbitals (order 4)
 
 	moPath string  // MO/dipole sidecar (required by -tdm)
 	tdm    bool    // emit transition dipole moments instead of the solver document

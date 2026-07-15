@@ -67,10 +67,17 @@ main edge and overall envelope.
 1. **Convergence study:** rerun ADCgo N1s at `-blocks` 500, 1000, 2000 and confirm the
    two intense poles (408.6, 412.4) drift monotonically toward the Davidson positions
    (408.39, 411.44). The 200 → 800 delta quantifies the residual error at 200.
-2. **If only the lowest ~20 roots are wanted**, a root-targeting / Davidson-style solver
-   in ADCgo matches the legacy positions directly at a fraction of the Krylov size.
-   Block-Lanczos is the wrong tool when you want a handful of converged interior
-   eigenvalues rather than a broad spectrum.
+2. **If only the lowest ~20 roots are wanted**, use ADCgo's root-targeting Davidson
+   solver — `-solver davidson -nroots 20 -convthr 1e-3` — which matches the legacy
+   positions directly at a fraction of the Krylov size (it converges each requested
+   eigenpair to a residual threshold, exactly as `adc4_diag.x` does). Block-Lanczos is
+   the wrong tool when you want a handful of converged interior eigenvalues rather than a
+   broad spectrum. The Davidson driver (`internal/adc/lanczos/davidson.go`) mirrors
+   theADCcode's block Davidson–Liu (diagonal `(θ−D)⁻¹` preconditioner, thick restart at
+   `-maxdavsp`), with two robustness upgrades over the reference: it seeds on the smallest
+   diagonal entries (so no low root is stranded in an unspanned symmetry block) and drives
+   a few buffer roots beyond `-nroots` (so the requested roots do not swap out at the
+   window boundary).
 3. When comparing against `dav.NSOB.N1s.out`, only compare within the 408–419 eV window
    Davidson actually converged; discard ADCgo pseudo-poles above ~419 eV.
 

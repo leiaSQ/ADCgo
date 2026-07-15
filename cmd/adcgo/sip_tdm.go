@@ -84,13 +84,18 @@ type solvedSIP struct {
 // and a no-op cost for the dense solver, which produces them anyway.
 func solveSIPSpace(ch *chooser, label string, sp *sip.Space, ints *integrals.Store, eps []float64, order int, cfg sipConfig, wantFull bool) (lanczos.Result, *sip.Matrix, error) {
 	lopts := lanczos.Options{MaxBlocks: cfg.blocks, WantFull: wantFull}
+	davOpts := davidsonOpts(cfg.nroots, cfg.maxdavsp, cfg.maxdavit, cfg.convthr, wantFull)
 	n, b := sp.Size(), sp.MainBlockSize()
+	subspace := lanczos.SubspaceDim(n, b, lopts)
+	if cfg.solver == "davidson" {
+		subspace = lanczos.DavidsonSubspaceDim(n, davOpts)
+	}
 
 	var be backend.Backend
 	if cfg.solver == "dense" {
 		be = ch.pickDense(label, n)
 	} else {
-		be = ch.pickLanczos(label, n, b, lanczos.SubspaceDim(n, b, lopts),
+		be = ch.pickLanczos(label, n, b, subspace,
 			func(cand backend.Backend) time.Duration {
 				m := sip.New(sp, ints, eps, order, cand)
 				m.SetMatFree(cfg.matFree, cfg.matFreeBudget)
@@ -111,9 +116,11 @@ func solveSIPSpace(ch *chooser, label string, sp *sip.Space, ints *integrals.Sto
 		res = lanczos.SolveDense(mx, be)
 	case "lanczos":
 		res = lanczos.Solve(mx, be, lopts)
+	case "davidson":
+		res = lanczos.SolveDavidson(mx, be, davOpts)
 	default:
 		mx.Release()
-		return lanczos.Result{}, nil, fmt.Errorf("unknown solver %q (want lanczos or dense)", cfg.solver)
+		return lanczos.Result{}, nil, fmt.Errorf("unknown solver %q (want lanczos, davidson or dense)", cfg.solver)
 	}
 	if cfg.profile {
 		reportTiming(label, sp.Size(), sp.MainBlockSize(), res.Timing)

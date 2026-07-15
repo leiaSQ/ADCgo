@@ -1,0 +1,30 @@
+# ADCgo CVS core->valence X-ray *emission* (XES) at the pyridine NITROGEN K-edge.
+#
+# Pipeline (run from repo root with the adcgo conda python):
+#   python scripts/dump_fcidump.py --input examples/pyridine_N.in
+#   go run ./cmd/dimsprobe testdata/pyridine_N.fcidump -nnz -blocks 60      # memory gate
+#   go run ./cmd/adcgo -fcidump testdata/pyridine_N.fcidump \
+#       -sip -order 4 -core 0 -sym <a1-irrep> -mo testdata/pyridine_N.mo.json \
+#       -solver lanczos -blocks 60 -tdm -out pyridine_N_tdm.json
+#   go run ./cmd/plotspec -mode tdm -in pyridine_N_tdm.json -out pyridine_N_xes.png \
+#       -stick -xrange 370-400 -fwhm 0.8
+#
+# CVS setup: pyridine's single N 1s is the LOWEST MO (N more electronegative than C),
+# so it is active MO 0 and becomes the CVS core hole (adcgo -core 0). The five C 1s
+# cores (MOs 2..6) are frozen so they do not enter the valence 2h1p/3h2p space.
+&geometry
+  file   pyridine.xyz
+&basis
+  name   cc-pvdz
+&scf
+  charge 0
+  symmetry auto              # -> C2v
+&active
+  frozen-list 2 to 6         # freeze the five C 1s cores; keep N 1s (MO 1) active
+&output
+  fcidump  ../testdata/pyridine_N.fcidump
+  sidecar  ../testdata/pyridine_N.mo.json
+  manifest ../testdata/pyridine_N.ref.json
+&adc
+  args   -sip -order 4 -core 0 -solver lanczos -blocks 60 -tdm
+  sym    all

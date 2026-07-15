@@ -1,0 +1,19 @@
+# ADCgo DIP run on H2O with a *named* basis (aug-cc-pVTZ), full MO space (no active
+# selection). Same geometry as h2o_ccpvdz.in; 92 spherical MOs.
+#
+#   scripts/adcgo_run.sh examples/h2o_augccpvtz.in ./adcgo
+#
+&geometry
+  file   h2o.xyz
+&basis
+  name   aug-cc-pvtz         # resolved by pyscf; spherical GTOs (cartesian off)
+&scf
+  charge 0
+  symmetry auto              # -> C2v
+&output
+  fcidump  ../testdata/h2o_augccpvtz.fcidump
+  sidecar  ../testdata/h2o_augccpvtz.mo.json
+  manifest ../testdata/h2o_augccpvtz.ref.json
+&adc
+  args   -dip -order 2 -solver lanczos -spin both
+  sym    all                 # single run over all irreps

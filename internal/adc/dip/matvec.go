@@ -181,6 +181,38 @@ func (mx *Matrix) MainBlockSize() int { return mx.sp.MainBlockSize() }
 // Space returns the underlying configuration space.
 func (mx *Matrix) Space() *Space { return mx.sp }
 
+// Diagonal returns the resident diagonal of the secular matrix, assembled directly from
+// the block element functions rather than from BuildMatrix. Only the block-diagonal
+// blocks contribute — the 2h/2h main block and each 3h1p group's self-block (jiiLKK /
+// ijkLMN); the 2h↔3h1p and cross-group 3h1p blocks are off-diagonal. It backs the
+// Davidson (θ−D)⁻¹ preconditioner (lanczos.PreconOperator).
+func (mx *Matrix) Diagonal(be backend.Backend) backend.Vector {
+	sp := mx.sp
+	d := make([]float64, sp.Size())
+	// 2h/2h main block.
+	for row := range sp.BeginJII {
+		if el, ok := mx.twoHoleElement(row, row); ok {
+			d[row] = el
+		}
+	}
+	// 3h1p/3h1p diagonal self-blocks (type I via jiiLKK, type II via ijkLMN).
+	for _, r0 := range sp.JII {
+		if blk, ok := mx.blk.jiiLKK(sp.Configs[r0], sp.Configs[r0]); ok {
+			for a := range blk.Rows {
+				d[r0+a] = blk.At(a, a)
+			}
+		}
+	}
+	for _, r0 := range sp.IJK {
+		if blk, ok := mx.blk.ijkLMN(sp.Configs[r0], sp.Configs[r0]); ok {
+			for a := range blk.Rows {
+				d[r0+a] = blk.At(a, a)
+			}
+		}
+	}
+	return be.Upload(d)
+}
+
 // twoHoleElement returns the 2h/2h element (row,col) with row>=col, dispatching
 // on which 2h family each config belongs to.
 func (mx *Matrix) twoHoleElement(row, col int) (float64, bool) {
