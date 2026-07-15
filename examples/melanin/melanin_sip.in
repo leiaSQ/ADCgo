@@ -1,0 +1,30 @@
+# ADCgo SIP-ADC(3) single ionization of a melanin oligomer building block (DZ basis).
+#
+# Recreates /home/tcstud21/melanin/ndad3ip_guk.sh (theADCcode non-Dyson ndadc3ip, spin 2
+# = doublet, active "25 to 236", self-energy infinite, lanczos iter 200). The legacy run
+# used C1 (adapt off); pyscf also detects C1 for this geometry (it is genuinely 3D and
+# cannot be made Cs -- see README), so C1 it is.
+#
+#   scripts/adcgo_run.sh examples/melanin/melanin_sip.in ./adcgo-cuda
+#
+# Shares the FCIDUMP with melanin_dip.in (identical geometry/basis/active/symmetry).
+#
+&geometry
+  file   zmat
+&basis
+  file   _basisset.dat
+  cartesian on
+&scf
+  charge 0
+  symmetry auto                # pyscf detects C1 (genuinely 3D/folded molecule); matches theADCcode's C1
+  gate   -1095.4068317755      # GAMESS-UK RHF total energy (dip_with_popana.sh.out)
+  max_cycle 200
+&active
+  active 25 to 236
+&output
+  fcidump  melanin.fcidump
+  sidecar  melanin.mo.json
+  manifest melanin.ref.json
+&adc
+  args   -sip -order 3 -sigma infinite -solver lanczos -blocks 200
+  sym    all                   # C1: one irrep, doublet -> 1 sector -> 1 GPU (see README on Cs)

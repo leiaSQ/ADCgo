@@ -1,0 +1,64 @@
+#!/bin/bash
+# Two-stage CUDA build of adcgo for bwForCluster Helix: compile the custom ADC(4)
+# kernel with nvcc, then `go build -tags cuda`. Produces ./adcgo-cuda at the repo root.
+#
+#   scripts/build_adcgo_cuda_helix
+#
+# Helix modules: gnu/11.3 (host compiler), cuda/13.2, golang/1.20.5.
+#
+# HEADS UP — Go version: this repo's go.mod requires Go >= 1.26 (the code uses post-1.20
+# language features), so Helix's golang/1.20.5 module is too old to build it. Provide a
+# newer Go one of these ways before running this script:
+#   * install Go 1.26 under $HOME and put it first on PATH, or
+#   * `conda install -c conda-forge go` in the adcgo env, or
+#   * if a >=1.21 Go is available, `export GOTOOLCHAIN=auto` lets it fetch the toolchain
+#     go.mod names (needs network on the build node).
+# The script checks and aborts with a clear message if go is too old.
+set -euo pipefail
+
+if command -v module >/dev/null 2>&1; then
+    module load gnu/11.3 cuda/13.2 golang/1.20.5 2>/dev/null || true
+fi
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+# CUDA install prefix: prefer the module's env var, fall back to the default location.
+: "${CUDA_HOME:=${CUDA_INSTALL_PATH:-${CUDA_ROOT:-/usr/local/cuda}}}"
+export CGO_CFLAGS="-I$CUDA_HOME/include ${CGO_CFLAGS:-}"
+export CGO_LDFLAGS="-L$CUDA_HOME/lib64 ${CGO_LDFLAGS:-}"
+export GOTOOLCHAIN="${GOTOOLCHAIN:-auto}"
+
+command -v nvcc >/dev/null 2>&1 || { echo "nvcc not found; module load cuda/13.2" >&2; exit 1; }
+command -v go   >/dev/null 2>&1 || { echo "go not found; load a Go >= 1.26 toolchain" >&2; exit 1; }
+
+echo "CUDA_HOME = $CUDA_HOME"
+echo "nvcc      = $(nvcc --version | tail -1)"
+echo "go        = $(go version)"
+
+# Fail early and clearly if the Go toolchain is older than go.mod requires.
+need="$(awk '/^go /{print $2; exit}' go.mod)"
+have="$(go env GOVERSION 2>/dev/null | sed 's/^go//')"
+if [ -n "$need" ] && [ -n "$have" ]; then
+    if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | tail -1)" != "$have" ]; then
+        echo "ERROR: go.mod needs Go >= $need but 'go' is $have (Helix golang/1.20.5 is too old)." >&2
+        echo "       Install Go $need under \$HOME (or conda) and re-run; see this script's header." >&2
+        exit 1
+    fi
+fi
+
+# 1. Compile the ADC(4) matrix-free kernel for both gpu4 GPU models: A100 = sm_80,
+#    A40 = sm_86, so the .o runs on whichever variant slurm schedules.
+echo "#begin<nvcc>"
+nvcc -O3 -std=c++14 \
+     -gencode arch=compute_80,code=sm_80 \
+     -gencode arch=compute_86,code=sm_86 \
+     -c internal/adc/backend/adc4_kernels.cu \
+     -o internal/adc/backend/adc4_kernels.o
+echo "#end<nvcc>"
+
+# 2. Build the cuda-tagged binary (links the .o via cuda_kernels.go).
+echo "#begin<go build>"
+go build -tags cuda -o adcgo-cuda ./cmd/adcgo
+echo "#end<go build>"
+echo "built: $root/adcgo-cuda"

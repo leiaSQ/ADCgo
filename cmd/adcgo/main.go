@@ -45,6 +45,7 @@ func main() {
 	sym := flag.String("sym", "all", "target dication irrep: all | none | <0-based index>")
 	coreOrb := flag.String("core", "", "CVS core orbitals for -order 4: comma-separated 0-based occupied indices (e.g. 0)")
 	backendName := flag.String("backend", "gonum", "linear-algebra backend: gonum | hip | cuda | auto (auto calibrates and picks per sector; build-tag gated)")
+	gpus := flag.Int("gpus", 0, "-backend cuda|hip only: max GPUs for concurrent per-sector solves (0 = all visible). Independent sectors (DIP spin×irrep, SIP irrep) run one per GPU")
 	matfree := flag.String("matfree", "off", "matrix-free apply of large CVS-ADC(4) coupling blocks (recompute vs store): off | auto | on. Trades resident memory for per-mat-vec recompute; auto switches per block using -maxmem")
 	maxMemGB := flag.Float64("maxmem", 4.0, "matrix-free -matfree=auto threshold: a coupling block whose dense size exceeds this many GB is applied matrix-free")
 	wert3 := flag.Bool("wert3", true, "include the WERT3 5th-order 3h2p-diagonal correction in CVS-ADC(4) (the full EIGAB effective diagonal theADCcode itself uses; bit-exact vs its FT19 tape). -wert3=false for the bare 0th-order 3h2p diagonal.")
@@ -145,7 +146,7 @@ func main() {
 	if *doDIP {
 		cfg := dipConfig{
 			solver: *solver, spinSel: *spinSel, moPath: *moPath, out: *out, sym: *sym,
-			backend:  *backendName,
+			backend: *backendName, gpus: *gpus,
 			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks,
 			nroots: *nroots, maxdavsp: *maxdavsp, maxdavit: *maxdavit, convthr: *convthr,
 			profile: *profile,
@@ -165,7 +166,7 @@ func main() {
 			os.Exit(1)
 		}
 		cfg := sipConfig{
-			solver: *solver, out: *out, sym: *sym, backend: *backendName, order: *order,
+			solver: *solver, out: *out, sym: *sym, backend: *backendName, gpus: *gpus, order: *order,
 			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks,
 			nroots: *nroots, maxdavsp: *maxdavsp, maxdavit: *maxdavit, convthr: *convthr,
 			profile: *profile,
@@ -219,6 +220,7 @@ type Document struct {
 
 type dipConfig struct {
 	solver, spinSel, moPath, out, sym, backend string
+	gpus                                       int // -gpus: cap on concurrent per-sector GPUs (0 = all)
 	psThresh, coeffThresh                      float64
 	blocks                                     int
 	nroots, maxdavsp, maxdavit                 int     // -solver davidson
@@ -254,14 +256,78 @@ func davidsonOpts(nroots, maxdavsp, maxdavit int, convthr float64, wantFull bool
 	}
 }
 
+// validateSolver rejects an unknown -solver up front, so the per-sector code (which may
+// run concurrently across GPUs) can assume a valid solver and needs no error return.
+func validateSolver(solver string) error {
+	switch solver {
+	case "dense", "lanczos", "davidson":
+		return nil
+	default:
+		return fmt.Errorf("unknown solver %q (want lanczos, davidson or dense)", solver)
+	}
+}
+
+// solveDIPSector solves one (spin, irrep) DIP sector on the backend chosen by ch and
+// returns its analyzed sector. It is self-contained (no shared mutable state beyond the
+// read-only ints/eps/moData), so multiple sectors can run concurrently, each on its own
+// GPU, via a per-worker single-backend chooser. cfg.solver is validated by the caller.
+func solveDIPSector(ch *chooser, cfg dipConfig, sp *dip.Space, ints *integrals.Store, eps []float64, spin dip.Spin, targetSym int, moData *mo.Data, opts analyze.Options) analyze.Sector {
+	label := fmt.Sprintf("dip spin=%d irrep=%d", spin, targetSym+1)
+	lopts := lanczos.Options{MaxBlocks: cfg.blocks}
+	davOpts := davidsonOpts(cfg.nroots, cfg.maxdavsp, cfg.maxdavit, cfg.convthr, false)
+	n, b := sp.Size(), sp.MainBlockSize()
+	subspace := lanczos.SubspaceDim(n, b, lopts)
+	if cfg.solver == "davidson" {
+		subspace = lanczos.DavidsonSubspaceDim(n, davOpts)
+	}
+
+	var be backend.Backend
+	if cfg.solver == "dense" {
+		be = ch.pickDense(label, n)
+	} else {
+		be = ch.pickLanczos(label, n, b, subspace,
+			func(cand backend.Backend) time.Duration {
+				m := dip.New(sp, ints, eps, cand)
+				defer m.Release()
+				return timeApplyBlock(cand, n, b, m.ApplyBlock)
+			})
+	}
+	mx := dip.New(sp, ints, eps, be)
+
+	var res lanczos.Result
+	switch cfg.solver {
+	case "dense":
+		res = lanczos.SolveDense(mx, be)
+	case "lanczos":
+		res = lanczos.Solve(mx, be, lopts)
+	case "davidson":
+		res = lanczos.SolveDavidson(mx, be, davOpts)
+	}
+	// Reclaim the sector's resident operator before the next one is assembled;
+	// on a device this is up to 0.5 GB, and the memory check depends on it.
+	mx.Release()
+	if cfg.profile {
+		reportTiming(label, sp.Size(), sp.MainBlockSize(), res.Timing)
+	}
+
+	var pe *analyze.PopEngine
+	if moData != nil {
+		pe = analyze.NewPopEngine(sp, moData)
+	}
+	return analyze.BuildSector(sp, res, opts, pe)
+}
+
 func runDIP(d *fcidump.Data, cfg dipConfig) error {
 	spins, err := selectSpins(cfg.spinSel)
 	if err != nil {
 		return err
 	}
+	if err := validateSolver(cfg.solver); err != nil {
+		return err
+	}
 	nocc := mp.NOcc(d)
 	eps := mp.OrbitalEnergies(d, nocc)
-	ch, err := newChooser(cfg.backend, cfg.profile)
+	ch, err := newChooser(cfg.backend, cfg.profile, cfg.gpus)
 	if err != nil {
 		return err
 	}
@@ -284,59 +350,42 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 	}
 
 	doc := Document{NORB: d.NORB, NELEC: d.NELEC, Solver: cfg.solver}
+
+	// Enumerate the non-empty (spin, irrep) sectors. These are independent solves;
+	// with a multi-GPU pool they run concurrently (one GPU per sector), otherwise
+	// serially. Either way results are emitted in this deterministic order.
+	type dipItem struct {
+		spin      dip.Spin
+		targetSym int
+		sp        *dip.Space
+	}
+	var items []dipItem
 	for _, spin := range spins {
 		for _, targetSym := range syms {
 			sp := dip.NewSpace(nocc, d.NORB, orbSym, targetSym, spin)
 			if sp.Size() == 0 {
 				continue // no configurations in this (irrep, spin) sector
 			}
-			label := fmt.Sprintf("dip spin=%d irrep=%d", spin, targetSym+1)
-			lopts := lanczos.Options{MaxBlocks: cfg.blocks}
-			davOpts := davidsonOpts(cfg.nroots, cfg.maxdavsp, cfg.maxdavit, cfg.convthr, false)
-			n, b := sp.Size(), sp.MainBlockSize()
-			subspace := lanczos.SubspaceDim(n, b, lopts)
-			if cfg.solver == "davidson" {
-				subspace = lanczos.DavidsonSubspaceDim(n, davOpts)
-			}
-
-			var be backend.Backend
-			if cfg.solver == "dense" {
-				be = ch.pickDense(label, n)
-			} else {
-				be = ch.pickLanczos(label, n, b, subspace,
-					func(cand backend.Backend) time.Duration {
-						m := dip.New(sp, ints, eps, cand)
-						defer m.Release()
-						return timeApplyBlock(cand, n, b, m.ApplyBlock)
-					})
-			}
-			mx := dip.New(sp, ints, eps, be)
-
-			var res lanczos.Result
-			switch cfg.solver {
-			case "dense":
-				res = lanczos.SolveDense(mx, be)
-			case "lanczos":
-				res = lanczos.Solve(mx, be, lopts)
-			case "davidson":
-				res = lanczos.SolveDavidson(mx, be, davOpts)
-			default:
-				return fmt.Errorf("unknown solver %q (want lanczos, davidson or dense)", cfg.solver)
-			}
-			// Reclaim the sector's resident operator before the next one is assembled;
-			// on a device this is up to 0.5 GB, and the memory check depends on it.
-			mx.Release()
-			if cfg.profile {
-				reportTiming(label, sp.Size(), sp.MainBlockSize(), res.Timing)
-			}
-
-			var pe *analyze.PopEngine
-			if moData != nil {
-				pe = analyze.NewPopEngine(sp, moData)
-			}
-			doc.Sectors = append(doc.Sectors, analyze.BuildSector(sp, res, opts, pe))
+			items = append(items, dipItem{spin, targetSym, sp})
 		}
 	}
+
+	results := make([]analyze.Sector, len(items))
+	solve := func(w *chooser, i int) error {
+		it := items[i]
+		results[i] = solveDIPSector(w, cfg, it.sp, ints, eps, it.spin, it.targetSym, moData, opts)
+		return nil
+	}
+	if len(ch.pool) >= 2 {
+		if err := ch.runConcurrent(len(items), solve); err != nil {
+			return err
+		}
+	} else {
+		for i := range items {
+			_ = solve(ch, i)
+		}
+	}
+	doc.Sectors = append(doc.Sectors, results...)
 
 	if cfg.spec.enabled {
 		// Without -mo (or with an explicit -bare) there are no atom-resolved
@@ -413,6 +462,7 @@ type SIPDocument struct {
 
 type sipConfig struct {
 	solver, out, sym, backend  string
+	gpus                       int // -gpus: cap on concurrent per-sector GPUs (0 = all)
 	order                      int
 	psThresh, coeffThresh      float64
 	blocks                     int
@@ -477,9 +527,12 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 	if cfg.order == 4 && len(cfg.core) == 0 {
 		return fmt.Errorf("-order 4 is CVS Dyson ADC(4) and requires -core (e.g. -core 0)")
 	}
+	if err := validateSolver(cfg.solver); err != nil {
+		return err
+	}
 	nocc := mp.NOcc(d)
 	eps := mp.OrbitalEnergies(d, nocc)
-	ch, err := newChooser(cfg.backend, cfg.profile)
+	ch, err := newChooser(cfg.backend, cfg.profile, cfg.gpus)
 	if err != nil {
 		return err
 	}
@@ -513,6 +566,13 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 
 	doc := SIPDocument{NORB: d.NORB, NELEC: d.NELEC, Order: cfg.order, Solver: cfg.solver}
 	var solved []solvedSIP // retained (with live operators) only in -tdm mode
+
+	// Enumerate the non-empty irrep sectors (independent solves).
+	type sipItem struct {
+		targetSym int
+		sp        *sip.Space
+	}
+	var items []sipItem
 	for _, targetSym := range syms {
 		var sp *sip.Space
 		if cfg.order == 4 {
@@ -523,18 +583,42 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 		if sp.MainBlockSize() == 0 {
 			continue // no 1h configurations in this irrep (e.g. CVS: no core hole here)
 		}
-		label := fmt.Sprintf("sip irrep=%d", targetSym+1)
+		items = append(items, sipItem{targetSym, sp})
+	}
 
-		res, mx, err := solveSIPSpace(ch, label, sp, ints, eps, cfg.order, cfg, cfg.tdm)
+	// -tdm retains every sector's live operator and cross-solves them afterwards, so it
+	// stays serial. Otherwise, with a multi-GPU pool, run one sector per GPU concurrently.
+	if !cfg.tdm && len(ch.pool) >= 2 {
+		sectors := make([]analyze.SIPSector, len(items))
+		err := ch.runConcurrent(len(items), func(w *chooser, i int) error {
+			it := items[i]
+			res, mx, err := solveSIPSpace(w, fmt.Sprintf("sip irrep=%d", it.targetSym+1),
+				it.sp, ints, eps, cfg.order, cfg, false)
+			if err != nil {
+				return err
+			}
+			sectors[i] = analyze.BuildSIPSector(it.sp, res, mx.FMatrix(), opts)
+			mx.Release()
+			return nil
+		})
 		if err != nil {
 			return err
 		}
-		sector := analyze.BuildSIPSector(sp, res, mx.FMatrix(), opts)
-		doc.Sectors = append(doc.Sectors, sector)
-		if cfg.tdm {
-			solved = append(solved, solvedSIP{sp: sp, mx: mx, res: res, sector: sector})
-		} else {
-			mx.Release()
+		doc.Sectors = append(doc.Sectors, sectors...)
+	} else {
+		for _, it := range items {
+			label := fmt.Sprintf("sip irrep=%d", it.targetSym+1)
+			res, mx, err := solveSIPSpace(ch, label, it.sp, ints, eps, cfg.order, cfg, cfg.tdm)
+			if err != nil {
+				return err
+			}
+			sector := analyze.BuildSIPSector(it.sp, res, mx.FMatrix(), opts)
+			doc.Sectors = append(doc.Sectors, sector)
+			if cfg.tdm {
+				solved = append(solved, solvedSIP{sp: it.sp, mx: mx, res: res, sector: sector})
+			} else {
+				mx.Release()
+			}
 		}
 	}
 

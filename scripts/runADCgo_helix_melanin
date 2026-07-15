@@ -1,0 +1,76 @@
+#!/bin/bash
+# melanin DIP-ADC(2) + SIP-ADC(3) on one exclusive gpu4 node (bwForCluster Helix).
+#
+# A gpu4 node has 4 GPUs (A40 48GB or A100 40GB), 64 cores, 236 GB usable RAM. This
+# builds the shared FCIDUMP once (pyscf, CPU) and then runs both solves concurrently on
+# disjoint GPU sets, each seeing only its GPUs via CUDA_VISIBLE_DEVICES:
+#
+#   DIP  -spin both       -> 2 sectors (singlet, triplet) -> GPUs 0,1
+#   SIP  C1 doublet       -> 1 sector                     -> GPU 2   (GPU 3 idle)
+#
+# The molecule is C1 (see examples/melanin/README.md), so SIP has a single sector and
+# cannot spread across GPUs; 3 of the 4 GPUs are used.
+#
+#   sbatch scripts/runADCgo_helix_melanin
+#
+# Needs a cuda-tagged binary: build it first with scripts/build_adcgo_cuda_helix.
+#
+#SBATCH --job-name=melanin-adcgo
+#SBATCH --partition=gpu-single
+#SBATCH --exclusive
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=64
+#SBATCH --gres=gpu:4
+#SBATCH --mem=236gb
+#SBATCH --time=48:00:00
+set -euo pipefail
+
+# Recover the repo root (slurm runs a spool copy, so $0 is not in scripts/).
+self="$0"
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    self="$(scontrol show job "$SLURM_JOB_ID" \
+        | sed -n 's/^[[:space:]]*Command=//p' | head -1 | awk '{print $1}')"
+fi
+root="$(cd "$(dirname "$self")/.." && pwd)"
+cd "$root"
+
+if command -v module >/dev/null 2>&1; then
+    module load gnu/11.3 cuda/13.2 || true
+fi
+
+PY="${ADCGO_PYTHON:-$HOME/miniconda3/envs/adcgo/bin/python}"
+ADCGO="${ADCGO:-$root/adcgo-cuda}"
+ex="examples/melanin"
+
+[ -x "$ADCGO" ] || { echo "no cuda binary at $ADCGO; run scripts/build_adcgo_cuda_helix first" >&2; exit 1; }
+
+# 1. Build the shared FCIDUMP once (heavy pyscf SCF + AO->MO transform; no GPU). Both
+#    .in files name the same melanin.fcidump / melanin.mo.json, so SIP reuses it.
+echo "#begin<dump>"
+OMP_NUM_THREADS=64 OPENBLAS_NUM_THREADS=64 "$PY" scripts/dump_fcidump.py --input "$ex/melanin_dip.in"
+echo "#end<dump>"
+
+fcidump="$ex/melanin.fcidump"
+mo="$ex/melanin.mo.json"
+
+# 2. Both solves at once on disjoint GPUs. Split the 64 cores so the two OpenBLAS pools
+#    (host-side eigensolve / assembly) do not oversubscribe: 32 threads each.
+echo "#begin<adc>"
+CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=32 OPENBLAS_NUM_THREADS=32 \
+    "$ADCGO" -fcidump "$fcidump" -mo "$mo" \
+        -dip -order 2 -solver lanczos -spin both -blocks 200 -backend cuda -sym all \
+        -out "$ex/melanin.dip.json" &
+dip_pid=$!
+CUDA_VISIBLE_DEVICES=2,3 OMP_NUM_THREADS=32 OPENBLAS_NUM_THREADS=32 \
+    "$ADCGO" -fcidump "$fcidump" -mo "$mo" \
+        -sip -order 3 -sigma infinite -solver lanczos -blocks 200 -backend cuda -sym all \
+        -out "$ex/melanin.sip.json" &
+sip_pid=$!
+
+dip_rc=0; sip_rc=0
+wait "$dip_pid" || dip_rc=$?
+wait "$sip_pid" || sip_rc=$?
+echo "#end<adc>"
+echo "dip exit=$dip_rc -> $ex/melanin.dip.json"
+echo "sip exit=$sip_rc -> $ex/melanin.sip.json"
+[ "$dip_rc" -eq 0 ] && [ "$sip_rc" -eq 0 ]

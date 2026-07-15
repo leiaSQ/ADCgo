@@ -31,12 +31,17 @@ import (
 const elemSize = 8 // sizeof(float64)
 const ptrSize = 8  // sizeof(void*) on the supported 64-bit targets
 
-func init() { Register(backendName, newGPU) }
+// Registered as a multi-device backend: devCount enumerates the visible GPUs and
+// newGPUOn binds an instance to one of them. RegisterMulti also wires the plain
+// single-instance entry (device 0), so New(backendName) and -backend cuda|hip keep
+// working; NewAll(backendName) fans out one backend per device.
+func init() { RegisterMulti(backendName, devCount, newGPUOn) }
 
 // gpuBackend holds the vendor BLAS handle (as an opaque unsafe.Pointer; the shim
 // casts it back to the concrete handle type) and the channel onto its owning thread.
 type gpuBackend struct {
 	Gonum
+	dev  int // physical device index this backend is pinned to (0 unless multi-GPU)
 	h    unsafe.Pointer
 	jobs chan func()
 
@@ -71,13 +76,20 @@ func (b *gpuBackend) ensurePtrCap(n int) {
 	b.ptrCap = n
 }
 
-func newGPU() Backend {
-	b := &gpuBackend{jobs: make(chan func())}
+// newGPUOn builds a backend pinned to physical device dev. Every op funnels through
+// the one owning thread (do), which calls devSet(dev) once, before blasCreate, so the
+// handle and all later allocations/kernels/constant memory live on that device — CUDA
+// device selection is thread-current state, and the thread is never reused for another
+// device. N independent backends (one per device) therefore share no device state, the
+// precondition for running sectors concurrently across GPUs.
+func newGPUOn(dev int) Backend {
+	b := &gpuBackend{dev: dev, jobs: make(chan func())}
 	ready := make(chan struct{})
 	go func() {
 		// Never unlocked: this goroutine and its OS thread exist to own the device
 		// context for the process lifetime.
 		runtime.LockOSThread()
+		devSet(dev) // bind this thread to `dev` before the handle captures the device
 		b.h = blasCreate()
 		close(ready)
 		for f := range b.jobs {
@@ -87,6 +99,10 @@ func newGPU() Backend {
 	<-ready
 	return b
 }
+
+// DeviceIndex reports the physical device this backend is pinned to (for logging and
+// the multi-device tests).
+func (b *gpuBackend) DeviceIndex() int { return b.dev }
 
 // do runs f on the device-owning thread and blocks until it finishes, re-raising any
 // panic (a failed status check) on the calling goroutine.

@@ -1,0 +1,51 @@
+#!/bin/bash
+# Full gpu4-node GPU job for bwForCluster Helix (https://wiki.bwhpc.de/e/Helix).
+#
+# A gpu4 node has 4 GPUs (Nvidia A40 or A100), 64 CPU cores and 236 GB usable
+# RAM. This reserves a whole node: gpu-single in shared mode + --exclusive gives
+# exclusive access with the 120 h walltime cap (gpu-multi would also be
+# node-exclusive but is capped at 48 h). All 4 GPUs and all 64 cores are claimed.
+#
+#SBATCH --job-name=adcgo-gpu
+#SBATCH --partition=gpu-single
+#SBATCH --exclusive
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=64
+#SBATCH --gres=gpu:4
+#SBATCH --mem=236gb
+#SBATCH --time=24:00:00
+#
+# Usage:
+#   sbatch scripts/runADCgo_helix <input.in> [adcgo-binary]
+#
+# To pin a GPU model, change --gres to gpu:A40:4 or gpu:A100:4.
+#
+# Environment:
+#   ADCGO_PYTHON   python with pyscf (default: $HOME/miniconda3/envs/adcgo/bin/python)
+set -euo pipefail
+
+# Recover the submitted script's real path. Under slurm "$0" is a copy in the
+# job spool dir, so the sibling adcgo_run.sh is not next to it.
+self="$0"
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    self="$(scontrol show job "$SLURM_JOB_ID" \
+        | sed -n 's/^[[:space:]]*Command=//p' | head -1 | awk '{print $1}')"
+fi
+here="$(cd "$(dirname "$self")" && pwd)"
+
+# CUDA + compiler runtime for the GPU backend (Helix modules).
+if command -v module >/dev/null 2>&1; then
+    module load gnu/11.3 cuda/13.2 || true
+fi
+
+# Match threading to the allocation; fall back to 1 thread interactively. With a single
+# adcgo process spreading its sectors across all visible GPUs, one OpenBLAS pool of this
+# size is fine (unlike the two-process melanin script, which halves it per process).
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+
+# Point the driver at the adcgo conda env unless the caller already set one.
+export ADCGO_PYTHON="${ADCGO_PYTHON:-$HOME/miniconda3/envs/adcgo/bin/python}"
+
+exec "$here/adcgo_run.sh" "$@"
