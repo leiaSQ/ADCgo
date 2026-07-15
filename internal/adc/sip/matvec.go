@@ -191,6 +191,52 @@ func (mx *Matrix) MainBlockSize() int { return mx.sp.MainBlockSize() }
 // Space returns the underlying configuration space.
 func (mx *Matrix) Space() *Space { return mx.sp }
 
+// Diagonal returns the resident diagonal of the secular matrix, assembled directly from
+// the per-block element functions — never from BuildMatrix, which is terabytes for a
+// large matrix-free order-4 sector. Only the block-diagonal blocks (1h, 2h1p, 3h2p)
+// contribute; the off-diagonal coupling blocks have zero diagonal. It backs the Davidson
+// (θ−D)⁻¹ preconditioner (lanczos.PreconOperator).
+func (mx *Matrix) Diagonal(be backend.Backend) backend.Vector {
+	sp := mx.sp
+	d := make([]float64, sp.Size())
+	main := sp.BeginSat
+	if mx.isADC4() {
+		// 1h: −ε_P − Σ_PP (mainBlock4).
+		for r := range main {
+			p := sp.Configs[r].Occ[0]
+			v := -mx.el.eps[p]
+			if mx.sigma != nil {
+				v -= mx.sigma(p, p)
+			}
+			d[r] = v
+		}
+		// 2h1p: c22elem4 on the diagonal (satBlock2_4).
+		for r := main; r < sp.Begin3h2p; r++ {
+			cfg := sp.Configs[r]
+			d[r] = mx.el.c22elem4(cfg, cfg)
+		}
+		// 3h2p: the EIGAB effective diagonal (already a resident vector in the matfree path).
+		for r, v := range mx.sat3Diag() {
+			d[sp.Begin3h2p+r] = v
+		}
+	} else {
+		// 1h: c11 − Σ (mainBlock).
+		for r := range main {
+			i := sp.Configs[r].Occ[0]
+			v := mx.el.c11(i, i)
+			if mx.sigma != nil {
+				v -= mx.sigma(i, i)
+			}
+			d[r] = v
+		}
+		// 2h1p: k2 + c22_1 on the diagonal (satBlock).
+		for r := main; r < sp.Size(); r++ {
+			d[r] = mx.el.c22diag(sp.Configs[r])
+		}
+	}
+	return be.Upload(d)
+}
+
 // BuildMatrix materializes the full symmetric secular matrix (both triangles).
 // Order 4 uses the buildMatrix4 path (matvec4.go).
 func (mx *Matrix) BuildMatrix() backend.Mat {

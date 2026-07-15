@@ -71,6 +71,13 @@ type Options struct {
 	// transition-moment machinery needs them; the spectrum does not. SolveDense ignores
 	// this — the dense eigenvectors are already full, so it always returns them.
 	WantFull bool
+
+	// The following tune the block-Davidson driver (SolveDavidson) only; Solve ignores
+	// them. MaxDim doubles as the maximum subspace dimension before a thick restart
+	// (theADCcode's `maxdavsp`).
+	NRoots   int     // Davidson: number of lowest roots to converge (≤0 → 1)
+	ConvThr  float64 // Davidson: residual 2-norm threshold in a.u. (0 → 1e-3, theADCcode's convthr)
+	MaxIters int     // Davidson: cap on iterations before giving up (0 → 200)
 }
 
 // Result holds the Ritz spectrum, ascending in eigenvalue.
@@ -99,6 +106,12 @@ func (o Options) normalize(n int) Options {
 	}
 	if o.MaxBlocks <= 0 {
 		o.MaxBlocks = n // effectively until deflation / MaxDim
+	}
+	if o.ConvThr == 0 {
+		o.ConvThr = 1e-3 // theADCcode's default convthr, on the a.u. residual norm
+	}
+	if o.MaxIters <= 0 {
+		o.MaxIters = 200
 	}
 	return o
 }
