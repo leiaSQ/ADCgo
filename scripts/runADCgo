@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=adcgo
+#SBATCH --mem=80G
+#SBATCH --cpus-per-task=4
+#
+# Slurm batch wrapper for ADCgo.
+#
+# Submits the standard driver (adcgo_run.sh) as a batch job. Every scheduler
+# concern lives here so adcgo_run.sh stays a plain interactive driver:
+#   * #SBATCH resource requests
+#   * OMP thread count tied to the allocation
+#   * locating the repo's scripts/ dir -- slurm runs a *copy* of this file from
+#     the job spool dir, so "$0" is not next to adcgo_run.sh; ask slurm for the
+#     submitted path instead (this is exactly what broke a direct
+#     `sbatch scripts/adcgo_run.sh`: dump_fcidump.py was looked for in the spool
+#     dir and not found).
+#
+# Usage:
+#   sbatch scripts/runADCgo <input.in> [adcgo-binary]
+#
+# Environment:
+#   ADCGO_PYTHON   python with pyscf (default: $HOME/miniconda3/envs/adcgo/bin/python)
+set -euo pipefail
+
+# Recover the submitted script's real path. Under slurm "$0" is the spool copy;
+# scontrol reports the path (and args) the job was submitted with.
+self="$0"
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    self="$(scontrol show job "$SLURM_JOB_ID" \
+        | sed -n 's/^[[:space:]]*Command=//p' | head -1 | awk '{print $1}')"
+fi
+here="$(cd "$(dirname "$self")" && pwd)"
+
+# Match threading to the slurm allocation; fall back to 1 thread interactively.
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+
+# Point the driver at the adcgo conda env unless the caller already set one.
+export ADCGO_PYTHON="${ADCGO_PYTHON:-$HOME/miniconda3/envs/adcgo/bin/python}"
+
+exec "$here/adcgo_run.sh" "$@"
