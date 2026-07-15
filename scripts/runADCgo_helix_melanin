@@ -15,6 +15,10 @@
 #
 # Needs a cuda-tagged binary: build it first with scripts/build_adcgo_cuda_helix.
 #
+# Helix enforces SLURM associations: an --account valid for the partition is required.
+# Find yours with:  sacctmgr -s show user $USER format=account%30,partition%20
+# Override on the command line with:  sbatch -A <account> scripts/runADCgo_helix_melanin
+#SBATCH --account=hd_hh323
 #SBATCH --job-name=melanin-adcgo
 #SBATCH --partition=gpu-single
 #SBATCH --exclusive
