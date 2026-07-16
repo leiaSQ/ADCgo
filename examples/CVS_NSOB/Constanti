@@ -1,0 +1,41 @@
+#!/bin/bash
+cd /tmpa/kolya/NSOB
+
+symgroup="CS"                   # symmetry line or constanti
+sym_nmbs="1 2"               # symmetry numbers of non-empty irreps
+
+echo "#begin<constanti>"
+export dfile=dfile
+export vfile=vfile
+
+time ~/bin/constanti.exe << EOF >const.NSOB.out
+ &INPUT 
+  MAXINT=7704346,
+  MAXSTA=82818,
+  MAXORB=103,
+  ICHECK=-1,
+  IDIAGL=1, 
+  LUNG=3686388,
+  MAXSYM=2,
+  MAXFUN=78
+ /
+ &NOSTAN 
+  IORDER=3,
+  AKRIT=1.0E-9,
+  STOKOP =.TRUE.
+ / 
+constant diagrams for NSOB 
+GAMESS                                  
+1000.0                                 
+SYMMETRY $symgroup $sym_nmbs
+0 
+         3         1         0      //** nicht wichtig 
+1                                   //** nicht wichtig    
+         2         1         0      //** nicht wichtig   
+'QKL'                           
+'SIG'                         
+`for i in $sym_nmbs; do echo \'KoppAsym$i\'; echo \'KoppBsym$i\'; done`
+EOF
+rm fort.*
+echo "#end<constanti>"
+

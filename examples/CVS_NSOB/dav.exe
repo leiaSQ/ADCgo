@@ -1,0 +1,37 @@
+#!/bin/ksh
+export NO_STOP_MESSAGE=YES
+#echo "doing calculations in $PWD"
+
+
+# second possibility: &adc diag='davi'
+cp  /tmpa/kolya/NSOB/dfile         .   
+cp  /tmpa/kolya/NSOB/vfile         .              
+cp  /tmpa/kolya/NSOB/FT18F001.ADC  .          
+cp  /tmpa/kolya/NSOB/FT21F001.ADC  .
+cp  /tmpa/kolya/NSOB/FT22F001.ADC  .          
+cp  /tmpa/kolya/NSOB/FT23F001.ADC  .          
+
+
+
+time /worka/kolya/ADC4/ADC4.Markus/adc4pack/bin/adc4_diag.x > dav.NSOB.N1s.out << EOF
+ &adc diag='davi' /
+ &blnzdata cycles=50 memwords=300000000/
+ &davidata 
+ nroots=20
+ maxdavsp=400 
+ maxdavit=30 
+ convthr=1.0E-03 
+ maxdavmem=1100719844 
+ restart=.true.
+ /
+EOF
+#maxdavsp=45: size of Krylov space
+#maxdavit: number of macro iterations
+rm  dfile         
+rm  vfile         
+rm  FT18F001.ADC  
+rm  FT21F001.ADC  
+rm  FT22F001.ADC
+rm  FT23F001.ADC
+
+
