@@ -1,0 +1,16 @@
+#!/bin/ksh
+cd /tmpa/kolya/NSOB
+time /worka/kolya/ADC4/ADC4.Markus/adc4pack/bin/adc4_constr.x << EOF>NSOB.N1s.res
+ &INPUT MAXINT=7704346,MAXDIM=1753921,MAXFUN=78,MAXSTA=1753921,MAXORB=102,
+ MCORE=1,NROOT=15,NBUF=1000,NROOP=120,ICHECK=0,IDIAGL=3,
+ TIMLIM=600 &END
+NSOB 6-31G
+7 1                                //** SYMMETRIE GRUPPE
+0
+ &NOSTAN RANGE(1)=-1.D3,RANGE(2)=10.D3,IORDER=6,IDYSON=0,
+     IDIAGL=3,PRTCTL(1)=-10.D3,PRTCTL(2)=10.D3,&END
+ 0  0  0                       //** EINFRIEREN VON ORBITALEN IM 3H2P
+ 0.935973           Sigma(i,j)
+ 0                        //** DEFINITION NICHT STANDARD FOCK OPERATOR
+EOF
+

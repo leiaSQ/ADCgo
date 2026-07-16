@@ -1,0 +1,10 @@
+#!/bin/ksh
+time /usr/people/kolya/Spectr/convolutionIP.am.exe  <<EOF >conv.NSOB.N1s.f1.8
+ &INPUT 
+ fname='NSOB.N1s.spectrum',
+ np=20,
+ ncol=2,
+ fwhm=1.8,
+ ngrid=1000 
+ &END
+EOF
