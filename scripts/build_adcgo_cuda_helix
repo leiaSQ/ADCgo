@@ -17,7 +17,9 @@
 set -euo pipefail
 
 if command -v module >/dev/null 2>&1; then
-    module load gnu/11.3 cuda/13.2 golang/1.20.5 2>/dev/null || true
+    # Correct Helix module names are prefixed (compiler/…, devel/…). golang/1.20.5 is too old
+    # for this repo (go.mod needs >= 1.26); provide a newer go on PATH instead (see header).
+    module load compiler/gnu/11.3 devel/cuda/13.2 2>/dev/null || true
 fi
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -47,12 +49,15 @@ if [ -n "$need" ] && [ -n "$have" ]; then
     fi
 fi
 
-# 1. Compile the ADC(4) matrix-free kernel for both gpu4 GPU models: A100 = sm_80,
-#    A40 = sm_86, so the .o runs on whichever variant slurm schedules.
+# 1. Compile the ADC(4) matrix-free kernel for every Helix GPU model, so the .o runs on
+#    whichever variant slurm schedules:
+#      A100 (gpu4/gpu8) = sm_80,  A40 (gpu4) = sm_86,  H200 (gpu8) = sm_90.
+#    sm_90 is needed for the H200 nodes (the SIP solve's ~45 GB basis wants their 141 GB).
 echo "#begin<nvcc>"
 nvcc -O3 -std=c++14 \
      -gencode arch=compute_80,code=sm_80 \
      -gencode arch=compute_86,code=sm_86 \
+     -gencode arch=compute_90,code=sm_90 \
      -c internal/adc/backend/adc4_kernels.cu \
      -o internal/adc/backend/adc4_kernels.o
 echo "#end<nvcc>"

@@ -78,6 +78,11 @@ type Options struct {
 	NRoots   int     // Davidson: number of lowest roots to converge (≤0 → 1)
 	ConvThr  float64 // Davidson: residual 2-norm threshold in a.u. (0 → 1e-3, theADCcode's convthr)
 	MaxIters int     // Davidson: cap on iterations before giving up (0 → 200)
+
+	// Checkpoint enables save/resume of the block-Krylov build across processes (see
+	// checkpoint.go). nil (the default) leaves Solve bit-for-bit unchanged. Only Solve
+	// honors it; SolveDense and SolveDavidson ignore it.
+	Checkpoint *Checkpoint
 }
 
 // Result holds the Ritz spectrum, ascending in eigenvalue.
@@ -91,6 +96,10 @@ type Result struct {
 	FullVecs backend.Mat
 	Residual []float64 // ‖M y_k − θ_k y_k‖ (a.u.); nil for the dense path, which is exact
 	Timing   Timing    // per-phase wall time
+	// Interrupted is set when a checkpointing Solve stopped early on an external Stop
+	// signal (Options.Checkpoint) rather than converging. The other fields are then
+	// unpopulated — a checkpoint was written and the caller should arrange a resume.
+	Interrupted bool
 }
 
 // HasFull reports whether FullVecs was retained.
@@ -333,23 +342,60 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 	defer be.Free(pbuf)
 	defer be.Free(gbuf)
 
-	// Start block: the main-space Cartesian unit vectors e_0..e_{main-1}, already
-	// orthonormal. Same start vectors as theADCcode, so pole strengths converge first.
-	start := make([]float64, n*main)
-	for c := range main {
-		start[c*n+c] = 1
-	}
-	tmp := be.Upload(start)
-	be.Copy(basis.ColRange(0, main).V, tmp)
-	be.Free(tmp)
-
 	t := backend.NewMat(maxdim, maxdim)
 	dim, blkStart, blkSize := main, 0, main
+	iter0 := 0
+
+	// Resume from a checkpoint if one is present and matches this problem; otherwise start
+	// fresh. A resumed run reloads the basis and the projected matrix and re-enters the loop
+	// at the saved block index (checkpoint.go).
+	cp := opts.Checkpoint
+	resumed := false
+	if cp != nil && cp.Path != "" {
+		if st := loadResumable(cp.Path, n, main, maxdim, opts.MaxBlocks); st != nil {
+			up := be.Upload(st.Basis)
+			be.Copy(basis.ColRange(0, st.Dim).V, up)
+			be.Free(up)
+			for i := 0; i < st.Dim; i++ {
+				copy(t.Data[i*maxdim:i*maxdim+st.Dim], st.T[i*st.Dim:(i+1)*st.Dim])
+			}
+			dim, blkStart, blkSize, iter0 = st.Dim, st.BlkStart, st.BlkSize, st.Iter
+			resumed = true
+		}
+	}
+	if !resumed {
+		// Start block: the main-space Cartesian unit vectors e_0..e_{main-1}, already
+		// orthonormal. Same start vectors as theADCcode, so pole strengths converge first.
+		start := make([]float64, n*main)
+		for c := range main {
+			start[c*n+c] = 1
+		}
+		tmp := be.Upload(start)
+		be.Copy(basis.ColRange(0, main).V, tmp)
+		be.Free(tmp)
+	}
+
 	var rNext backend.Mat // R factor of the block after the last accepted one
 
 	// project accumulates T's block-column for the current block and returns the
 	// candidate V = W projected out of the existing basis, plus its rank/R factor.
-	for iter := 0; ; iter++ {
+	for iter := iter0; ; iter++ {
+		// Checkpoint hook. The state here (basis[:dim], T[:dim,:dim], the block scalars)
+		// fully re-does iteration `iter`, so it is a consistent resume point. Save on an
+		// external stop request (then return early) or every `Every` blocks for crash
+		// resilience. Skip iter0 itself: it was just loaded.
+		if cp != nil && cp.Path != "" {
+			stop := cp.stopRequested()
+			due := cp.Every > 0 && iter != iter0 && iter%cp.Every == 0
+			if stop || due {
+				_ = saveKrylov(be, cp.Path, basis, t, n, main, maxdim, opts.MaxBlocks,
+					dim, blkStart, blkSize, iter)
+				if stop {
+					return Result{Interrupted: true, Timing: tm}
+				}
+			}
+		}
+
 		w := backend.BlockView{V: wbuf, Rows: n, Cols: blkSize, Ld: n}
 		q := basis.ColRange(blkStart, blkStart+blkSize)
 
@@ -487,6 +533,12 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 		residual[k] = math.Sqrt(acc)
 	}
 	tm.Back = time.Since(tBack)
+
+	// The solve completed; drop any checkpoint so a later rerun of the same job starts fresh
+	// rather than resuming a finished computation.
+	if cp != nil && cp.Path != "" {
+		removeCheckpoint(cp.Path)
+	}
 
 	return Result{Values: theta, PS: ps, MainVecs: mainVecs, FullVecs: fullVecs, Residual: residual, Timing: tm}
 }
