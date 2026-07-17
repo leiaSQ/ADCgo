@@ -47,8 +47,15 @@ type assembledOp struct {
 	// 1,002. Scratch slices are reused across applies to keep the hot path allocation
 	// free.
 	batches []backend.Batch
-	sa      []backend.DeviceMat
-	sb, sc  []backend.BlockView
+	// satParts / satBatches are the satellite↔satellite subset of the operator (both
+	// offsets in the 3h1p space), with its own batching. ApplyBlockSatellite applies only
+	// these — the sub-operator with the 2h main block and the 2h↔3h1p couplings removed —
+	// which is what the limited-memory Lanczos driver's Tarantelli subspace-iteration gate
+	// needs (lanczos.SolveLowMem, Mode B). Indices in satBatches point into satParts.
+	satParts   []placement
+	satBatches []backend.Batch
+	sa         []backend.DeviceMat
+	sb, sc     []backend.BlockView
 }
 
 // OperatorNNZ reports the number of stored matrix elements in the assembled
@@ -136,24 +143,37 @@ func (mx *Matrix) assemble() *assembledOp {
 			}
 		}
 	}
-	return newAssembledOp(parts)
+	return newAssembledOp(parts, sp.BeginJII)
 }
 
-// newAssembledOp plans the batched applies and sizes the scratch slices.
-func newAssembledOp(parts []placement) *assembledOp {
+// newAssembledOp plans the batched applies and sizes the scratch slices. main is the 2h
+// main-block size (sp.BeginJII): the satellite↔satellite subset (both offsets ≥ main) is
+// planned separately for the gated apply.
+func newAssembledOp(parts []placement, main int) *assembledOp {
 	batches := backend.PlanBatches(parts)
+	var satParts []placement
+	for _, p := range parts {
+		if p.RowOff >= main && p.ColOff >= main {
+			satParts = append(satParts, p)
+		}
+	}
+	satBatches := backend.PlanBatches(satParts)
 	widest := 0
-	for _, b := range batches {
-		if len(b.Blocks) > widest {
-			widest = len(b.Blocks)
+	for _, bs := range [][]backend.Batch{batches, satBatches} {
+		for _, b := range bs {
+			if len(b.Blocks) > widest {
+				widest = len(b.Blocks)
+			}
 		}
 	}
 	return &assembledOp{
-		parts:   parts,
-		batches: batches,
-		sa:      make([]backend.DeviceMat, widest),
-		sb:      make([]backend.BlockView, widest),
-		sc:      make([]backend.BlockView, widest),
+		parts:      parts,
+		batches:    batches,
+		satParts:   satParts,
+		satBatches: satBatches,
+		sa:         make([]backend.DeviceMat, widest),
+		sb:         make([]backend.BlockView, widest),
+		sc:         make([]backend.BlockView, widest),
 	}
 }
 
@@ -357,12 +377,31 @@ func (mx *Matrix) ApplyBlock(out, in backend.BlockView) {
 	if mx.op == nil {
 		mx.op = mx.assemble()
 	}
+	mx.applyBatches(mx.op.parts, mx.op.batches, out, in)
+}
+
+// ApplyBlockSatellite computes out = M_sat·in, where M_sat is M with the 2h main block and
+// the 2h↔3h1p couplings removed — only the 3h1p↔3h1p satellite blocks act. It is
+// lanczos.SolveLowMem's Tarantelli subspace-iteration gate (Mode B): applied after the
+// first two blocks, it forces every later Lanczos vector to zero main-space weight, which is
+// what lets the banded eigensolver read pole strengths from the projected eigenvectors'
+// top rows without keeping the basis. out must be a dedicated buffer with Ld == Rows.
+func (mx *Matrix) ApplyBlockSatellite(out, in backend.BlockView) {
+	if mx.op == nil {
+		mx.op = mx.assemble()
+	}
+	mx.applyBatches(mx.op.satParts, mx.op.satBatches, out, in)
+}
+
+// applyBatches zeroes out and accumulates the given batched parts into it (beta = 1),
+// shared by ApplyBlock (all parts) and ApplyBlockSatellite (the satellite subset).
+func (mx *Matrix) applyBatches(parts []placement, batches []backend.Batch, out, in backend.BlockView) {
 	mx.be.Zero(out.V)
 	op := mx.op
-	for _, bt := range op.batches {
+	for _, bt := range batches {
 		n := len(bt.Blocks)
 		for i, pi := range bt.Blocks {
-			p := op.parts[pi]
+			p := parts[pi]
 			rows, cols := p.A.Dims()
 			op.sa[i] = p.A
 			if bt.Trans {

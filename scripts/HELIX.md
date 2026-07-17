@@ -102,6 +102,17 @@ uses **block-Davidson** instead: it caps the subspace at `-maxdavsp` and returns
 trade-off is the low-lying states, not the whole double-ionization band; raise `-nroots`
 (with `-maxdavsp > 2·nroots`) for more, which needs an 80 GB GPU.
 
+**Whole DIP band (low-memory Lanczos).** To sweep the *entire* double-ionization band rather
+than the lowest roots, use `-solver lanczos-lowmem` (the faithful theADCcode short-recurrence
+port: Tarantelli subspace-iteration gate + banded eigensolver + ghost filter,
+`docs/dip_lowmem_lanczos.md`). It keeps only three `n×main` panels resident (~0.4–0.6 TB for
+melanin's 10–15 M sectors), not the ~25–36 TB full basis — so it runs on a **fat-memory CPU
+node** (`-backend gonum`), not a GPU. Request a large-RAM partition (≥ 1 TB) and run it like
+the SIP job but on CPU. There is no GPU full-band path: the block width must equal the 2h
+main-space size to carry every pole strength, so a smaller-block GPU variant
+(`-lowmem-block N`) is exact only on the states it reaches and cannot cover the whole band
+(see the Findings in `docs/dip_lowmem_lanczos.md`).
+
 SIP's ~45 GB Lanczos basis needs an **80 GB+ GPU**, so it targets **H200** (`gpu:H200:1` can
 only land on the 141 GB cards; needs the sm_90 build). Because it can run for days, it
 **checkpoints** its Krylov state to `$ADCGO_WS` (`-checkpoint … -checkpoint-every N`) and

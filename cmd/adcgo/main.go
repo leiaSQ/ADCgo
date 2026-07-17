@@ -67,7 +67,8 @@ func main() {
 	doDIP := flag.Bool("dip", false, "solve DIP-ADC(2) and emit dication states as JSON")
 	doSIP := flag.Bool("sip", false, "solve IP-ADC(n) (non-Dyson) and emit cation states as JSON")
 	order := flag.Int("order", 3, "SIP ADC order: 2, 3, or 4 (4 = CVS Dyson ADC(4), needs -core)")
-	solver := flag.String("solver", "lanczos", "eigensolver: lanczos | davidson | dense")
+	solver := flag.String("solver", "lanczos", "eigensolver: lanczos | lanczos-lowmem | davidson | dense")
+	lowmemBlock := flag.Int("lowmem-block", 0, "-solver lanczos-lowmem: block width. 0 = the 2h main-space size, the faithful theADCcode short-recurrence solve (Tarantelli subspace-iteration gate + banded eigensolver, ~3×(n×main) resident — a fat-memory CPU node); a value below main selects the device-frugal full-reorthogonalization mode (only 3 blocks on the GPU, full basis in host RAM), which is exact on the states it reaches but a block smaller than main cannot span every pole-carrying direction")
 	spinSel := flag.String("spin", "both", "spin sector: both | singlet | triplet")
 	psThresh := flag.Float64("ps-thresh", 1.0, "drop states with pole strength below this (percent)")
 	coeffThresh := flag.Float64("coeff-thresh", 0.1, "drop leading components with |coeff| below this")
@@ -207,8 +208,9 @@ func main() {
 			backend: *backendName, gpus: *gpus,
 			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks,
 			nroots: *nroots, maxdavsp: *maxdavsp, maxdavit: *maxdavit, convthr: *convthr,
-			profile: *profile,
-			spec:    specCfg,
+			lowmemBlock: *lowmemBlock,
+			profile:     *profile,
+			spec:        specCfg,
 		}
 		if err := runDIP(d, cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
@@ -292,6 +294,7 @@ type dipConfig struct {
 	blocks                                     int
 	nroots, maxdavsp, maxdavit                 int     // -solver davidson
 	convthr                                    float64 // -solver davidson
+	lowmemBlock                                int     // -solver lanczos-lowmem block width (0 = main)
 	profile                                    bool
 	spec                                       specConfig
 }
@@ -327,10 +330,10 @@ func davidsonOpts(nroots, maxdavsp, maxdavit int, convthr float64, wantFull bool
 // run concurrently across GPUs) can assume a valid solver and needs no error return.
 func validateSolver(solver string) error {
 	switch solver {
-	case "dense", "lanczos", "davidson":
+	case "dense", "lanczos", "lanczos-lowmem", "davidson":
 		return nil
 	default:
-		return fmt.Errorf("unknown solver %q (want lanczos, davidson or dense)", solver)
+		return fmt.Errorf("unknown solver %q (want lanczos, lanczos-lowmem, davidson or dense)", solver)
 	}
 }
 
@@ -340,23 +343,34 @@ func validateSolver(solver string) error {
 // GPU, via a per-worker single-backend chooser. cfg.solver is validated by the caller.
 func solveDIPSector(ch *chooser, cfg dipConfig, sp *dip.Space, ints *integrals.Store, eps []float64, spin dip.Spin, targetSym int, moData *mo.Data, opts analyze.Options) analyze.Sector {
 	label := fmt.Sprintf("dip spin=%d irrep=%d", spin, targetSym+1)
-	lopts := lanczos.Options{MaxBlocks: cfg.blocks}
+	lopts := lanczos.Options{MaxBlocks: cfg.blocks, LowMemBlock: cfg.lowmemBlock}
 	davOpts := davidsonOpts(cfg.nroots, cfg.maxdavsp, cfg.maxdavit, cfg.convthr, false)
 	n, b := sp.Size(), sp.MainBlockSize()
 	subspace := lanczos.SubspaceDim(n, b, lopts)
-	if cfg.solver == "davidson" {
+	probeB := b
+	switch cfg.solver {
+	case "davidson":
 		subspace = lanczos.DavidsonSubspaceDim(n, davOpts)
+	case "lanczos-lowmem":
+		// The short-recurrence driver keeps only a few n×block panels resident, not the whole
+		// basis. Size the sector by that footprint (LowMemSectorBytes) so the chooser's device
+		// fit check sees the real, much smaller memory — expressed as an equivalent "subspace"
+		// dim the existing SectorBytes(n, dim, b) formula reproduces (its basis term is n·dim·8).
+		if cfg.lowmemBlock > 0 && cfg.lowmemBlock < b {
+			probeB = cfg.lowmemBlock
+		}
+		subspace = int(lanczos.LowMemSectorBytes(n, probeB) / uint64(8*n))
 	}
 
 	var be backend.Backend
 	if cfg.solver == "dense" {
 		be = ch.pickDense(label, n)
 	} else {
-		be = ch.pickLanczos(label, n, b, subspace,
+		be = ch.pickLanczos(label, n, probeB, subspace,
 			func(cand backend.Backend) time.Duration {
 				m := dip.New(sp, ints, eps, cand)
 				defer m.Release()
-				return timeApplyBlock(cand, n, b, m.ApplyBlock)
+				return timeApplyBlock(cand, n, probeB, m.ApplyBlock)
 			})
 	}
 	mx := dip.New(sp, ints, eps, be)
@@ -367,6 +381,8 @@ func solveDIPSector(ch *chooser, cfg dipConfig, sp *dip.Space, ints *integrals.S
 		res = lanczos.SolveDense(mx, be)
 	case "lanczos":
 		res = lanczos.Solve(mx, be, lopts)
+	case "lanczos-lowmem":
+		res = lanczos.SolveLowMem(mx, be, lopts)
 	case "davidson":
 		res = lanczos.SolveDavidson(mx, be, davOpts)
 	}

@@ -83,6 +83,16 @@ type Options struct {
 	// checkpoint.go). nil (the default) leaves Solve bit-for-bit unchanged. Only Solve
 	// honors it; SolveDense and SolveDavidson ignore it.
 	Checkpoint *Checkpoint
+
+	// LowMemBlock selects the block width for the limited-memory driver (SolveLowMem);
+	// other drivers ignore it. It is the memory knob: the driver keeps only three n×block
+	// panels resident instead of Solve's whole n×maxdim basis (lowmem.go). 0 (the default)
+	// means block = MainBlockSize(), which reproduces theADCcode's short-recurrence DIP
+	// solve exactly (Mode B: Tarantelli subspace-iteration gate + banded eigensolver, ~3·n·main
+	// resident — a fat-memory CPU node). A smaller value 0<block<main selects Mode A: a
+	// small start block that fits a single GPU, at the price of reaching only the states with
+	// overlap in its Krylov space (the strongest lines, not a guaranteed-complete band).
+	LowMemBlock int
 }
 
 // Result holds the Ritz spectrum, ascending in eigenvalue.
@@ -145,6 +155,31 @@ func SubspaceDim(n, main int, opts Options) int {
 type DenseOperator interface {
 	Operator
 	BuildMatrix() backend.Mat
+}
+
+// SatelliteOperator is an Operator that can apply only its satellite↔satellite blocks —
+// the sub-operator with the main block and the main↔satellite couplings removed. The
+// limited-memory driver (SolveLowMem, Mode B) uses it for Tarantelli's subspace iteration:
+// after the first two blocks it applies only this gated operator, which forces every later
+// Lanczos vector to zero weight in the main space, so a projected eigenvector's top `main`
+// rows equal its true main-space components (its pole strength) with the basis discarded.
+// *dip.Matrix satisfies it.
+type SatelliteOperator interface {
+	Operator
+	ApplyBlockSatellite(out, in backend.BlockView)
+}
+
+// LowMemSectorBytes estimates the resident footprint of SolveLowMem for a sector of size n
+// at block width b. Unlike SubspaceDim/SectorBytes (the whole n×maxdim basis), the
+// short-recurrence driver keeps only three n×b panels plus small scratch and the assembled
+// operator, so this is the number the backend chooser should size a low-memory sector with.
+// dim = MaxBlocks·b is the retained main-space slice / banded-T growth, which is off-device.
+func LowMemSectorBytes(n, b int) uint64 {
+	const opFrac = 0.5 // assembled block-sparse operator, ~like SectorBytes
+	nf, bf := float64(n), float64(b)
+	// three n×b panels (prev/cur/work) + one n×b candidate scratch + a b×b Gram.
+	bytes := 4*nf*bf*8 + bf*bf*8 + opFrac*nf*nf*8
+	return uint64(bytes)
 }
 
 // SolveDense diagonalizes the full matrix directly (the reference's DiagFull
