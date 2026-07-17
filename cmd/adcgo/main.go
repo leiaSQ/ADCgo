@@ -8,11 +8,15 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/analyze"
@@ -27,7 +31,38 @@ import (
 	"github.com/leiaSQ/ADCgo/internal/adc/spectrum"
 )
 
+// errInterrupted signals that a checkpointing solve stopped early on a SIGUSR1 (walltime
+// warning) after writing its checkpoint. main turns it into exit code 64 so a daisychain
+// wrapper knows to resume rather than treat it as a hard failure (see runADCgo_helix_melanin
+// family). exit 0 means the solve completed.
+var errInterrupted = errors.New("solve interrupted; checkpoint written")
+
+const exitResumeNeeded = 64
+
+// installStopSignal arranges for SIGUSR1 to flip the returned flag, which a checkpointing
+// lanczos loop polls at each block boundary to checkpoint-and-exit cleanly (exit 64). It is
+// installed unconditionally at the very start of main — before any file I/O — so a SIGUSR1
+// (SLURM --signal=B:USR1@<grace>) is never lost to the default "terminate" disposition, even
+// if it arrives during startup. Only SIGUSR1 is trapped: SIGTERM keeps its default behavior
+// so `scancel` and the walltime hard-kill still terminate the process (the periodic
+// checkpoint covers an ungraceful death). When checkpointing is off nothing polls the flag,
+// so a stray SIGUSR1 is simply ignored.
+func installStopSignal() *atomic.Bool {
+	stop := new(atomic.Bool)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGUSR1)
+	go func() {
+		for range ch {
+			stop.Store(true)
+			fmt.Fprintln(os.Stderr, "adcgo: SIGUSR1 received; checkpointing at the next block boundary")
+		}
+	}()
+	return stop
+}
+
 func main() {
+	stopSig := installStopSignal()
+
 	path := flag.String("fcidump", "", "path to an FCIDUMP file (MO integrals)")
 	doDIP := flag.Bool("dip", false, "solve DIP-ADC(2) and emit dication states as JSON")
 	doSIP := flag.Bool("sip", false, "solve IP-ADC(n) (non-Dyson) and emit cation states as JSON")
@@ -54,6 +89,8 @@ func main() {
 	sigmaMaxIt := flag.Int("sigma-maxit", 0, "Σ(∞) resolvent iteration cap (0 = 200; theADCcode's own default is 30)")
 	out := flag.String("out", "", "write JSON to this file (default stdout)")
 	profile := flag.Bool("profile", false, "print per-sector solver phase timings to stderr")
+	checkpoint := flag.String("checkpoint", "", "-solver lanczos only: base path for block-Krylov checkpoints, so a solve can resume in a later process after a walltime kill. Each sector appends a suffix (SIP: .i<irrep>). A SIGUSR1 (SLURM --signal=B:USR1@<grace>) makes the run checkpoint and exit 64 (\"resume needed\"); exit 0 means done. Empty = no checkpointing")
+	checkpointEvery := flag.Int("checkpoint-every", 25, "-checkpoint only: also save every N blocks for crash resilience (<=0 = save only on the stop signal)")
 
 	doTDM := flag.Bool("tdm", false, "emit RASSI-like transition dipole moments instead of the solver document: ion→ion emission (element 1), Dyson photoionization (element 2), and — for -order 4 — core→valence X-ray emission; needs -sip -mo (with dipole integrals)")
 	flag.BoolVar(doTDM, "rassi", false, "alias for -tdm")
@@ -79,6 +116,27 @@ func main() {
 		if *doDIP == *doSIP { // both set, or neither
 			fmt.Fprintln(os.Stderr, "adcgo: -convert needs exactly one of -dip or -sip")
 			os.Exit(2)
+		}
+		// A DIP solver document written with -mo already carries per-atom two-hole
+		// populations, so -group/-spectrum can regroup it into a decay-channel spectrum
+		// with no re-solve (the populations, not the eigenvectors, are what the classifier
+		// needs). Without -mo, or with -bare, fall through to the bare per-state spectrum.
+		if *doDIP && *moPath != "" && !*doBare && (*doSpectrum || len(groups.sites) > 0 || groups.interactive) {
+			md, err := mo.ReadFile(*moPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "adcgo:", err)
+				os.Exit(1)
+			}
+			cfg := specConfig{
+				enabled: true, initAtom: *initAtom, initOrbital: *initOrbital, stRatio: *stRatio,
+				groups: groups.sites, interactive: groups.interactive,
+				classify: spectrum.Options{MinWeight: *minWeight, MinFraction: *minFraction, IncludeZero: *includeZero},
+			}
+			if err := runDIPGroupedConvert(*convert, md, cfg, *out); err != nil {
+				fmt.Fprintln(os.Stderr, "adcgo:", err)
+				os.Exit(1)
+			}
+			return
 		}
 		if err := runBareConvert(*convert, *doDIP, *out); err != nil {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
@@ -185,7 +243,16 @@ func main() {
 		cfg.sigma = *sigma
 		cfg.sigmaAkrit = *sigmaAkrit
 		cfg.sigmaMaxIt = *sigmaMaxIt
+		cfg.ckpt = *checkpoint
+		cfg.ckptEvery = *checkpointEvery
+		if cfg.ckpt != "" {
+			cfg.stop = stopSig
+		}
 		if err := runSIP(d, cfg); err != nil {
+			if errors.Is(err, errInterrupted) {
+				fmt.Fprintln(os.Stderr, "adcgo: checkpoint written; resume needed")
+				os.Exit(exitResumeNeeded)
+			}
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
 			os.Exit(1)
 		}
@@ -437,6 +504,30 @@ func runBareConvert(path string, dip bool, out string) error {
 	return emitJSON(spec, out)
 }
 
+// runDIPGroupedConvert reads a saved DIP solver document and re-emits it as a decay-channel
+// stick spectrum grouped into the -group sites — the theADCcode &popana equivalent — without
+// re-solving. It reuses buildDIPSpectrum, so the classification is identical to the solve-time
+// -spectrum path; only the (expensive) eigensolve is skipped, since the document already
+// stores the per-atom two-hole populations the classifier consumes.
+func runDIPGroupedConvert(path string, md *mo.Data, cfg specConfig, out string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var doc Document
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return fmt.Errorf("parse %s as a DIP solver document: %w", path, err)
+	}
+	if len(doc.Sectors) == 0 {
+		return fmt.Errorf("%s has no sectors (is it a -dip solver document?)", path)
+	}
+	spec, err := buildDIPSpectrum(doc.Sectors, md, cfg)
+	if err != nil {
+		return err
+	}
+	return emitJSON(spec, out)
+}
+
 // emitJSON writes v as indented JSON to out (stdout when out == "").
 func emitJSON(v any, out string) error {
 	enc, err := json.MarshalIndent(v, "", "  ")
@@ -484,6 +575,10 @@ type sipConfig struct {
 	sigmaAkrit    float64                // Σ(∞) resolvent convergence threshold (0 = converge tightly)
 	sigmaMaxIt    int                    // Σ(∞) resolvent iteration cap
 	sig           func(i, j int) float64 // resolved Σ, built once per run (nil = off)
+
+	ckpt      string       // -checkpoint base path (lanczos only; "" = off)
+	ckptEvery int          // -checkpoint-every: blocks between crash-resilience saves
+	stop      *atomic.Bool // set by a stop signal; polled by the checkpointing lanczos loop
 }
 
 // parseMatFree maps the -matfree flag to a sip.MatFreeMode.

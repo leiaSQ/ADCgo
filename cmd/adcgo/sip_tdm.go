@@ -84,6 +84,16 @@ type solvedSIP struct {
 // and a no-op cost for the dense solver, which produces them anyway.
 func solveSIPSpace(ch *chooser, label string, sp *sip.Space, ints *integrals.Store, eps []float64, order int, cfg sipConfig, wantFull bool) (lanczos.Result, *sip.Matrix, error) {
 	lopts := lanczos.Options{MaxBlocks: cfg.blocks, WantFull: wantFull}
+	// Checkpoint the block-Krylov build so a walltime kill can resume in a successor job.
+	// Per-sector path (irrep-keyed) so concurrent sectors never share a file. Lanczos only —
+	// the dense/Davidson drivers hold no resumable Krylov basis.
+	if cfg.solver == "lanczos" && cfg.ckpt != "" {
+		lopts.Checkpoint = &lanczos.Checkpoint{
+			Path:  fmt.Sprintf("%s.i%d", cfg.ckpt, sp.Sym),
+			Every: cfg.ckptEvery,
+			Stop:  cfg.stop,
+		}
+	}
 	davOpts := davidsonOpts(cfg.nroots, cfg.maxdavsp, cfg.maxdavit, cfg.convthr, wantFull)
 	n, b := sp.Size(), sp.MainBlockSize()
 	subspace := lanczos.SubspaceDim(n, b, lopts)
@@ -121,6 +131,11 @@ func solveSIPSpace(ch *chooser, label string, sp *sip.Space, ints *integrals.Sto
 	default:
 		mx.Release()
 		return lanczos.Result{}, nil, fmt.Errorf("unknown solver %q (want lanczos, davidson or dense)", cfg.solver)
+	}
+	if res.Interrupted {
+		// A stop signal checkpointed and bailed out mid-build; propagate so main exits with
+		// the "resume needed" code rather than emitting a partial spectrum.
+		return res, mx, errInterrupted
 	}
 	if cfg.profile {
 		reportTiming(label, sp.Size(), sp.MainBlockSize(), res.Timing)
