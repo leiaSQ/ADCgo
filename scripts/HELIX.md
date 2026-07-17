@@ -134,6 +134,38 @@ The older `runADCgo_helix_melanin` (both solves concurrently on one `--exclusive
 _Module names on Helix are prefixed: `compiler/gnu/11.3`, `devel/cuda/13.2` (not bare
 `gnu/11.3` / `cuda/13.2`)._
 
+**uracil + water DIP (whole band).** The `../thesis/uracil1W` and `../thesis/uracil2W`
+double-ionization runs (theADCcode `adc2dip`, spin "1 3", C1, DZP) never finished on
+theADCcode in a sane walltime; this pipeline drives the *same* whole double-ionization band
+through ADCgo:
+
+```
+scripts/submit_uracil.sh                 # both molecules; needs ./adcgo-cuda prebuilt
+scripts/submit_uracil.sh uracil2W        # just one
+```
+
+Per molecule it chains two jobs, `--dependency=afterok`:
+
+1. `uracil_dump.sbatch` — RHF + AO→MO transform (pyscf, CPU) on `cpu-single`, writing
+   `<mol>.fcidump` / `<mol>.mo.json` to a `$MOL` workspace (via `adcgo_ws.sh`, the generic
+   `melanin_ws.sh`). Active spaces: uracil1W `10 to 165` (156 orbitals), uracil2W `11 to 190`
+   (180). SCF is gated on the GAMESS-UK RHF energy (−488.6122606854 / −564.6716874156 Ha).
+2. `uracil_dip.sbatch` — DIP-ADC(2), `--gres=gpu:A100:2` (singlet+triplet → 2 sectors, one
+   per GPU).
+
+**Solver — whole band, on the GPU.** The faithful theADCcode port is the short-recurrence
+`-solver lanczos-lowmem -lowmem-block 0` (block 0 = the full 2h main-space width, so every
+pole-carrying direction is spanned, `docs/dip_lowmem_lanczos.md`). Unlike melanin (n ≈
+10–15 M, whose ~0.4–0.6 TB 3-panel resident forces a fat CPU node), uracil's DIP space is
+small (n ≈ few × 10⁵), so the ~3·(n×main) resident is only a few GB and fits on the GPU —
+hence `-backend cuda`, not gonum. Knobs (env, `submit_uracil.sh` passes them through):
+`BLOCKS` (Lanczos iterations, default 200 = theADCcode `iter 200`), `LOWMEM_BLOCK` (band
+width; 0 = faithful whole band), `BACKEND` (default `cuda`; set `gonum` and change the
+partition if a build restricts `lowmem-block 0` to CPU), `ADCGO_DIP_GRES`, `SKIP_DUMP=1`.
+
+_These `lanczos-lowmem` band flags postdate the local binary — **rebuild `./adcgo-cuda` on
+Helix** (`scripts/build_adcgo_cuda_helix`) before submitting._
+
 ## Multi-GPU behaviour
 
 With `-backend cuda`, independent sectors run **one per GPU** (DIP: spin×irrep; SIP: irrep).
