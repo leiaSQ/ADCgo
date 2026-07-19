@@ -5,7 +5,8 @@ An exact, hardware-accelerated **ADC(n) ionization** solver in Go.
 ADCgo builds and diagonalizes the algebraic-diagrammatic-construction secular problem
 for electron removal *exactly* — no reduced-scaling truncations — and reaches larger
 systems through acceleration (multicore OpenBLAS, GPU block-Lanczos via **hipBLAS** on
-AMD and **cuBLAS** on NVIDIA) rather than approximation. SCF and molecular integrals are
+AMD and **cuBLAS** on NVIDIA — and, at very large scale, one sector row-partitioned across
+a whole node's GPUs over NVLink, tested to 8×H200) rather than approximation. SCF and molecular integrals are
 delegated: ADCgo ingests a standard **FCIDUMP** (e.g. from pyscf) plus an optional MO
 sidecar for the properties that FCIDUMP does not carry (populations, dipoles).
 
@@ -193,6 +194,47 @@ go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 4 -core 0 -sym 0 \
     -solver davidson -nroots 8 -convthr 1e-3
 ```
 
+### `-solver lanczos-lowmem`
+
+The same block-Lanczos band, re-cast to keep only a handful of Krylov panels resident
+instead of the whole basis — the memory mode that puts the full DIP band of large systems
+within reach of a GPU. `-lowmem-block 0` (the default width) is the faithful theADCcode
+short recurrence: block width == the 2h main-space size, a Tarantelli subspace-iteration
+gate plus a banded eigensolver, with only ~4 n×main panels live at once. A `-lowmem-block`
+*below* `main` selects a device-frugal full-reorthogonalization variant instead (3 blocks on
+the GPU, the full basis staged in host RAM) — exact on the states it reaches, but a block
+narrower than `main` cannot span every pole-carrying direction.
+
+```sh
+go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -dip -solver lanczos-lowmem -sym all
+```
+
+### Distributed multi-GPU — `-mgpu`
+
+At production scale one whole-band Mode B Krylov block can dwarf a single GPU (≈137 GB for
+melanin, past a 141 GB H200). `-mgpu N` **row-partitions one sector across N GPUs**: the
+resident state — the live n×main Krylov panels and the block-sparse operator — is split along
+the config (row) dimension, so a block that fits nowhere alone fits spread over a node's pool.
+Every solver reduction (the α coefficients, the CGS2 projection, the Gram, dots and norms)
+contracts the row dimension, so each becomes a device-local partial plus a tiny all-reduce;
+only the mat-vec crosses devices, gathering the remote input band per apply — over **NVLink**
+(peer-to-peer copy) when the backend supports it, else staged through the host. It scales to
+a full 8×H200 NVLink/NVSwitch node.
+
+`-mgpu` requires `-dip -solver lanczos-lowmem -lowmem-block 0` and a fast inter-GPU link.
+Sectors run **serially**, each spanning the whole pool — in contrast to `-gpus`, which runs
+*independent* sectors concurrently, one GPU each. Build the CUDA (or HIP) binary, then:
+
+```sh
+# row-partition each DIP sector of melanin across all 8 H200 of an NVLink node
+adcgo-cuda -fcidump melanin.fcidump -dip -order 2 \
+    -solver lanczos-lowmem -lowmem-block 0 -mgpu 8 \
+    -backend cuda -spin both -sym all -blocks 200
+```
+
+See [`scripts/melanin_dip_mgpu.sbatch`](scripts/melanin_dip_mgpu.sbatch) for a complete
+SLURM job (`--gres=gpu:H200:8`).
+
 ## Plotting
 
 `cmd/adcgo` writes JSON; `cmd/plotspec` turns that JSON into a figure. The output format
@@ -253,9 +295,12 @@ for overlays live in [`testdata/reference/spectra/`](testdata/reference/spectra)
 | `-sym SEL` | all | target irrep: `all` \| `none` \| 0-based index |
 | `-spin SEL` | both | DIP spin sector: `both` \| `singlet` \| `triplet` |
 | `-mo PATH` | — | MO/overlap/dipole sidecar (needed by populations, `-spectrum -dip`, `-tdm`) |
-| `-solver S` | lanczos | `lanczos` (band) or `dense` (full diagonalization) |
+| `-solver S` | lanczos | `lanczos` (whole-band) \| `lanczos-lowmem` (memory-frugal band, Mode B) \| `davidson` (root-targeting) \| `dense` (full diagonalization) |
 | `-blocks N` | 100 | block-Lanczos iterations; Krylov dim = N × 2h-space size |
+| `-lowmem-block N` | 0 | `-solver lanczos-lowmem` block width; 0 = 2h main-space size (faithful short recurrence), `< main` = device-frugal full-reorthogonalization mode |
 | `-backend B` | gonum | `gonum` \| `hip` \| `cuda` \| `auto` (build-tag gated) |
+| `-gpus N` | 0 | `-backend cuda\|hip`: max GPUs for concurrent per-sector solves (0 = all visible) |
+| `-mgpu N` | 0 | `-dip -solver lanczos-lowmem -lowmem-block 0`: row-partition ONE sector across N GPUs (needs NVLink); sectors run serially |
 | `-ps-thresh P` | 1.0 | drop states with pole strength below P percent |
 | `-coeff-thresh C` | 0.1 | drop leading components with \|coeff\| below C |
 | `-spectrum` | off | emit a stick spectrum: decay channels (DIP + `-mo`) or per orbital (SIP); DIP without `-mo` falls back to `-bare` |
@@ -284,6 +329,11 @@ go build -tags cuda ./...   # cuBLAS: compiles here, run on an NVIDIA host
 
 With `-backend auto` the solver calibrates each available backend once and picks the
 predicted-fastest per sector (measuring the real mat-vec cost, not a flop estimate).
+
+On a multi-GPU node there are two independent parallelism axes: `-gpus N` runs *independent*
+sectors concurrently (one GPU per DIP spin×irrep or SIP irrep), while `-mgpu N` row-partitions
+a *single* sector across N GPUs for a whole-band block too large for one device — see
+[Distributed multi-GPU](#distributed-multi-gpu---mgpu).
 
 ## Tests
 
