@@ -3,7 +3,7 @@
 # it submits, with the dependency wired:
 #
 #   1. uracil_dump.sbatch  (cpu-single)                build the FCIDUMP + sidecar
-#   2. uracil_dip.sbatch   (gpu:A100:2)  afterok:dump  whole-band lanczos-lowmem
+#   2. uracil_dip.sbatch   (gpu:H200:2)  afterok:dump  whole-band lanczos-lowmem
 #
 # These are the DIP runs that could not finish on theADCcode in a sane walltime
 # (../thesis/uracil1W, ../thesis/uracil2W). Build the CUDA binary first:
@@ -14,7 +14,9 @@
 #
 # Overridable env (export before running so the jobs inherit it):
 #   ADCGO_WS_NAME   force one workspace name for all mols (default: per-mol = $MOL)
-#   ADCGO_DIP_GRES  gres for the DIP job, e.g. gpu:H200:2   (sbatch --gres override)
+#   ADCGO_DIP_GRES  gres for the DIP job (default gpu:H200:2 in the sbatch). The DIP
+#                   operator+panels need a ≥80 GB GPU; H200 (141 GB) is the safe target.
+#                   Override, e.g. gpu:A100:2, only if you know the sector fits (sbatch --gres).
 #   BLOCKS          Lanczos iterations (default 200 = theADCcode iter 200)
 #   LOWMEM_BLOCK    band width (0 = faithful whole band, default)
 #   BACKEND         cuda (default) | gonum (CPU fallback -- also flip the partition)

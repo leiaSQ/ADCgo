@@ -19,11 +19,24 @@ package backend
 
 // Memory helpers hide hip's pointer-to-pointer and enum signatures from cgo.
 static void* dev_malloc(size_t bytes)                     { void* p = NULL; hipMalloc(&p, bytes); return p; }
+static int   dev_last_error(void)                         { return (int)hipGetLastError(); }
 static void  dev_free(void* p)                            { hipFree(p); }
 static void  dev_zero(void* p, size_t bytes)              { hipMemset(p, 0, bytes); }
 static void  dev_h2d(void* d, const void* s, size_t b)    { hipMemcpy(d, s, b, hipMemcpyHostToDevice); }
 static void  dev_d2h(void* d, const void* s, size_t b)    { hipMemcpy(d, s, b, hipMemcpyDeviceToHost); }
 static void  dev_d2d(void* d, const void* s, size_t b)    { hipMemcpy(d, s, b, hipMemcpyDeviceToDevice); }
+
+// Multi-GPU peer copy for the distributed backend (twin of cuda.go). dev_can_peer asks
+// whether `dev` may read `peer`'s memory; dev_enable_peer authorizes the calling thread's
+// current device to read `peer` (returns hipErrorPeerAccessAlreadyEnabled == 704 if a
+// prior call already did, which the caller treats as success). dev_memcpy2d copies a
+// strided (column-major, lda > rows) band in one call; hipMemcpyDefault infers the
+// direction from the pointers under UVA + enabled peer access.
+static int  dev_can_peer(int dev, int peer) { int ok = 0; hipDeviceCanAccessPeer(&ok, dev, peer); return ok; }
+static int  dev_enable_peer(int peer)       { return (int)hipDeviceEnablePeerAccess(peer, 0); }
+static int  dev_memcpy2d(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, size_t height) {
+	return (int)hipMemcpy2D(dst, dpitch, src, spitch, width, height, hipMemcpyDefault);
+}
 
 static hipblasHandle_t blas_create(void) { hipblasHandle_t h; hipblasCreate(&h); return h; }
 
@@ -125,7 +138,22 @@ func devSet(dev int) { C.dev_set(C.int(dev)) }
 
 func blasCreate() unsafe.Pointer { return unsafe.Pointer(C.blas_create()) }
 
-func devMalloc(n int) unsafe.Pointer  { return C.dev_malloc(C.size_t(n * elemSize)) }
+func devMalloc(n int) unsafe.Pointer {
+	p := C.dev_malloc(C.size_t(n * elemSize))
+	if p == nil && n > 0 {
+		st := C.dev_last_error() // drain the sticky error
+		// hipErrorOutOfMemory (2) mirrors CUDA: a sector's assembled operator plus its
+		// resident Lanczos panels outgrew the GPU. Point at the fix rather than letting a
+		// NULL pointer fault later.
+		hint := ""
+		if int(st) == 2 {
+			hint = "; the GPU is out of memory (operator + Lanczos panels too large) — " +
+				"use a larger-memory GPU or run with -backend gonum"
+		}
+		panic(fmt.Sprintf("backend: hipMalloc(%d bytes) returned NULL (hipError_t %d)%s", n*elemSize, int(st), hint))
+	}
+	return p
+}
 func devFree(p unsafe.Pointer)        { C.dev_free(p) }
 func devZero(p unsafe.Pointer, n int) { C.dev_zero(p, C.size_t(n*elemSize)) }
 
@@ -139,6 +167,20 @@ func devD2H(dst []float64, src unsafe.Pointer) {
 
 func devD2D(dst, src unsafe.Pointer, n int) {
 	C.dev_d2d(dst, src, C.size_t(n*elemSize))
+}
+
+// devCanPeer reports whether device dev may access device peer's memory.
+func devCanPeer(dev, peer int) bool { return int(C.dev_can_peer(C.int(dev), C.int(peer))) != 0 }
+
+// devEnablePeer authorizes the calling thread's current device to read `peer`'s memory,
+// returning the hipError_t (0 = enabled, 704 = already enabled). Runs on the enabling
+// device's owning thread.
+func devEnablePeer(peer int) int { return int(C.dev_enable_peer(C.int(peer))) }
+
+// devMemcpy2D copies a strided rectangle peer-to-peer. Pitches and width are byte counts,
+// height a row count; hipMemcpyDefault resolves the direction from the pointers.
+func devMemcpy2D(dst unsafe.Pointer, dpitch int, src unsafe.Pointer, spitch, width, height int) {
+	C.dev_memcpy2d(dst, C.size_t(dpitch), src, C.size_t(spitch), C.size_t(width), C.size_t(height))
 }
 
 func handle(h unsafe.Pointer) C.hipblasHandle_t { return C.hipblasHandle_t(h) }

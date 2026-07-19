@@ -127,6 +127,28 @@ func (c *chooser) fits(cand candidate, n, b, dim int, label string) bool {
 	return true
 }
 
+// checkDeviceFit verifies the chosen backend has room for a sector whose true resident
+// device footprint is needBytes. Host backends always pass. It exists because the pinned-
+// backend path (single(), below) skips the cost-picker's fits() check, and because the
+// cost model's dense-n² operator term is meaningless at production sizes — the caller
+// supplies the exact block-sparse operator size instead. On a device short of room it
+// returns an actionable error rather than letting a later cudaMalloc panic tear down the run.
+func (c *chooser) checkDeviceFit(label string, be backend.Backend, needBytes uint64) error {
+	dm, isDev := be.(backend.DeviceMemory)
+	if !isDev {
+		return nil
+	}
+	const margin = 256 << 20
+	free, _ := dm.DeviceMem()
+	if free >= needBytes+margin {
+		return nil
+	}
+	return fmt.Errorf("%s: sector needs ~%.1f GB of GPU memory (block-sparse operator + Lanczos panels) "+
+		"but only %.1f GB is free on %s; submit on a larger-memory GPU (e.g. ADCGO_DIP_GRES=gpu:H200:2) "+
+		"or run with -backend gonum",
+		label, float64(needBytes)/(1<<30), float64(free)/(1<<30), c.cands[0].name)
+}
+
 // pickLanczos chooses the backend predicted fastest for one block-Lanczos sector.
 // probe measures the real apply cost on each surviving candidate.
 func (c *chooser) pickLanczos(label string, n, b, dim int, probe applyProbe) backend.Backend {

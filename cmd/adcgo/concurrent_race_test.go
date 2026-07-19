@@ -58,8 +58,11 @@ func TestConcurrentDIPSectorsShareReadOnlyState(t *testing.T) {
 	refBE, _ := backend.New("gonum")
 	want := make([]float64, len(items))
 	for i, it := range items {
-		sec := solveDIPSector(&chooser{cands: []candidate{{name: "gonum", be: refBE}}},
+		sec, err := solveDIPSector(&chooser{cands: []candidate{{name: "gonum", be: refBE}}},
 			cfg, it.sp, ints, eps, it.spin, it.targetSym, nil, opts)
+		if err != nil {
+			t.Fatalf("sector %d: %v", i, err)
+		}
 		want[i] = firstEnergy(sec)
 	}
 
@@ -72,8 +75,12 @@ func TestConcurrentDIPSectorsShareReadOnlyState(t *testing.T) {
 		go func(i int, it item) {
 			defer wg.Done()
 			be, _ := backend.New("gonum")
-			sec := solveDIPSector(&chooser{cands: []candidate{{name: "gonum", be: be}}},
+			sec, err := solveDIPSector(&chooser{cands: []candidate{{name: "gonum", be: be}}},
 				cfg, it.sp, ints, eps, it.spin, it.targetSym, nil, opts)
+			if err != nil {
+				t.Errorf("sector %d: %v", i, err)
+				return
+			}
 			got[i] = firstEnergy(sec)
 		}(i, it)
 	}

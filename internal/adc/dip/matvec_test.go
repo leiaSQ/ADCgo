@@ -24,6 +24,20 @@ func buildH2O(t *testing.T, spin Spin) *Matrix {
 	return New(sp, integrals.New(d, nocc, nil), eps, backend.Gonum{})
 }
 
+// TestOperatorResidentBytes: the pre-flight footprint estimate must exactly equal the
+// assembled operator's real size (nnz·8), since the backend chooser refuses a GPU based
+// on it. visitBlocks is the shared enumeration behind both, so they cannot drift.
+func TestOperatorResidentBytes(t *testing.T) {
+	for _, spin := range []Spin{Singlet, Triplet} {
+		mx := buildH2O(t, spin)
+		nnz, _ := mx.OperatorNNZ() // assembles (uploads to the host backend) and sums r*c
+		want := uint64(nnz) * 8
+		if got := mx.OperatorResidentBytes(); got != want {
+			t.Errorf("spin %d: OperatorResidentBytes=%d, want nnz*8=%d", spin, got, want)
+		}
+	}
+}
+
 // TestMatrixSymmetric: the assembled DIP matrix must be symmetric (each block +
 // its transpose consistently placed, and diagonal blocks symmetric).
 func TestMatrixSymmetric(t *testing.T) {
