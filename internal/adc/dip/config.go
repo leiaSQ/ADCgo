@@ -58,6 +58,70 @@ type Space struct {
 // the 3h1p satellite space). Pole strengths are the squared 2h weight.
 func (s *Space) MainBlockSize() int { return s.BeginJII }
 
+// PartitionBounds returns row-partition boundaries that split the sector across up to g
+// devices for the distributed (multi-GPU) Mode B backend. Splits fall only on group
+// boundaries — the 2h main block and every 3h1p group (JII/IJK) stay intact — so every
+// operator block's row band lands on a single device (the precondition
+// backend.NewDistributed relies on). The result is ascending, starts at 0, ends at
+// Size(), and has between 2 and g+1 entries (fewer than g+1 when the sector has too few
+// groups to fill g partitions). Balances by cumulative size, snapping each target to the
+// nearest group boundary.
+func (s *Space) PartitionBounds(g int) []int {
+	n := s.Size()
+	if g < 1 {
+		g = 1
+	}
+	// Candidate split points: every group start (0, main end, each JII/IJK group), plus n.
+	cand := []int{0, s.BeginJII, s.BeginIJK, n}
+	cand = append(cand, s.JII...)
+	cand = append(cand, s.IJK...)
+	seen := map[int]bool{}
+	uniq := cand[:0]
+	for _, c := range cand {
+		if c >= 0 && c <= n && !seen[c] {
+			seen[c] = true
+			uniq = append(uniq, c)
+		}
+	}
+	cand = uniq
+	sortInts(cand)
+
+	bounds := []int{0}
+	for k := 1; k < g; k++ {
+		target := k * n / g
+		last := bounds[len(bounds)-1]
+		best := -1
+		for _, c := range cand {
+			if c <= last || c >= n {
+				continue
+			}
+			if best < 0 || abs(c-target) < abs(best-target) {
+				best = c
+			}
+		}
+		if best < 0 {
+			break // out of interior group boundaries → fewer partitions than g
+		}
+		bounds = append(bounds, best)
+	}
+	return append(bounds, n)
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+func sortInts(a []int) {
+	for i := 1; i < len(a); i++ {
+		for j := i; j > 0 && a[j-1] > a[j]; j-- {
+			a[j-1], a[j] = a[j], a[j-1]
+		}
+	}
+}
+
 // Size is the full matrix dimension.
 func (s *Space) Size() int { return len(s.Configs) }
 

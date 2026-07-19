@@ -82,6 +82,7 @@ func main() {
 	coreOrb := flag.String("core", "", "CVS core orbitals for -order 4: comma-separated 0-based occupied indices (e.g. 0)")
 	backendName := flag.String("backend", "gonum", "linear-algebra backend: gonum | hip | cuda | auto (auto calibrates and picks per sector; build-tag gated)")
 	gpus := flag.Int("gpus", 0, "-backend cuda|hip only: max GPUs for concurrent per-sector solves (0 = all visible). Independent sectors (DIP spin×irrep, SIP irrep) run one per GPU")
+	mgpu := flag.Int("mgpu", 0, "-dip -solver lanczos-lowmem -lowmem-block 0 only: row-partition ONE sector across this many GPUs (0 = off), so a whole-band Mode B Krylov block that dwarfs a single GPU fits across a node. Sectors run serially, each spanning the pool; needs a fast inter-GPU link (NVLink)")
 	matfree := flag.String("matfree", "off", "matrix-free apply of large CVS-ADC(4) coupling blocks (recompute vs store): off | auto | on. Trades resident memory for per-mat-vec recompute; auto switches per block using -maxmem")
 	maxMemGB := flag.Float64("maxmem", 4.0, "matrix-free -matfree=auto threshold: a coupling block whose dense size exceeds this many GB is applied matrix-free")
 	wert3 := flag.Bool("wert3", true, "include the WERT3 5th-order 3h2p-diagonal correction in CVS-ADC(4) (the full EIGAB effective diagonal theADCcode itself uses; bit-exact vs its FT19 tape). -wert3=false for the bare 0th-order 3h2p diagonal.")
@@ -205,7 +206,7 @@ func main() {
 	if *doDIP {
 		cfg := dipConfig{
 			solver: *solver, spinSel: *spinSel, moPath: *moPath, out: *out, sym: *sym,
-			backend: *backendName, gpus: *gpus,
+			backend: *backendName, gpus: *gpus, mgpu: *mgpu,
 			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks,
 			nroots: *nroots, maxdavsp: *maxdavsp, maxdavit: *maxdavit, convthr: *convthr,
 			lowmemBlock: *lowmemBlock,
@@ -290,6 +291,7 @@ type Document struct {
 type dipConfig struct {
 	solver, spinSel, moPath, out, sym, backend string
 	gpus                                       int // -gpus: cap on concurrent per-sector GPUs (0 = all)
+	mgpu                                       int // -mgpu: row-partition ONE sector across this many GPUs (0 = off)
 	psThresh, coeffThresh                      float64
 	blocks                                     int
 	nroots, maxdavsp, maxdavit                 int     // -solver davidson
@@ -341,7 +343,7 @@ func validateSolver(solver string) error {
 // returns its analyzed sector. It is self-contained (no shared mutable state beyond the
 // read-only ints/eps/moData), so multiple sectors can run concurrently, each on its own
 // GPU, via a per-worker single-backend chooser. cfg.solver is validated by the caller.
-func solveDIPSector(ch *chooser, cfg dipConfig, sp *dip.Space, ints *integrals.Store, eps []float64, spin dip.Spin, targetSym int, moData *mo.Data, opts analyze.Options) analyze.Sector {
+func solveDIPSector(ch *chooser, cfg dipConfig, sp *dip.Space, ints *integrals.Store, eps []float64, spin dip.Spin, targetSym int, moData *mo.Data, opts analyze.Options) (analyze.Sector, error) {
 	label := fmt.Sprintf("dip spin=%d irrep=%d", spin, targetSym+1)
 	lopts := lanczos.Options{MaxBlocks: cfg.blocks, LowMemBlock: cfg.lowmemBlock}
 	davOpts := davidsonOpts(cfg.nroots, cfg.maxdavsp, cfg.maxdavit, cfg.convthr, false)
@@ -375,6 +377,20 @@ func solveDIPSector(ch *chooser, cfg dipConfig, sp *dip.Space, ints *integrals.S
 	}
 	mx := dip.New(sp, ints, eps, be)
 
+	// Pre-flight device-memory guard for the short-recurrence path: SolveLowMem keeps three
+	// n×block panels resident (4·n·b·8) and, on the first apply, uploads the whole block-
+	// sparse operator — the dominant term (tens of GB for a large satellite space), whose
+	// true size is only knowable here, not from the dense-n² cost model. If it will not fit
+	// the chosen GPU, refuse cleanly rather than let a mid-assembly cudaMalloc panic tear
+	// down the run. Only lanczos-lowmem has this simple, exact panel footprint.
+	if cfg.solver == "lanczos-lowmem" {
+		need := 4*uint64(n)*uint64(probeB)*8 + mx.OperatorResidentBytes()
+		if err := ch.checkDeviceFit(label, be, need); err != nil {
+			mx.Release()
+			return analyze.Sector{}, err
+		}
+	}
+
 	var res lanczos.Result
 	switch cfg.solver {
 	case "dense":
@@ -389,15 +405,81 @@ func solveDIPSector(ch *chooser, cfg dipConfig, sp *dip.Space, ints *integrals.S
 	// Reclaim the sector's resident operator before the next one is assembled;
 	// on a device this is up to 0.5 GB, and the memory check depends on it.
 	mx.Release()
+	return analyzeDIPSector(label, cfg, sp, res, moData, opts), nil
+}
+
+// analyzeDIPSector turns a solved sector's Result into an analyze.Sector (pole-strength
+// filtering, atom-resolved populations), the shared tail of the single-backend and
+// multi-GPU solve paths.
+func analyzeDIPSector(label string, cfg dipConfig, sp *dip.Space, res lanczos.Result, moData *mo.Data, opts analyze.Options) analyze.Sector {
 	if cfg.profile {
 		reportTiming(label, sp.Size(), sp.MainBlockSize(), res.Timing)
 	}
-
 	var pe *analyze.PopEngine
 	if moData != nil {
 		pe = analyze.NewPopEngine(sp, moData)
 	}
 	return analyze.BuildSector(sp, res, opts, pe)
+}
+
+// solveDIPSectorMGPU solves one Mode B (whole-band, lowmem-block 0) sector row-partitioned
+// across the sub-backends in subs, so a Krylov block too large for one GPU fits when spread
+// over the pool. It builds a distributed backend from the sector's group-aligned partition
+// boundaries (dip.Space.PartitionBounds) and runs SolveLowMem on it. subs is consumed for
+// this sector only; the caller owns the underlying device backends.
+func solveDIPSectorMGPU(subs []backend.Backend, cfg dipConfig, sp *dip.Space, ints *integrals.Store, eps []float64, spin dip.Spin, targetSym int, moData *mo.Data, opts analyze.Options) (analyze.Sector, error) {
+	label := fmt.Sprintf("dip spin=%d irrep=%d", spin, targetSym+1)
+	n, main := sp.Size(), sp.MainBlockSize()
+	bounds := sp.PartitionBounds(len(subs))
+
+	// A sector too small to partition (n ≤ 2·main², or only one group band) runs on a single
+	// sub-backend — the row-partition buys nothing there and would trip the shape invariant.
+	var be backend.Backend = subs[0]
+	npart := 1
+	if len(bounds)-1 >= 2 && n > 2*main*main {
+		npart = len(bounds) - 1
+		d, err := backend.NewDistributed(subs[:npart], n, main, bounds)
+		if err != nil {
+			return analyze.Sector{}, fmt.Errorf("%s: %w", label, err)
+		}
+		be = d
+	}
+	mx := dip.New(sp, ints, eps, be)
+	if cfg.profile {
+		// Per-GPU footprint = the ~4 live n×main Krylov panels + the block-sparse operator,
+		// split over the partitions. NOT lanczos.LowMemSectorBytes: its opFrac·n²·8 operator
+		// term is a dense estimate (≈870 TB at melanin's n) — meaningless at this scale.
+		// OperatorResidentBytes sums the real block sizes; the operator is replicated across
+		// the partitions it touches, so the /npart below charges each GPU only its share of
+		// the panels and is a lower bound on the operator (fine for a footprint headline).
+		panels := 4 * uint64(n) * uint64(main) * 8 // float64 panels
+		perGPU := (panels + mx.OperatorResidentBytes()) / uint64(npart)
+		fmt.Fprintf(os.Stderr, "dispatch %-18s mgpu n=%d main=%d over %d partition(s), ~%.1f GB/GPU\n",
+			label, n, main, npart, float64(perGPU)/(1<<30))
+	}
+	res := lanczos.SolveLowMem(mx, be, lanczos.Options{MaxBlocks: cfg.blocks, LowMemBlock: cfg.lowmemBlock})
+	mx.Release()
+	return analyzeDIPSector(label, cfg, sp, res, moData, opts), nil
+}
+
+// mgpuSubs returns the sub-backends the multi-GPU path row-partitions a sector across. It
+// reuses the chooser's already-built device pool when present (-backend cuda|hip on a
+// multi-GPU node), capped at cfg.mgpu; otherwise it builds cfg.mgpu independent instances
+// of the chosen backend (e.g. gonum, the host validation / CPU path).
+func mgpuSubs(ch *chooser, cfg dipConfig) ([]backend.Backend, error) {
+	if len(ch.pool) >= 1 {
+		g := min(cfg.mgpu, len(ch.pool))
+		return ch.pool[:g], nil
+	}
+	subs := make([]backend.Backend, cfg.mgpu)
+	for i := range subs {
+		be, err := backend.New(cfg.backend)
+		if err != nil {
+			return nil, err
+		}
+		subs[i] = be
+	}
+	return subs, nil
 }
 
 func runDIP(d *fcidump.Data, cfg dipConfig) error {
@@ -454,18 +536,44 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 	}
 
 	results := make([]analyze.Sector, len(items))
-	solve := func(w *chooser, i int) error {
-		it := items[i]
-		results[i] = solveDIPSector(w, cfg, it.sp, ints, eps, it.spin, it.targetSym, moData, opts)
-		return nil
-	}
-	if len(ch.pool) >= 2 {
-		if err := ch.runConcurrent(len(items), solve); err != nil {
+
+	if cfg.mgpu > 0 {
+		// Multi-GPU Mode B: row-partition ONE sector across the pool, sectors serial. This
+		// is the whole-band path for sectors whose Krylov block dwarfs a single GPU (melanin).
+		if cfg.solver != "lanczos-lowmem" {
+			return fmt.Errorf("-mgpu requires -solver lanczos-lowmem (got %q)", cfg.solver)
+		}
+		subs, err := mgpuSubs(ch, cfg)
+		if err != nil {
 			return err
 		}
+		for i, it := range items {
+			sec, err := solveDIPSectorMGPU(subs, cfg, it.sp, ints, eps, it.spin, it.targetSym, moData, opts)
+			if err != nil {
+				return err
+			}
+			results[i] = sec
+		}
 	} else {
-		for i := range items {
-			_ = solve(ch, i)
+		solve := func(w *chooser, i int) error {
+			it := items[i]
+			sec, err := solveDIPSector(w, cfg, it.sp, ints, eps, it.spin, it.targetSym, moData, opts)
+			if err != nil {
+				return err
+			}
+			results[i] = sec
+			return nil
+		}
+		if len(ch.pool) >= 2 {
+			if err := ch.runConcurrent(len(items), solve); err != nil {
+				return err
+			}
+		} else {
+			for i := range items {
+				if err := solve(ch, i); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	doc.Sectors = append(doc.Sectors, results...)

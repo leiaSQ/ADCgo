@@ -18,7 +18,9 @@
   symmetry auto                # pyscf detects C1 (the molecule is genuinely 3D/folded, not
                                # planar; it cannot be made Cs without collapsing atoms -- see README)
   gate   -1095.4068317755      # GAMESS-UK RHF total energy (dip_with_popana.sh.out)
-  max_cycle 200                # melanin needs many cycles to converge
+  conv_tol 1e-10               # loosened from default 1e-12: energy already matches gate to ~1e-8,
+  conv_tol_grad 1e-7           # 1e-12 couldn't be reached in 200 cycles for this floppy 3D oligomer
+  max_cycle 500                # melanin needs many cycles to converge
 &active
   active 25 to 236             # freeze MOs 1-24, drop virtuals >236 -> 212 orbitals (theADCcode "active 25 to 236")
 &output

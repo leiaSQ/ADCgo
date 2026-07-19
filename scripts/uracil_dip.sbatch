@@ -6,13 +6,19 @@
 # 200` is a short-recurrence block-Lanczos that returns the *entire* DIP band
 # (every pole), which the popana analysis then assigns. The faithful ADCgo port
 # is `-solver lanczos-lowmem -lowmem-block 0` (block 0 = the full 2h main-space
-# width, so every pole-carrying direction is spanned). Unlike melanin (n ~ 10-15 M,
-# where the 3-panel resident is ~0.4-0.6 TB and forces a fat CPU node), uracil's
-# DIP space is small (n ~ few x 10^5), so the ~3x(n x main) resident is only a few
-# GB and fits on the GPU -- hence -backend cuda here, not gonum.
+# width, so every pole-carrying direction is spanned).
 #
-# Two spin sectors (singlet, triplet; theADCcode spin "1 3") run one per GPU -> 2
-# A100 (fp64: A100/H200, never A40 -- its fp64 rate is ~1/16 of the A100's).
+# GPU MEMORY. The resident device footprint is NOT just the three n×main Lanczos
+# panels (4·n·main·8 ≈ 9 GB for uracil1W, ≈ 23 GB for uracil2W). The first apply
+# also uploads the whole block-sparse DIP operator, which for a satellite space
+# this large is the DOMINANT term (~30 GB+). Total is ~40 GB (uracil1W) to ~80 GB
+# (uracil2W), so a 40 GB A100 OOMs mid-assembly. Run on a ≥80 GB card: H200
+# (141 GB) is the unambiguous target on Helix — a plain A100/A100-80 gres can
+# still land on a 40 GB gpu4 A100, whereas there is no small-memory H200. If the
+# sector will not fit the chosen GPU, ADCgo now refuses up front with an
+# actionable message instead of a cudaMalloc panic (set BACKEND=gonum, or use a
+# larger GPU). Two spin sectors (singlet, triplet; theADCcode spin "1 3") run one
+# per GPU (fp64: A100/H200, never A40 -- its fp64 rate is ~1/16 of the A100's).
 #
 #   MOL=uracil1W sbatch scripts/uracil_dip.sbatch      # or via scripts/submit_uracil.sh
 #
@@ -27,7 +33,7 @@
 #SBATCH --partition=gpu-single
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:A100:2
+#SBATCH --gres=gpu:H200:2
 #SBATCH --mem=120gb
 #SBATCH --time=120:00:00
 #SBATCH --output=%x-%j.out

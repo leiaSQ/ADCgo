@@ -40,6 +40,35 @@ type DeviceMemory interface {
 	DeviceMem() (free, total uint64)
 }
 
+// PeerCopier is implemented by device backends that can move resident data directly to a
+// peer device (NVLink/xGMI) without staging through host memory. The distributed
+// (multi-GPU) backend uses it to accelerate its one large cross-partition data mover —
+// the mat-vec input gather — and gracefully falls back to Download/Upload host staging
+// for any sub-backend that does not implement it (e.g. Gonum) or any device pair without
+// peer access.
+type PeerCopier interface {
+	// EnablePeerAccess best-effort authorizes this backend's device to read the memory of
+	// each backend in peers. Non-*gpuBackend peers, self, and pairs without peer capability
+	// are skipped, leaving the host-staging fallback in place for those. Idempotent.
+	EnablePeerAccess(peers []Backend)
+
+	// PeerAvailable reports whether this backend can peer-copy from `from`'s device (i.e.
+	// EnablePeerAccess succeeded for that pair).
+	PeerAvailable(from Backend) bool
+
+	// Sync blocks until this backend's queued device work completes. A peer read does NOT
+	// drain the source device's stream the way the host-staged Download path implicitly does,
+	// so the distributed backend calls Sync on the SOURCE before a peer copy to guarantee a
+	// pending async write (e.g. a Krylov-panel scaling) has finished producing the band.
+	Sync()
+
+	// PeerCopy2D copies a rows×cols column-major band from src (resident on `from`, column
+	// stride srcLd) into dst (resident on this backend, contiguous with column stride rows),
+	// device-to-device. dst and src must be this backend's / from's native Vectors. Runs on
+	// this backend's owning thread.
+	PeerCopy2D(dst, src Vector, from Backend, rows, cols, srcLd int)
+}
+
 // calibGemm/calibEig are sized to be representative but cheap. The eig size must exceed
 // gpuSymEigMin, or a GPU backend would silently fall back to the host and Calibrate would
 // measure the wrong thing.

@@ -25,8 +25,10 @@
   manifest uracil1W.ref.json
 &adc
   # Whole double-ionization band via the faithful theADCcode short-recurrence
-  # Lanczos (lanczos-lowmem, lowmem-block 0 = full 2h main-space block). For
-  # uracil1W the 3-panel resident footprint is only a few GB, so it fits a GPU.
+  # Lanczos (lanczos-lowmem, lowmem-block 0 = full 2h main-space block). The
+  # resident device footprint is the three n×main Lanczos panels (~9 GB) PLUS the
+  # uploaded block-sparse DIP operator (~30 GB, dominant) -> ~40 GB, so this needs
+  # a ≥80 GB GPU (submit with ADCGO_DIP_GRES=gpu:H200:2; see scripts/uracil_dip.sbatch).
   # -spin both -> singlet + triplet (theADCcode spin "1 3") -> 2 sectors / 2 GPUs.
   args   -dip -order 2 -solver lanczos-lowmem -lowmem-block 0 -spin both -blocks 200 -backend cuda
   sym    all                   # C1: one spatial irrep

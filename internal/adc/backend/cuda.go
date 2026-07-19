@@ -38,6 +38,19 @@ static int   dev_h2d(void* d, const void* s, size_t b) { return (int)cudaMemcpy(
 static int   dev_d2h(void* d, const void* s, size_t b) { return (int)cudaMemcpy(d, s, b, cudaMemcpyDeviceToHost); }
 static int   dev_d2d(void* d, const void* s, size_t b) { return (int)cudaMemcpy(d, s, b, cudaMemcpyDeviceToDevice); }
 
+// Multi-GPU peer (NVLink) copy for the distributed backend's cross-partition input
+// gather. dev_can_peer asks whether `dev` may read `peer`'s memory; dev_enable_peer
+// authorizes the CALLING thread's current device to read `peer` (so it runs on the
+// enabling device's thread, and returns cudaErrorPeerAccessAlreadyEnabled == 704 if a
+// prior call set it up — the caller treats that as success). dev_memcpy2d copies a
+// strided (column-major, lda > rows) band peer-to-peer in one call: with peer access
+// enabled and UVA, cudaMemcpyDefault infers each end's device from its pointer.
+static int  dev_can_peer(int dev, int peer) { int ok = 0; cudaDeviceCanAccessPeer(&ok, dev, peer); return ok; }
+static int  dev_enable_peer(int peer)       { return (int)cudaDeviceEnablePeerAccess(peer, 0); }
+static int  dev_memcpy2d(void* dst, size_t dpitch, const void* src, size_t spitch, size_t width, size_t height) {
+	return (int)cudaMemcpy2D(dst, dpitch, src, spitch, width, height, cudaMemcpyDefault);
+}
+
 static cublasHandle_t blas_create(int* status) { cublasHandle_t h = NULL; *status = (int)cublasCreate(&h); return h; }
 
 static void   blas_axpy(cublasHandle_t h, int n, double a, const double* x, double* y) { cublasDaxpy(h, n, &a, x, 1, y, 1); }
@@ -161,7 +174,15 @@ func devMalloc(n int) unsafe.Pointer {
 	if p == nil && n > 0 {
 		// Drain the sticky error so later calls do not report this one.
 		st := C.dev_last_error()
-		panic(fmt.Sprintf("backend: cudaMalloc(%d bytes) returned NULL (cudaError_t %d)", n*elemSize, int(st)))
+		// cudaErrorMemoryAllocation (2) is the common case here — a sector's assembled
+		// operator plus its resident Lanczos panels outgrew the GPU. Say so, and point at
+		// the fix, rather than surfacing a bare error code and a device stack trace.
+		hint := ""
+		if int(st) == 2 {
+			hint = "; the GPU is out of memory (operator + Lanczos panels too large) — " +
+				"use a larger-memory GPU (e.g. ADCGO_DIP_GRES=gpu:H200:2) or run with -backend gonum"
+		}
+		panic(fmt.Sprintf("backend: cudaMalloc(%d bytes) returned NULL (cudaError_t %d)%s", n*elemSize, int(st), hint))
 	}
 	return p
 }
@@ -179,6 +200,21 @@ func devD2H(dst []float64, src unsafe.Pointer) {
 
 func devD2D(dst, src unsafe.Pointer, n int) {
 	ckCuda(C.dev_d2d(dst, src, C.size_t(n*elemSize)), "cudaMemcpy D2D")
+}
+
+// devCanPeer reports whether device dev may access device peer's memory over NVLink.
+func devCanPeer(dev, peer int) bool { return int(C.dev_can_peer(C.int(dev), C.int(peer))) != 0 }
+
+// devEnablePeer authorizes the calling thread's current device to read `peer`'s memory,
+// returning the cudaError_t (0 = enabled, 704 = already enabled). Must run on the
+// enabling device's owning thread.
+func devEnablePeer(peer int) int { return int(C.dev_enable_peer(C.int(peer))) }
+
+// devMemcpy2D copies a strided rectangle peer-to-peer (or intra-device). Pitches and
+// width are byte counts, height is a row count; cudaMemcpyDefault resolves the direction
+// from the pointers (UVA + enabled peer access).
+func devMemcpy2D(dst unsafe.Pointer, dpitch int, src unsafe.Pointer, spitch, width, height int) {
+	ckCuda(C.dev_memcpy2d(dst, C.size_t(dpitch), src, C.size_t(spitch), C.size_t(width), C.size_t(height)), "cudaMemcpy2D peer")
 }
 
 // devSync blocks until all queued device work completes, and reports any error the

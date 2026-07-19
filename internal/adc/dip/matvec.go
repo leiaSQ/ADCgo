@@ -73,16 +73,13 @@ func (mx *Matrix) OperatorNNZ() (nnz, nblocks int) {
 	return nnz, len(mx.op.parts)
 }
 
-// assemble builds the block-sparse operator on the backend. It mirrors the block
-// enumeration of BuildMatrix, but uploads each block via be.UploadMat instead of
-// scattering into a dense matrix, and folds the 2h/2h scalar loop into a single
-// dense main-block GemvN so the whole apply is expressible as resident GEMVs.
-func (mx *Matrix) assemble() *assembledOp {
+// visitBlocks enumerates the nonzero blocks of the block-sparse operator, mirroring the
+// block enumeration of BuildMatrix, and hands each to emit(block, rowOff, colOff, diag).
+// It is the single source of truth for the operator's structure: assemble() uploads each
+// block, OperatorResidentBytes() sizes them without uploading. The 2h/2h scalar loop is
+// folded into a single dense main block so the whole apply is expressible as resident GEMVs.
+func (mx *Matrix) visitBlocks(emit func(m backend.Mat, r0, c0 int, diag bool)) {
 	sp := mx.sp
-	var parts []placement
-	add := func(m backend.Mat, r0, c0 int, diag bool) {
-		parts = append(parts, placement{A: mx.be.UploadMat(m), RowOff: r0, ColOff: c0, Diag: diag})
-	}
 
 	// 2h/2h main block: a dense symmetric square (both triangles filled), applied
 	// as a single GemvN over the main sub-range.
@@ -100,7 +97,7 @@ func (mx *Matrix) assemble() *assembledOp {
 				}
 			}
 		}
-		add(M, 0, 0, true)
+		emit(M, 0, 0, true)
 	}
 
 	// 2h ↔ 3h1p coupling (each an nvR×1 column block at (r0, col)).
@@ -112,7 +109,7 @@ func (mx *Matrix) assemble() *assembledOp {
 				if !ok {
 					continue
 				}
-				add(blk, r0, col, false)
+				emit(blk, r0, col, false)
 			}
 		}
 	}
@@ -124,14 +121,14 @@ func (mx *Matrix) assemble() *assembledOp {
 		for gc := 0; gc <= gr; gc++ {
 			c0 := sp.JII[gc]
 			if blk, ok := mx.blk.jiiLKK(sp.Configs[r0], sp.Configs[c0]); ok {
-				add(blk, r0, c0, gr == gc)
+				emit(blk, r0, c0, gr == gc)
 			}
 		}
 	}
 	for _, r0 := range sp.IJK {
 		for _, c0 := range sp.JII {
 			if blk, ok := mx.blk.ijkMLL(sp.Configs[r0], sp.Configs[c0]); ok {
-				add(blk, r0, c0, false)
+				emit(blk, r0, c0, false)
 			}
 		}
 	}
@@ -139,11 +136,33 @@ func (mx *Matrix) assemble() *assembledOp {
 		for gc := 0; gc <= gr; gc++ {
 			c0 := sp.IJK[gc]
 			if blk, ok := mx.blk.ijkLMN(sp.Configs[r0], sp.Configs[c0]); ok {
-				add(blk, r0, c0, gr == gc)
+				emit(blk, r0, c0, gr == gc)
 			}
 		}
 	}
-	return newAssembledOp(parts, sp.BeginJII)
+}
+
+// assemble builds the block-sparse operator on the backend, uploading each block via
+// be.UploadMat instead of scattering into a dense matrix (cf. BuildMatrix).
+func (mx *Matrix) assemble() *assembledOp {
+	var parts []placement
+	mx.visitBlocks(func(m backend.Mat, r0, c0 int, diag bool) {
+		parts = append(parts, placement{A: mx.be.UploadMat(m), RowOff: r0, ColOff: c0, Diag: diag})
+	})
+	return newAssembledOp(parts, mx.sp.BeginJII)
+}
+
+// OperatorResidentBytes reports the device memory the assembled operator would occupy, in
+// bytes, without uploading anything. It walks the same block enumeration as assemble() and
+// sums each block's rows·cols·8, so the backend chooser can decide up front whether a sector
+// fits a GPU — the block-sparse operator is the dominant resident term, and unlike a dense
+// n² model this is its exact size. Costs ~one assemble's worth of host block evaluation.
+func (mx *Matrix) OperatorResidentBytes() uint64 {
+	var elems uint64
+	mx.visitBlocks(func(m backend.Mat, r0, c0 int, diag bool) {
+		elems += uint64(m.Rows) * uint64(m.Cols)
+	})
+	return elems * 8 // sizeof(float64)
 }
 
 // newAssembledOp plans the batched applies and sizes the scratch slices. main is the 2h

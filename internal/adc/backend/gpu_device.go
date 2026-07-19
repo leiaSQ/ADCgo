@@ -31,6 +31,10 @@ import (
 const elemSize = 8 // sizeof(float64)
 const ptrSize = 8  // sizeof(void*) on the supported 64-bit targets
 
+// peerAccessAlreadyEnabled is cudaErrorPeerAccessAlreadyEnabled / hipErrorPeerAccessAlreadyEnabled
+// (both 704): a benign status meaning a prior EnablePeerAccess already set the pair up.
+const peerAccessAlreadyEnabled = 704
+
 // Registered as a multi-device backend: devCount enumerates the visible GPUs and
 // newGPUOn binds an instance to one of them. RegisterMulti also wires the plain
 // single-instance entry (device 0), so New(backendName) and -backend cuda|hip keep
@@ -56,6 +60,12 @@ type gpuBackend struct {
 	// solver is the dense-eigensolver handle (cuSOLVER / hipSOLVER), created lazily on
 	// the device thread the first time a matrix large enough to justify it appears.
 	solver unsafe.Pointer
+
+	// peers holds the physical device indices this backend has been granted peer (NVLink)
+	// read access to, populated by EnablePeerAccess. Written on the device thread during
+	// one-time setup (before any solve), read by PeerAvailable — the do() round-trip in
+	// EnablePeerAccess sequences the two, so no lock is needed for this workload.
+	peers map[int]bool
 }
 
 // ensurePtrCap grows the pointer-array scratch to hold at least n entries.
@@ -390,6 +400,51 @@ func (b *gpuBackend) DeviceMem() (free, total uint64) {
 	return free, total
 }
 
+// EnablePeerAccess authorizes this device to read the memory of each peer that supports it,
+// so the distributed backend's mat-vec input gather can copy device-to-device (NVLink)
+// instead of staging through the host. Runs cudaDeviceEnablePeerAccess on this backend's
+// owning thread (device selection is thread-current state); a peer already enabled by an
+// earlier call reports error 704, which counts as success. Satisfies backend.PeerCopier.
+func (b *gpuBackend) EnablePeerAccess(peers []Backend) {
+	if b.peers == nil {
+		b.peers = make(map[int]bool)
+	}
+	for _, p := range peers {
+		pg, ok := p.(*gpuBackend)
+		if !ok || pg.dev == b.dev || !devCanPeer(b.dev, pg.dev) {
+			continue
+		}
+		peerDev := pg.dev
+		b.do(func() {
+			if st := devEnablePeer(peerDev); st == 0 || st == peerAccessAlreadyEnabled {
+				b.peers[peerDev] = true
+			}
+		})
+	}
+}
+
+// PeerAvailable reports whether this backend can peer-copy from `from`'s device.
+func (b *gpuBackend) PeerAvailable(from Backend) bool {
+	pg, ok := from.(*gpuBackend)
+	return ok && b.peers[pg.dev]
+}
+
+// Sync drains this backend's device stream (see PeerCopier.Sync). Runs on the owning thread.
+func (b *gpuBackend) Sync() { b.do(func() { devSync() }) }
+
+// PeerCopy2D pulls a rows×cols column-major band from src (resident on `from`, column
+// stride srcLd) into dst (resident on this backend, contiguous column stride rows),
+// device-to-device. It runs on this backend's owning thread, which already holds peer
+// read access to `from` (granted by EnablePeerAccess); cudaMemcpy2D with cudaMemcpyDefault
+// resolves both ends from their pointers under UVA. Satisfies backend.PeerCopier.
+func (b *gpuBackend) PeerCopy2D(dst, src Vector, from Backend, rows, cols, srcLd int) {
+	dp := dst.(devVec).ptr()
+	sp := src.(devVec).ptr()
+	b.do(func() {
+		devMemcpy2D(dp, rows*elemSize, sp, srcLd*elemSize, rows*elemSize, cols)
+	})
+}
+
 // GemvN: y += alpha*A*x. A is row-major rows×cols; stored column-major it is Aᵀ
 // (cols rows, rows cols, lda=cols), so A*x = op(stored, T)*x.
 func (b *gpuBackend) GemvN(alpha float64, a DeviceMat, x, y Vector) {
@@ -406,4 +461,7 @@ func (b *gpuBackend) gemv(trans bool, m devMat, alpha float64, x, y Vector) {
 	b.do(func() { blasGemv(b.h, trans, m.cols, m.rows, alpha, m.p, m.cols, dx.ptr(), 1, dy.ptr()) })
 }
 
-var _ Backend = (*gpuBackend)(nil)
+var (
+	_ Backend    = (*gpuBackend)(nil)
+	_ PeerCopier = (*gpuBackend)(nil)
+)
