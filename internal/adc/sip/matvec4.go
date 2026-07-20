@@ -1,6 +1,9 @@
 package sip
 
-import "github.com/leiaSQ/ADCgo/internal/adc/backend"
+import (
+	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
+)
 
 // matvec4.go — assembly of the CVS IP-ADC(4) secular matrix (1h | 2h1p | 3h2p),
 // dispatched from Matrix.assemble()/BuildMatrix() when order == 4. Blocks:
@@ -24,7 +27,7 @@ import "github.com/leiaSQ/ADCgo/internal/adc/backend"
 // ab3.F line 275) so the 2h1p/3h2p block diagonals stay positive (ionization
 // energies); we follow that convention here. Off-diagonal blocks are placed once
 // and realized both ways by the operator apply (GemvT), so the assembled M is
-// symmetric. The expensive integral-sum blocks are filled row-parallel (parRows),
+// symmetric. The expensive integral-sum blocks are filled row-parallel (parallel.Rows),
 // which runs in this BLAS-free phase without oversubscribing the solver.
 //
 // isADC4 reports whether this Matrix is an order-4 CVS matrix (space built by
@@ -60,7 +63,7 @@ func (mx *Matrix) coupling2_4() backend.Mat {
 	sp := mx.sp
 	ncol := sp.Begin3h2p - sp.BeginSat
 	C := backend.NewMat(sp.BeginSat, ncol)
-	parRows(sp.BeginSat, func(r int) {
+	parallel.Rows(sp.BeginSat, func(r int) {
 		p := sp.Configs[r].Occ[0]
 		for c := range ncol {
 			cfg := sp.Configs[sp.BeginSat+c]
@@ -75,7 +78,7 @@ func (mx *Matrix) coupling3_4() backend.Mat {
 	sp := mx.sp
 	ncol := len(sp.Sat3)
 	C := backend.NewMat(sp.BeginSat, ncol)
-	parRows(sp.BeginSat, func(r int) {
+	parallel.Rows(sp.BeginSat, func(r int) {
 		p := sp.Configs[r].Occ[0]
 		for c := range ncol {
 			C.Set(r, c, -mx.el.kopp4(p, sp.Sat3[c]))
@@ -91,7 +94,7 @@ func (mx *Matrix) satBlock2_4() backend.Mat {
 	cfgs := sp.Configs[sp.BeginSat:sp.Begin3h2p]
 	n := len(cfgs)
 	S := backend.NewMat(n, n)
-	parRows(n, func(r int) {
+	parallel.Rows(n, func(r int) {
 		for c := range n {
 			S.Set(r, c, mx.el.c22elem4(cfgs[r], cfgs[c]))
 		}
@@ -107,7 +110,7 @@ func (mx *Matrix) coupling24_4() backend.Mat {
 	rows := sp.Configs[sp.BeginSat:sp.Begin3h2p]
 	nr, nc := len(rows), len(sp.Sat3)
 	C := backend.NewMat(nr, nc)
-	parRows(nr, func(r int) {
+	parallel.Rows(nr, func(r int) {
 		for c := range nc {
 			C.Set(r, c, mx.el.wert2elem4(rows[r], sp.Sat3[c]))
 		}

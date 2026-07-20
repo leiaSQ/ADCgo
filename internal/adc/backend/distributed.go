@@ -338,6 +338,35 @@ func (b *distBackend) Gemm(transA, transB bool, alpha float64, a, bb BlockView, 
 	}
 }
 
+// AddPanel adds the full n×cols column-major host panel into dst (a row-partitioned panel),
+// giving each device its own row band. It backs the matrix-free DIP satellite apply under
+// -mgpu (dip/matfree_dist.go): the operator gathers the full input with Download, recomputes
+// the satellite contribution on the host, and scatter-adds it here, so the satellite region
+// never materializes on any device. dst must be a row-partitioned panel (not replicated).
+func (b *distBackend) AddPanel(dst Vector, full []float64) {
+	dv := dst.(distVec)
+	if dv.repl {
+		panic("distributed AddPanel: destination must be a row-partitioned panel")
+	}
+	cols := len(full) / b.n
+	for d := range b.ndev() {
+		if dv.part[d] == nil {
+			continue
+		}
+		rd := b.rowsOn(d)
+		band := make([]float64, rd*cols)
+		for c := range cols {
+			copy(band[c*rd:(c+1)*rd], full[c*b.n+b.bound[d]:c*b.n+b.bound[d]+rd])
+		}
+		up := b.subs[d].Upload(band)
+		// The panel is column-major with leading dimension rowsOn(d), and may have more columns
+		// allocated than this apply uses (the solver sizes panels to the max block width), so add
+		// only into the first cols columns — their rd·cols storage is contiguous at the front.
+		b.subs[d].Axpy(1, up, dv.part[d].Slice(0, rd*cols))
+		b.subs[d].Free(up)
+	}
+}
+
 // --- resident operator blocks ------------------------------------------------
 
 // distMat is a block-sparse operator block held on the host, uploaded lazily to whichever

@@ -149,6 +149,29 @@ func (c *chooser) checkDeviceFit(label string, be backend.Backend, needBytes uin
 		label, float64(needBytes)/(1<<30), float64(free)/(1<<30), c.cands[0].name)
 }
 
+// checkSubsFit verifies each sub-backend of a multi-GPU (row-partitioned) sector has room for
+// its per-partition resident share needPerGPU. Host sub-backends always pass. It mirrors
+// checkDeviceFit for the -mgpu path, which row-partitions across a set of sub-backends and has
+// no single chooser device in hand; needPerGPU is an approximate per-GPU share (the exact
+// per-partition operator split is not modeled), enough to catch a plainly-too-small GPU before
+// a mid-assembly cudaMalloc panic.
+func checkSubsFit(label string, subs []backend.Backend, needPerGPU uint64) error {
+	const margin = 256 << 20
+	for i, be := range subs {
+		dm, isDev := be.(backend.DeviceMemory)
+		if !isDev {
+			continue
+		}
+		free, _ := dm.DeviceMem()
+		if free < needPerGPU+margin {
+			return fmt.Errorf("%s: partition %d/%d needs ~%.1f GB of GPU memory (operator row-band + Lanczos panels) "+
+				"but only %.1f GB is free; use fewer -mgpu partitions on larger-memory GPUs or run with -backend gonum",
+				label, i+1, len(subs), float64(needPerGPU)/(1<<30), float64(free)/(1<<30))
+		}
+	}
+	return nil
+}
+
 // pickLanczos chooses the backend predicted fastest for one block-Lanczos sector.
 // probe measures the real apply cost on each surviving candidate.
 func (c *chooser) pickLanczos(label string, n, b, dim int, probe applyProbe) backend.Backend {

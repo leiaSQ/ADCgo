@@ -26,7 +26,7 @@ func buildH2O(t *testing.T, spin Spin) *Matrix {
 
 // TestOperatorResidentBytes: the pre-flight footprint estimate must exactly equal the
 // assembled operator's real size (nnz·8), since the backend chooser refuses a GPU based
-// on it. visitBlocks is the shared enumeration behind both, so they cannot drift.
+// on it. blockTasks is the shared enumeration behind both, so they cannot drift.
 func TestOperatorResidentBytes(t *testing.T) {
 	for _, spin := range []Spin{Singlet, Triplet} {
 		mx := buildH2O(t, spin)

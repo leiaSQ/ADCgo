@@ -4,6 +4,8 @@ import (
 	"unsafe"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/matfree"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // matfree.go — matrix-free application of the large ADC(4) coupling blocks.
@@ -21,15 +23,14 @@ import (
 // positive simply evaluates to 0. One element eval serves both the forward (y2 += G·x3)
 // and transpose (y3 += Gᵀ·x2) directions.
 
-// MatFreeMode selects whether the large ADC(4) coupling blocks are assembled densely or
-// applied matrix-free. Off (default) = always dense; On = always matrix-free; Auto =
-// matrix-free when a block's dense size exceeds the budget.
-type MatFreeMode int
+// MatFreeMode and its constants alias the shared matfree policy (internal/adc/matfree),
+// kept here so the CLI and existing callers keep using sip.MatFreeMode unchanged.
+type MatFreeMode = matfree.Mode
 
 const (
-	MatFreeOff MatFreeMode = iota
-	MatFreeAuto
-	MatFreeOn
+	MatFreeOff  = matfree.Off
+	MatFreeAuto = matfree.Auto
+	MatFreeOn   = matfree.On
 )
 
 // matFreePart is an operator block applied by recomputing its elements each mat-vec
@@ -52,17 +53,7 @@ func (mx *Matrix) SetMatFree(mode MatFreeMode, budgetBytes int64) {
 // matFreeDecision applies the mode to a block, given whether the backend supports a
 // matrix-free path for that block. Unsupported → dense (correct fallback).
 func (mx *Matrix) matFreeDecision(denseBytes int64, supported bool) bool {
-	if !supported {
-		return false
-	}
-	switch mx.matFree {
-	case MatFreeOn:
-		return true
-	case MatFreeAuto:
-		return denseBytes > mx.matFreeBudget
-	default:
-		return false
-	}
+	return matfree.Decide(mx.matFree, denseBytes, mx.matFreeBudget, supported)
 }
 
 // matFreeWert2 decides the 2h1p×3h2p coupling: supported on host (HostData) and on a
@@ -115,10 +106,10 @@ func (mx *Matrix) newWert2MatFree() matFreePart {
 			return
 		}
 
-		W := chunkWorkers(n3)
+		W := parallel.ChunkWorkers(n3)
 		partials := make([]float64, W*n2*b) // per-worker forward (2h1p) accumulators
 
-		parChunks(n3, W, func(w, c0, c1 int) {
+		parallel.Chunks(n3, W, func(w, c0, c1 int) {
 			y2 := partials[w*n2*b : (w+1)*n2*b]
 			stamp := make([]int32, n2) // per-column dedup of candidate rows
 			for i := range stamp {
@@ -192,7 +183,7 @@ func (mx *Matrix) newC22MatFree() matFreePart {
 		yout := hd.HostSlice(out.V)
 		b := in.Cols
 		ldi, ldo := in.Ld, out.Ld
-		parRows(n2, func(r int) {
+		parallel.Rows(n2, func(r int) {
 			rowCfg := rows[r]
 			for c := 0; c < n2; c++ {
 				g := el.c22elem4(rowCfg, rows[c])
@@ -247,7 +238,7 @@ func (mx *Matrix) newC22MatFreeO3() matFreePart {
 		yout := hd.HostSlice(out.V)
 		b := in.Cols
 		ldi, ldo := in.Ld, out.Ld
-		parRows(n2, func(r int) {
+		parallel.Rows(n2, func(r int) {
 			rc := rows[r]
 			for c := 0; c < n2; c++ {
 				var g float64
