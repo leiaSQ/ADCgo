@@ -262,13 +262,19 @@ type DeviceKernels interface {
 	DeviceERI(eri []float64) unsafe.Pointer
 	// UploadInts uploads an int32 config-SoA array to the device; freed via FreeDev.
 	UploadInts(x []int32) unsafe.Pointer
-	// FreeDev frees a DeviceERI/UploadInts buffer.
+	// UploadFloats uploads a flat float64 array (e.g. orbital energies) to the device;
+	// freed via FreeDev.
+	UploadFloats(x []float64) unsafe.Pointer
+	// FreeDev frees a DeviceERI/UploadInts/UploadFloats buffer.
 	FreeDev(p unsafe.Pointer)
 	// DevPtr is the device pointer backing a resident float64 Vector.
 	DevPtr(v Vector) unsafe.Pointer
 	// Wert2Apply launches the matrix-free 2h1p×3h2p coupling apply (forward + transpose),
 	// accumulating into a.Out.
 	Wert2Apply(a Wert2Args)
+	// C22Apply launches the matrix-free order-3 2h1p×2h1p satellite apply (symmetric block,
+	// a single pass — one thread per output row), accumulating into a.Out.
+	C22Apply(a C22Args)
 }
 
 // Wert2Args carries the device buffers and dimensions for DeviceKernels.Wert2Apply. The
@@ -280,6 +286,17 @@ type Wert2Args struct {
 	CI, CJ, CK, CL, CM, CSpin                         unsafe.Pointer
 	ERI                                               unsafe.Pointer
 	In, Out                                           Vector
+}
+
+// C22Args carries the device buffers and dimensions for DeviceKernels.C22Apply. K/L/Vir/Typ
+// are UploadInts results (the 2h1p config struct-of-arrays, length N2); ERI is a DeviceERI
+// result and Eps an UploadFloats result (the norb orbital energies); In/Out are resident
+// panels (device pointers via DevPtr). The 2h1p region starts at MainOff within each panel.
+type C22Args struct {
+	N2, B, LdIn, LdOut, MainOff, Norb, Nocc int
+	K, L, Vir, Typ                          unsafe.Pointer
+	ERI, Eps                                unsafe.Pointer
+	In, Out                                 Vector
 }
 
 // hostVec is the Gonum backend's Vector: a plain host slice. Slice shares storage.

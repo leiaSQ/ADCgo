@@ -24,6 +24,9 @@ int adc4_wert2_apply(int n2,int n3,int b,int ldIn,int ldOut,int mainOff,int off3
     const int* rVir,const int* rK,const int* rL,const int* rTyp,
     const int* cI,const int* cJ,const int* cK,const int* cL,const int* cM,const int* cSpin,
     const double* eri,const double* xin,double* yout);
+int adc4_c22_apply(int n2,int b,int ldIn,int ldOut,int mainOff,int norb,int nocc,
+    const int* K,const int* L,const int* Vir,const int* Typ,
+    const double* eri,const double* eps,const double* xin,double* yout);
 
 // Byte-sized device allocation/copy helpers (this cgo file's own C context; the ones in
 // cuda.go belong to a different translation unit and are not visible here).
@@ -60,6 +63,16 @@ func (b *gpuBackend) UploadInts(x []int32) unsafe.Pointer {
 	return p
 }
 
+// UploadFloats uploads a flat float64 array (e.g. orbital energies); freed via FreeDev.
+func (b *gpuBackend) UploadFloats(x []float64) unsafe.Pointer {
+	var p unsafe.Pointer
+	b.do(func() {
+		p = C.k_malloc(C.size_t(len(x) * elemSize))
+		C.k_h2d(p, unsafe.Pointer(&x[0]), C.size_t(len(x)*elemSize))
+	})
+	return p
+}
+
 // FreeDev frees a DeviceERI/UploadInts buffer.
 func (b *gpuBackend) FreeDev(p unsafe.Pointer) { b.do(func() { C.k_free(p) }) }
 
@@ -77,5 +90,18 @@ func (b *gpuBackend) Wert2Apply(a Wert2Args) {
 			(*C.int)(a.RVir), (*C.int)(a.RK), (*C.int)(a.RL), (*C.int)(a.RTyp),
 			(*C.int)(a.CI), (*C.int)(a.CJ), (*C.int)(a.CK), (*C.int)(a.CL), (*C.int)(a.CM), (*C.int)(a.CSpin),
 			(*C.double)(a.ERI), xin, yout)
+	})
+}
+
+// C22Apply launches the matrix-free order-3 2h1p×2h1p satellite apply (single symmetric pass)
+// on the device-owning thread, accumulating into a.Out.
+func (b *gpuBackend) C22Apply(a C22Args) {
+	xin := (*C.double)(a.In.(devVec).ptr())
+	yout := (*C.double)(a.Out.(devVec).ptr())
+	b.do(func() {
+		C.adc4_c22_apply(C.int(a.N2), C.int(a.B), C.int(a.LdIn), C.int(a.LdOut),
+			C.int(a.MainOff), C.int(a.Norb), C.int(a.Nocc),
+			(*C.int)(a.K), (*C.int)(a.L), (*C.int)(a.Vir), (*C.int)(a.Typ),
+			(*C.double)(a.ERI), (*C.double)(a.Eps), xin, yout)
 	})
 }
