@@ -1,0 +1,32 @@
+# ADCgo DIP-ADC(2) double ionization of uracil + 2 water, DZ (no polarization).
+#
+# Small-basis companion to examples/uracil2W (DZP, Dunning-Hay). The DZP whole-
+# band DIP operator is ~1.5 TB resident (block-sparse operator dominates, NOT the
+# Lanczos panels) — it exceeds even a full 8xH200 node, and banding does not
+# shrink it. Dropping polarization (DZ) collapses the virtual space and with it
+# the operator, so the whole band fits the H200 pool via -mgpu.
+#
+# Pipeline (MOL=uracil2W_dz):
+#   MOL=uracil2W_dz sbatch scripts/uracil_dump.sbatch            # DZ FCIDUMP (CPU/pyscf)
+#   MOL=uracil2W_dz MGPU=8 sbatch --gres=gpu:H200:8 --mem=480gb scripts/uracil_dip.sbatch
+#
+&geometry
+  file   zmat
+&basis
+  name   dz                    # named pyscf basis; spherical GTOs, no polarization
+&scf
+  charge 0
+  symmetry off                 # C1, matching the DZP run (adapt off)
+  max_cycle 200
+&active
+  active 11 to 116             # freeze the 10 core 1s MOs, as the DZP run did (11 to 190)
+&output
+  fcidump  uracil2W_dz.fcidump
+  sidecar  uracil2W_dz.mo.json
+  manifest uracil2W_dz.ref.json
+&adc
+  # Whole double-ionization band, faithful short-recurrence Lanczos, row-
+  # partitioned across the GPU pool (uracil_dip.sbatch drives -mgpu from $MGPU;
+  # these args feed the standalone scripts/adcgo_run.sh path).
+  args   -dip -order 2 -solver lanczos-lowmem -lowmem-block 0 -spin both -blocks 200 -backend cuda
+  sym    all                   # C1: one spatial irrep

@@ -208,6 +208,122 @@ func (mx *Matrix) newC22MatFree() matFreePart {
 	return matFreePart{apply: apply, release: func() {}}
 }
 
+// matFreeC22O3 decides the order-3 2h1p×2h1p satellite block (satBlock): supported
+// matrix-free on the host (HostData) and on a device backend that provides the c22 kernel
+// (DeviceKernels). Unlike matFreeC22 (order 4, host-only) this has a device path, because
+// the order-3 element (c22diag/c22off) is a fixed set of ERI lookups — no SUM1 — so it maps
+// to a GPU kernel (adc4_kernels.cu c22_apply).
+func (mx *Matrix) matFreeC22O3(denseBytes int64) bool {
+	_, host := mx.be.(backend.HostData)
+	_, dev := mx.be.(backend.DeviceKernels)
+	return mx.matFreeDecision(denseBytes, host || dev)
+}
+
+// newC22MatFreeO3 builds the matrix-free applier for the order-3 2h1p×2h1p satellite block —
+// the on-the-fly equivalent of satBlock (matvec.go): the diagonal is c22diag, the off-diagonal
+// is c22off. It dispatches to the GPU kernel when the backend supports it, else runs on the
+// host parallelized over output rows (each row owns its output cell — no reduction).
+//
+// The block is symmetric and sits on the operator diagonal, so it is applied in a single pass
+// (out[main+r] += Σ_c S(r,c)·in[main+c]); there is no transpose direction. The order-3 element
+// is DIRECTIONAL — c22off(row,col) evaluates its k==l ("row single") and m==n ("col single")
+// branches differently, and the dense satBlock fills S(r,c)=S(c,r)=c22off(cfg_r,cfg_c) only for
+// r<c — so element(r,c) must be evaluated with the lower-indexed config as the row (lo=min(r,c))
+// to stay bit-for-bit with the dense block. (The ADC(4) newC22MatFree can ignore this because
+// c22elem4 is symmetric under argument swap.)
+func (mx *Matrix) newC22MatFreeO3() matFreePart {
+	if dk, ok := mx.be.(backend.DeviceKernels); ok {
+		return mx.newC22MatFreeO3Device(dk)
+	}
+	sp := mx.sp
+	main := sp.BeginSat
+	rows := sp.Configs[main:] // order-3 2h1p configs run to the end of Configs (no 3h2p)
+	n2 := len(rows)
+	el := mx.el
+	hd := mx.be.(backend.HostData)
+
+	apply := func(in, out backend.BlockView) {
+		xin := hd.HostSlice(in.V)
+		yout := hd.HostSlice(out.V)
+		b := in.Cols
+		ldi, ldo := in.Ld, out.Ld
+		parRows(n2, func(r int) {
+			rc := rows[r]
+			for c := 0; c < n2; c++ {
+				var g float64
+				switch {
+				case c == r:
+					g = el.c22diag(rc)
+				case r < c:
+					g = el.c22off(rc, rows[c]) // row = lower index
+				default:
+					g = el.c22off(rows[c], rc) // row = lower index (c < r)
+				}
+				if g == 0 {
+					continue
+				}
+				for j := 0; j < b; j++ {
+					yout[main+r+j*ldo] += g * xin[main+c+j*ldi]
+				}
+			}
+		})
+	}
+	return matFreePart{apply: apply, release: func() {}}
+}
+
+// newC22MatFreeO3Device is the GPU (cuda) applier for the order-3 2h1p×2h1p satellite block:
+// it uploads the 2h1p config struct-of-arrays, the flat ERI tensor, and the orbital energies
+// once, then each mat-vec launches the c22 recompute kernel (adc4_kernels.cu c22_apply),
+// holding zero dense-block VRAM. The kernel is bit-for-bit the CPU element evaluation
+// (c22diag/c22off, same lo=min(r,c) directionality); validate with the GPU parity test on
+// real hardware (TestC22MatFreeO3DeviceParity).
+func (mx *Matrix) newC22MatFreeO3Device(dk backend.DeviceKernels) matFreePart {
+	sp := mx.sp
+	main := sp.BeginSat
+	rows := sp.Configs[main:]
+	n2 := len(rows)
+	norb, nocc := sp.Norb, mx.el.nocc
+
+	// Config struct-of-arrays (int32), uploaded once. K=Occ[0], L=Occ[1], Vir, Typ.
+	rK, rL, rVir, rTyp := make([]int32, n2), make([]int32, n2), make([]int32, n2), make([]int32, n2)
+	for r, c := range rows {
+		rK[r], rL[r], rVir[r], rTyp[r] = int32(c.Occ[0]), int32(c.Occ[1]), int32(c.Vir), int32(c.Typ)
+	}
+
+	// Flat ERI tensor eri[((a·n+c)·n+b)·n+d] = e.v(a,b,c,d) = ints.Eri(a,c,b,d) (== the wert2
+	// layout, d_eri in adc4_kernels.cu).
+	eri := make([]float64, norb*norb*norb*norb)
+	for p := 0; p < norb; p++ {
+		for q := 0; q < norb; q++ {
+			for r := 0; r < norb; r++ {
+				base := ((p*norb+q)*norb + r) * norb
+				for s := 0; s < norb; s++ {
+					eri[base+s] = mx.el.ints.Eri(p, q, r, s)
+				}
+			}
+		}
+	}
+
+	dK, dL, dVir, dTyp := dk.UploadInts(rK), dk.UploadInts(rL), dk.UploadInts(rVir), dk.UploadInts(rTyp)
+	dERI := dk.DeviceERI(eri)
+	dEps := dk.UploadFloats(mx.el.eps)
+
+	apply := func(in, out backend.BlockView) {
+		dk.C22Apply(backend.C22Args{
+			N2: n2, B: in.Cols, LdIn: in.Ld, LdOut: out.Ld,
+			MainOff: main, Norb: norb, Nocc: nocc,
+			K: dK, L: dL, Vir: dVir, Typ: dTyp,
+			ERI: dERI, Eps: dEps, In: in.V, Out: out.V,
+		})
+	}
+	release := func() {
+		for _, p := range []unsafe.Pointer{dK, dL, dVir, dTyp, dERI, dEps} {
+			dk.FreeDev(p)
+		}
+	}
+	return matFreePart{apply: apply, release: release}
+}
+
 // newWert2MatFreeDevice is the GPU (cuda) applier for the 2h1p×3h2p coupling: it uploads
 // the config struct-of-arrays, the flat ERI tensor, and the spin table once, then each
 // mat-vec launches the recompute kernel (adc4_kernels.cu, both directions), holding zero

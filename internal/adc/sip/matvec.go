@@ -133,32 +133,31 @@ func (mx *Matrix) assemble() *assembledOp {
 	}
 	sp := mx.sp
 	main := sp.BeginSat
+	nSat := sp.Size() - main
 	var parts []placement
+	var mfree []matFreePart
 	add := func(m backend.Mat, r0, c0 int, diag bool) {
 		parts = append(parts, placement{A: mx.be.UploadMat(m), RowOff: r0, ColOff: c0, Diag: diag})
 	}
 	if main > 0 {
 		add(mx.mainBlock(), 0, 0, true)
-		if sp.Size() > main {
+		if nSat > 0 {
 			add(mx.coupling(), 0, main, false)
 		}
 	}
-	if sp.Size() > main {
-		add(mx.satBlock(), main, main, true)
-	}
-	batches := backend.PlanBatches(parts)
-	widest := 0
-	for _, b := range batches {
-		if len(b.Blocks) > widest {
-			widest = len(b.Blocks)
+	if nSat > 0 {
+		// The 2h1p×2h1p satellite block is nSat²·8 bytes dense — terabytes for a large
+		// sector (melanin: nSat≈5.2e5 → ~2 TB, which no host RAM or single GPU holds).
+		// Apply it matrix-free (recompute c22diag/c22off each mat-vec, zero resident bytes,
+		// GPU kernel when available) when requested or when the dense block exceeds the
+		// budget; else assemble it densely as before.
+		if mx.matFreeC22O3(int64(nSat) * int64(nSat) * 8) {
+			mfree = append(mfree, mx.newC22MatFreeO3())
+		} else {
+			add(mx.satBlock(), main, main, true)
 		}
 	}
-	return &assembledOp{
-		parts: parts, batches: batches,
-		sa: make([]backend.DeviceMat, widest),
-		sb: make([]backend.BlockView, widest),
-		sc: make([]backend.BlockView, widest),
-	}
+	return finalizeOp(parts, nil, mfree)
 }
 
 // Release frees the backend-resident operator blocks (a no-op on host backends).

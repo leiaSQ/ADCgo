@@ -2,14 +2,19 @@
 # melanin SIP-ADC(3) on bwForCluster Helix — checkpointing, self-resubmitting daisychain.
 # Reads the shared FCIDUMP from $ADCGO_WS (scripts/dump_melanin.sbatch, or submit_melanin.sh).
 #
-# MEMORY / GPU: the SIP block-Lanczos basis is ~45 GB (n≈518 k, blocks=200), which does NOT
-# fit a 40 GB A100. It needs an 80 GB+ GPU. H200 is the unambiguous target — there is no
+# MEMORY / GPU: the 2h1p×2h1p satellite block is dense-infeasible at the full active space
+# (nSat≈5.2e5 → nSat²·8 ≈ 2 TB — no host RAM or single GPU holds it), so this job runs it
+# MATRIX-FREE (-matfree auto): the c22 element is recomputed on the fly by the CUDA c22_apply
+# kernel (adc4_kernels.cu), holding zero dense-block VRAM. Resident on the GPU is then the flat
+# norb⁴ ERI tensor (~16 GB) + the block-Lanczos basis (~45 GB, n≈518 k, blocks=200) ≈ 60 GB —
+# fits a 141 GB H200 with headroom, but NOT a 40 GB A100. H200 is the target — there is no
 # small-memory H200, so --gres=gpu:H200:1 can only land on the 141 GB cards (and H200 has
 # fast fp64). Needs the sm_90 build (scripts/build_adcgo_cuda_helix). To use A100-80 instead,
 # override the gres at submit time — `sbatch --gres=... melanin_sip.sbatch` (or set
 # ADCGO_SIP_GRES for scripts/submit_melanin.sh, which passes it through). Note plain
 # "gpu:A100:1" may schedule a 40 GB gpu4 A100 and OOM, so a node feature/constraint is
-# required for A100-80; confirm the correct spelling with Helix support.
+# required for A100-80; confirm the correct spelling with Helix support. NB: without -matfree
+# the order-3 solve assembles the dense 2 TB satBlock and is OOM-killed on host at startup.
 #
 # DAISYCHAIN: the solve checkpoints its Krylov state to $ADCGO_WS every -checkpoint-every
 # blocks and on a SIGUSR1 (raised by SLURM --signal=B:USR1@600, 10 min before the walltime).
@@ -81,6 +86,7 @@ nvidia-smi -L 2>/dev/null || true
 echo "#begin<adc>"
 "$ADCGO" -fcidump "$fcidump" -mo "$mo" \
     -sip -order 3 -sigma infinite -solver lanczos -blocks 200 -backend cuda -sym all \
+    -matfree auto \
     -checkpoint "$ckpt" -checkpoint-every "$CHECKPOINT_EVERY" \
     -out "$WS/melanin.sip.json" &
 adc_pid=$!
