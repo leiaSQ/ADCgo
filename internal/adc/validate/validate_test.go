@@ -34,6 +34,7 @@ import (
 	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
 	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
 	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
+	"github.com/leiaSQ/ADCgo/internal/adc/matfree"
 	"github.com/leiaSQ/ADCgo/internal/adc/mp"
 	"github.com/leiaSQ/ADCgo/internal/adc/refout"
 )
@@ -255,4 +256,51 @@ func TestFixtureMatchesSolver(t *testing.T) {
 			t.Errorf("state %d ps: solver %.6f vs fixture %.6f", i, sec.States[i].PSPercent, want[i].PS)
 		}
 	}
+}
+
+// TestMatFreeMatchesDenseSolve drives the real iterative block-Lanczos solver (which applies
+// the operator through ApplyBlock) over the DZP ¹A₁ sector with the 3h1p↔3h1p satellite region
+// applied matrix-free, and checks it reproduces the fully-dense operator's spectrum. This is
+// the end-to-end matrix-free validation: SolveDense goes through BuildMatrix and would bypass
+// the matrix-free path, so a genuine apply-driven solve is used here. Both runs share identical
+// Krylov options over numerically-equal operators, so the eigenvalues agree to solver noise.
+func TestMatFreeMatchesDenseSolve(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in-process re-solve in -short mode")
+	}
+	d, err := fcidump.ReadFile(testdata("h2o_dzp.fcidump"))
+	if err != nil {
+		t.Fatalf("read fcidump: %v", err)
+	}
+	nocc := mp.NOcc(d)
+	eps := mp.OrbitalEnergies(d, nocc)
+	be := backend.Gonum{}
+	ints := integrals.New(d, nocc, d.OrbSym)
+	sp := dip.NewSpace(nocc, d.NORB, d.OrbSym, 0, dip.Singlet) // ¹A₁
+	opts := lanczos.Options{MaxBlocks: 40}
+
+	dense := lanczos.Solve(dip.New(sp, ints, eps, be), be, opts)
+
+	mfMx := dip.New(sp, ints, eps, be)
+	mfMx.SetMatFree(matfree.On, 0)
+	// Confirm matrix-free actually engaged: the satellite region no longer contributes to the
+	// resident footprint, so it must be strictly smaller than the dense operator's.
+	if denseBytes, mfBytes := dip.New(sp, ints, eps, be).OperatorResidentBytes(), mfMx.OperatorResidentBytes(); mfBytes >= denseBytes {
+		t.Fatalf("matrix-free not engaged: resident bytes %d >= dense %d", mfBytes, denseBytes)
+	}
+	free := lanczos.Solve(mfMx, be, opts)
+
+	if len(dense.Values) != len(free.Values) {
+		t.Fatalf("root count: dense %d, matrix-free %d", len(dense.Values), len(free.Values))
+	}
+	var maxDiff float64
+	for i := range dense.Values {
+		if de := math.Abs(dense.Values[i] - free.Values[i]); de > maxDiff {
+			maxDiff = de
+		}
+	}
+	if maxDiff > 1e-9 {
+		t.Errorf("matrix-free vs dense eigenvalues: max |Δ| = %.3e eV (want <= 1e-9)", maxDiff)
+	}
+	t.Logf("¹A₁ DZP: %d roots, matrix-free vs dense max |Δ| = %.2e", len(dense.Values), maxDiff)
 }

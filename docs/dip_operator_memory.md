@@ -1,6 +1,9 @@
 # DIP/SIP GPU memory — the resident block-sparse operator is the real wall
 
-**Status:** design note / future work. Companion to
+**Status:** IMPLEMENTED (host path). The fix this note proposed — a matrix-free
+3h1p↔3h1p satellite apply, plus a parallel operator walk — has shipped for the
+host backend; see [Implementation](#implementation-shipped) at the end. The
+analysis below is kept as the (still-correct) statement of the problem. Companion to
 [`dip_lowmem_lanczos.md`](dip_lowmem_lanczos.md). That note fixed the *Krylov
 basis* cost (the low-memory Lanczos keeps only ~4 panels resident instead of the
 whole basis). This note records the wall that shows up **once the basis is no
@@ -110,10 +113,70 @@ replaces is a one-time multi-hundred-GB transfer; removing the resident-operator
 ceiling is very likely worth the extra flops. Validate against theADCcode
 `adc2dip` sticks on a small case (h2o DIP, `examples/DIP_h2o`) before scaling.
 
+## Implementation (shipped)
+
+Both fixes this note proposed have landed for the **host** backend:
+
+**Parallel operator walk.** `parRows`/`parChunks`/`chunkWorkers` were promoted out
+of `sip` into a shared `internal/adc/parallel` package. `matvec.go`'s walk is now a
+task-structured `mainCouplingTasks`/`satelliteTasks` (one task per 3h1p row-group);
+`assemble` and `OperatorResidentBytes` evaluate the tasks across a worker pool into
+disjoint per-task slots, concatenated in task order so the dense `parts` are
+byte-identical to the old serial walk. The single-threaded sizing/assembly drag is gone.
+
+**Matrix-free satellite region.** The `-matfree {off|auto|on}` / `-maxmem` mechanism was
+generalized from CVS-ADC(4) to DIP (`internal/adc/matfree` holds the shared `Mode`/`Decide`
+policy). `internal/adc/dip/matfree.go` applies the 3h1p↔3h1p satellite blocks
+(`jiiLKK`/`ijkMLL`/`ijkLMN`) on the fly and never stores them: cheap per-block gates
+(`…Gate`, occupied-index Kronecker-δ + virtual-group sizes, no integrals) size and prune;
+occupied-index candidate buckets cut each apply to O(G·k) instead of O(G²) group-pairs; the
+symmetric operator is realized in two barrier-separated passes (forward over row-groups,
+transpose over col-groups) with disjoint per-worker output bands, so no locking or reduction.
+`OperatorResidentBytes` drops the satellite term when matrix-free, and the `-mgpu` path gained
+the pre-flight guard (`checkSubsFit`) it previously lacked. With the satellite region
+matrix-free the resident footprint collapses to the panels + main/coupling blocks.
+
+**Validation.** `internal/adc/dip/matfree_test.go` checks ApplyFull/ApplyBlock/
+ApplyBlockSatellite matrix-free == dense (≤1e-10), exact gate sizing, and an exhaustive
+gate/shared-occ audit; `validate` drives the real block-Lanczos solver over the DZP ¹A₁
+reference sector matrix-free and reproduces the dense spectrum to **1.95e-14 eV** (139 roots,
+theADCcode-matched integrals). Under the chaotic short-recurrence `lanczos-lowmem` solver the
+dominant main lines still agree to ~1e-12 eV; individual low-pole-strength satellite lines
+diverge as expected (short-recurrence ghost sensitivity, not a matrix-free error).
+
+**Phase C (shipped, host-validated).** Both Phase-C pieces have landed:
+
+- *CUDA `DeviceKernels` twin.* The satellite region is reformulated as a per-output-scalar
+  apply (`dip/satelem.go` element functions + `dip/satscalar.go` one-thread-per-row driver),
+  pinned bit-close to the dense blocks by `TestSatelliteScalarMatchesDense` /
+  `TestSatelliteScalarApplyEqualsDense`. `backend/adc2dip_kernels.cu` is a line-for-line
+  transcription of that scalar form; the `backend.DeviceKernels.DipSatApply` binding
+  (`cuda_kernels.go`) and the device applier (`dip/matfree_device.go`) upload the config SoA +
+  flat ERI once and launch the kernel each mat-vec. `matFreeSatellite` now accepts a
+  `DeviceKernels` backend. On-hardware parity: `dip/matfree_cuda_test.go` (cuda-tagged).
+- *`-mgpu` + matrix-free composition.* `distBackend` gained `PanelScatterAdd.AddPanel`; the DIP
+  satellite runs gather-apply-scatter under the row-partitioned backend (`dip/matfree_dist.go`):
+  the full input is gathered to host, the satellite contribution recomputed with the same
+  per-scalar kernel, and scatter-added back into the partitioned output — so the dense
+  main/coupling blocks and Krylov panels stay partitioned across devices while the multi-TB
+  satellite region is never materialized. Validated over gonum sub-backends
+  (`TestSatelliteMatFreeDistributedEqualsDense`) and end-to-end (`-mgpu 2 -matfree on`: main
+  lines match the dense solve).
+
+**Remaining (Phase C follow-up):** the `-mgpu` satellite currently recomputes on the host
+(gather-apply-scatter); a per-partition *on-device* apply — each GPU recomputing only its own
+output band with the CUDA kernel — is the performance step for the real 8×H200 melanin run.
+The memory ceiling (the point of this note) is already removed.
+
 ## Pointers
 
-- Operator materialization + sizing: `internal/adc/dip/matvec.go`
-  (`assemble`, `visitBlocks`, `OperatorResidentBytes`).
+- Operator materialization + sizing + parallel walk: `internal/adc/dip/matvec.go`
+  (`assemble`, `mainCouplingTasks`/`satelliteTasks`, `OperatorResidentBytes`).
+- Matrix-free satellite apply (host block GEMV): `internal/adc/dip/matfree.go`; shared policy
+  `internal/adc/matfree`; shared worker pool `internal/adc/parallel`.
+- Matrix-free satellite per-scalar form (CUDA source of truth + device/distributed paths):
+  `internal/adc/dip/satelem.go`, `satscalar.go`, `matfree_device.go`, `matfree_dist.go`;
+  kernel `internal/adc/backend/adc2dip_kernels.cu`; binding `internal/adc/backend/cuda_kernels.go`.
 - Pre-flight guard (single-GPU path only): `cmd/adcgo/dispatch.go`
   (`checkDeviceFit`); the `-mgpu` path (`main.go` `solveDIPSectorMGPU`) has none —
   add one there as part of this work.

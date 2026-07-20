@@ -1,14 +1,17 @@
 # DIP-ADC(2) low-memory Lanczos — the gap vs. theADCcode
 
-**Status:** design note / future work. Records why ADCgo's full-band DIP-ADC(2)
-block-Lanczos is not runnable on the melanin problem while theADCcode's is, and
-sketches the low-memory variant (built around the existing `Result.Spurious()`
-ghost filter) that would close the gap.
+**Status:** IMPLEMENTED (`-solver lanczos-lowmem`, `internal/adc/lanczos/lowmem.go`
++ `bandeig.go`). This note originally recorded why ADCgo's full-band DIP-ADC(2)
+block-Lanczos was not runnable on the melanin problem while theADCcode's was, and
+sketched the low-memory variant. That variant now exists; the sections below keep
+the original analysis (still the correct explanation of the gap) and the
+[Implementation](#what-was-implemented) / [Findings](#findings) sections at the end
+record what shipped and what the work discovered.
 
 Written 2026-07 while splitting the melanin pipeline into DIP=Davidson /
 SIP=Lanczos (see `scripts/HELIX.md`). The immediate melanin DIP runs use
-block-Davidson (lowest `-nroots` roots), which sidesteps this entirely; this
-note is for whoever later wants the *whole* double-ionization band.
+block-Davidson (lowest `-nroots` roots); the low-memory solver is for whoever
+wants the *whole* double-ionization band.
 
 ## The gap in one line
 
@@ -131,14 +134,63 @@ reorth. For a first cut, run the low-memory DIP without checkpointing (it should
 be fast enough per matvec that a single 120 h allocation covers a useful band),
 and add short-recurrence checkpointing only if walltime becomes the limit.
 
+## What was implemented
+
+`func SolveLowMem(op Operator, be backend.Backend, opts Options) Result`
+(`internal/adc/lanczos/lowmem.go`), selected by `-solver lanczos-lowmem`, with the
+block width set by `-lowmem-block` (`Options.LowMemBlock`; 0 → the main-space size).
+Two modes, auto-chosen:
+
+- **Mode B — the faithful port (default, block = main).** Short 3-block recurrence
+  (only `[prev|cur]` + a work panel resident), Tarantelli's subspace-iteration gate
+  (`dip.Matrix.ApplyBlockSatellite` — the 3h1p↔3h1p sub-operator, applied after the
+  first two blocks), the banded eigensolver `bandeig.go` (a pure-Go port of
+  Tarantelli's `bnd2td`+`tddiag` that materializes only the `2·band` top/bottom
+  eigenvector rows), and the `Result.Spurious(1e-9)` ghost filter. Resident cost
+  ≈ 3·(n×main) — a fat-memory CPU node. Bit-reproducible against theADCcode. On H2O
+  it matches the dense main lines and pole strengths exactly (`TestSolveLowMemModeB_MatchesDense`).
+
+- **Mode A — device-frugal full reorthogonalization (block < main).** Keeps only
+  three n×block panels on the compute backend and the *full basis on the host*,
+  reorthogonalizing each new block against all of it (streamed a block at a time).
+  Numerically exact at sufficient Krylov dimension (`TestSolveLowMemModeA_FullExact`),
+  and the eigensolve is a plain dense `SymEig` of the small projected matrix with
+  main components recovered from a retained `main×dim` host slice (`Qmain·s`).
+
+The banded eigensolver is validated on random banded matrices against dense `SymEig`
+for both eigenvalues and the top/bottom partial-vector slices
+(`bandeig_test.go`); the satellite gate against a masked dense operator
+(`dip/satellite_test.go`).
+
+## Findings
+
+The implementation work resolved the note's "open design question" (block width /
+`n` tiling for a GPU) with a negative result worth recording:
+
+- **The full main-space start block is not optional — it is what carries pole
+  strengths.** A block *smaller* than the main space (the GPU "small-block" idea)
+  cannot span every pole-carrying direction, so some DIP main lines have *zero*
+  overlap with its Krylov space and never appear — not "converge slowly", never
+  (measured on H2O: a block-5 run saturates its reachable invariant subspace with
+  ~4 of 14 singlet main lines permanently missing, regardless of iteration count).
+  This is exactly why theADCcode seeds with the whole main space. So the small-block
+  Mode A is sound (exact on what it reaches) but **structurally incomplete for the
+  pole-strength band**; it is a device-frugal solver for medium systems / previews,
+  not a melanin band solver.
+
+- **Therefore the melanin DIP band needs block = main, which needs a fat-memory CPU
+  node (Mode B), not a GPU.** Mode B's ≈3·(n×main) ≈ 0.4–0.6 TB fits a 1 TB+ node;
+  no block-width shrink or single-GPU trick delivers the complete band. `n`-tiling
+  across GPUs (distributed matvec + allreduce) remains the only untried route to a
+  GPU full-band solve, and is a much larger undertaking than Mode B.
+
 ## Bottom line
 
-- DIP full-band Lanczos on melanin is blocked by ~25–36 TB of basis storage —
-  algorithmic, not hardware. **Do not** file a higher-node project request
-  expecting it to run; no node is large enough.
-- Near-term: DIP = block-Davidson (lowest roots), SIP = full-reorth Lanczos with
-  checkpointing. Already shipped.
-- To get the *whole* DIP band: implement `SolveLowMem` (short recurrence + banded
-  solver + `Spurious()` filter), mirroring theADCcode. The ghost filter already
-  exists (`lanczos.go:559`); the open design question is the block width / `n`
-  tiling that keeps 3 panels resident.
+- DIP full-band Lanczos on melanin is blocked by ~25–36 TB of *basis* storage —
+  algorithmic, not hardware. The low-memory driver removes that: Mode B keeps only
+  three n×main panels (~0.4–0.6 TB), runnable on a fat-memory CPU node.
+- Near-term melanin pipeline unchanged: DIP = block-Davidson (lowest roots),
+  SIP = full-reorth Lanczos with checkpointing. `-solver lanczos-lowmem` (Mode B) is
+  the path to the *whole* DIP band on a fat CPU node.
+- The GPU "small-block" idea does **not** yield the complete pole-strength band (see
+  Findings); it survives only as Mode A, a device-frugal solver for smaller cases.

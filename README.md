@@ -223,7 +223,10 @@ a full 8×H200 NVLink/NVSwitch node.
 
 `-mgpu` requires `-dip -solver lanczos-lowmem -lowmem-block 0` and a fast inter-GPU link.
 Sectors run **serially**, each spanning the whole pool — in contrast to `-gpus`, which runs
-*independent* sectors concurrently, one GPU each. Build the CUDA (or HIP) binary, then:
+*independent* sectors concurrently, one GPU each. Row-partitioning divides the operator by the
+pool size (≤ 8), so the multi-TB satellite region of a whole-band melanin run still overflows the
+node — pair `-mgpu` with [`-matfree on`](#matrix-free-operator---matfree), which recomputes that
+region instead of storing it. Build the CUDA (or HIP) binary, then:
 
 ```sh
 # row-partition each DIP sector of melanin across all 8 H200 of an NVLink node
@@ -234,6 +237,31 @@ adcgo-cuda -fcidump melanin.fcidump -dip -order 2 \
 
 See [`scripts/melanin_dip_mgpu.sbatch`](scripts/melanin_dip_mgpu.sbatch) for a complete
 SLURM job (`--gres=gpu:H200:8`).
+
+### Matrix-free operator — `-matfree`
+
+By default the block-sparse ADC operator is **materialized**: every nonzero block is assembled
+once and kept resident, so each mat-vec is a batched GEMM. For a large sector the dominant
+blocks — the DIP 3h1p↔3h1p satellite region, the SIP ADC(4) 2h1p×3h2p / ADC(3) 2h1p² coupling —
+are the resident-memory ceiling: hundreds of GB to several TB, larger than a whole 8×H200 node
+for melanin. `-matfree on` **recomputes those blocks on the fly from the MO integrals each
+mat-vec and never stores them**, collapsing the resident footprint to the Krylov panels plus the
+small main/coupling blocks (the direct-σ approach theADCcode uses). `-matfree auto` decides per
+block by dense size against `-maxmem`; `off` (default) keeps everything materialized.
+
+It trades recompute per mat-vec for the removed memory ceiling, and runs everywhere the dense
+path does: on the host, on a GPU (`-backend cuda`, a custom recompute kernel reading a
+device-resident ERI tensor), and composed with `-mgpu` (the partitioned dense blocks and panels
+stay on-device while the satellite region is recomputed). This is what puts a **whole-band**
+DIP or SIP run of a large system on a single node without dropping polarization or freezing extra
+orbitals.
+
+```sh
+# whole-band DIP melanin: matrix-free satellite region, row-partitioned across 8 GPUs
+adcgo-cuda -fcidump melanin.fcidump -dip -order 2 \
+    -solver lanczos-lowmem -lowmem-block 0 -mgpu 8 -matfree on \
+    -backend cuda -spin both -sym all -blocks 200
+```
 
 ## Plotting
 
@@ -301,6 +329,8 @@ for overlays live in [`testdata/reference/spectra/`](testdata/reference/spectra)
 | `-backend B` | gonum | `gonum` \| `hip` \| `cuda` \| `auto` (build-tag gated) |
 | `-gpus N` | 0 | `-backend cuda\|hip`: max GPUs for concurrent per-sector solves (0 = all visible) |
 | `-mgpu N` | 0 | `-dip -solver lanczos-lowmem -lowmem-block 0`: row-partition ONE sector across N GPUs (needs NVLink); sectors run serially |
+| `-matfree M` | off | recompute the memory-dominant operator blocks each mat-vec instead of storing them: `off` \| `auto` \| `on`. DIP 3h1p↔3h1p satellite region and SIP ADC(4)/ADC(3) coupling; host, GPU (`-backend cuda`), and `-mgpu` |
+| `-maxmem GB` | 4 | `-matfree auto` threshold: a block whose dense size exceeds this many GB is applied matrix-free |
 | `-ps-thresh P` | 1.0 | drop states with pole strength below P percent |
 | `-coeff-thresh C` | 0.1 | drop leading components with \|coeff\| below C |
 | `-spectrum` | off | emit a stick spectrum: decay channels (DIP + `-mo`) or per orbital (SIP); DIP without `-mo` falls back to `-bare` |

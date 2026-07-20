@@ -4,17 +4,18 @@
 // kernels in adc4_kernels.cu (compiled by nvcc into adc4_kernels.o and linked here). This
 // is the device path for the matrix-free 2h1p×3h2p coupling (internal/adc/sip matfree.go).
 //
-// The object must be built before `go build -tags cuda`:
+// The objects must be built before `go build -tags cuda`:
 //
 //go:generate nvcc -O3 -std=c++14 -c adc4_kernels.cu -o adc4_kernels.o
+//go:generate nvcc -O3 -std=c++14 -c adc2dip_kernels.cu -o adc2dip_kernels.o
 //
-// It is a build artifact (git-ignored). See docs/adc4_matfree_gpu.md. Compiles and links
-// against the CUDA toolkit here; it is exercised (parity test) on an NVIDIA GPU.
+// They are build artifacts (git-ignored). See docs/adc4_matfree_gpu.md. Compiles and links
+// against the CUDA toolkit here; they are exercised (parity tests) on an NVIDIA GPU.
 
 package backend
 
 /*
-#cgo LDFLAGS: ${SRCDIR}/adc4_kernels.o -L/usr/local/cuda/lib64 -lcudart -lstdc++
+#cgo LDFLAGS: ${SRCDIR}/adc4_kernels.o ${SRCDIR}/adc2dip_kernels.o -L/usr/local/cuda/lib64 -lcudart -lstdc++
 #include <cuda_runtime.h>
 #include <stdlib.h>
 
@@ -27,6 +28,15 @@ int adc4_wert2_apply(int n2,int n3,int b,int ldIn,int ldOut,int mainOff,int off3
 int adc4_c22_apply(int n2,int b,int ldIn,int ldOut,int mainOff,int norb,int nocc,
     const int* K,const int* L,const int* Vir,const int* Typ,
     const double* eri,const double* eps,const double* xin,double* yout);
+
+// Launcher defined in adc2dip_kernels.cu (extern "C").
+int adc2_dip_sat_apply(int nsat,int njii,int nijk,int b,int ldIn,int ldOut,
+    int mainOff,int norb,int parts,int spin,
+    const int* rTyp,const int* rGrp,const int* rPart,const int* rVir,
+    const int* jO0,const int* jO1,const int* jSt,const int* jVoff,const int* jNv,const int* jVir,
+    const int* iO0,const int* iO1,const int* iO2,const int* iSt,const int* iVoff,const int* iNv,const int* iVir,
+    const double* eri,const double* eps,const int* osym,
+    const double* xin,double* yout);
 
 // Byte-sized device allocation/copy helpers (this cgo file's own C context; the ones in
 // cuda.go belong to a different translation unit and are not visible here).
@@ -103,5 +113,20 @@ func (b *gpuBackend) C22Apply(a C22Args) {
 			C.int(a.MainOff), C.int(a.Norb), C.int(a.Nocc),
 			(*C.int)(a.K), (*C.int)(a.L), (*C.int)(a.Vir), (*C.int)(a.Typ),
 			(*C.double)(a.ERI), (*C.double)(a.Eps), xin, yout)
+	})
+}
+
+// DipSatApply launches the matrix-free DIP 3h1p↔3h1p satellite apply (one thread per output
+// 3h1p row) on the device-owning thread, accumulating into a.Out.
+func (b *gpuBackend) DipSatApply(a DipSatArgs) {
+	xin := (*C.double)(a.In.(devVec).ptr())
+	yout := (*C.double)(a.Out.(devVec).ptr())
+	b.do(func() {
+		C.adc2_dip_sat_apply(C.int(a.Nsat), C.int(a.Njii), C.int(a.Nijk), C.int(a.B),
+			C.int(a.LdIn), C.int(a.LdOut), C.int(a.MainOff), C.int(a.Norb), C.int(a.Parts), C.int(a.Spin),
+			(*C.int)(a.RTyp), (*C.int)(a.RGrp), (*C.int)(a.RPart), (*C.int)(a.RVir),
+			(*C.int)(a.JO0), (*C.int)(a.JO1), (*C.int)(a.JSt), (*C.int)(a.JVoff), (*C.int)(a.JNv), (*C.int)(a.JVir),
+			(*C.int)(a.IO0), (*C.int)(a.IO1), (*C.int)(a.IO2), (*C.int)(a.ISt), (*C.int)(a.IVoff), (*C.int)(a.INv), (*C.int)(a.IVir),
+			(*C.double)(a.ERI), (*C.double)(a.Eps), (*C.int)(a.OrbSym), xin, yout)
 	})
 }

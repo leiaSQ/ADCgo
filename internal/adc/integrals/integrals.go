@@ -152,6 +152,12 @@ func (s *Store) B(i, j, sym int) backend.Mat {
 	return m
 }
 
+// VirGroup returns the ordered virtual positions (0-based, ascending) of symmetry
+// group sym — the ordering the A/B/V blocks and diagEnergies index by (absolute
+// orbital = Nocc+position). It backs the matrix-free satellite path, which needs a
+// group position's absolute orbital to recompute a block entry from the ERIs.
+func (s *Store) VirGroup(sym int) []int { return s.virGroup(sym) }
+
 // virGroup returns the ordered virtual positions of symmetry group sym (an empty
 // slice for an out-of-range group).
 func (s *Store) virGroup(sym int) []int {

@@ -248,6 +248,20 @@ type HostData interface {
 	HostSlice(v Vector) []float64
 }
 
+// PanelScatterAdd is the optional capability a row-partitioned backend (the distributed
+// multi-device backend) implements so a matrix-free operator can add a full host output panel
+// back into a partitioned resident panel — each device receives its own row band. Together
+// with Download (which gathers the full input panel to host), it lets the DIP satellite region
+// run matrix-free under -mgpu: the dense main/coupling blocks and the Krylov panels stay
+// partitioned across the devices, and the satellite region — the multi-TB memory hog — is
+// recomputed instead of materialized (dip/matfree_dist.go). Host and single-device backends do
+// not implement it (they take the HostData / DeviceKernels satellite paths directly).
+type PanelScatterAdd interface {
+	// AddPanel adds the full n×cols column-major host panel into dst (dst += full), scattering
+	// each device its row band. cols is inferred from len(full) and the backend's row count.
+	AddPanel(dst Vector, full []float64)
+}
+
 // DeviceKernels is the optional capability a device backend implements to run a
 // matrix-free operator block on-device: the element recompute (wert2elem4) is a custom
 // CUDA kernel reading a device-resident ERI tensor, so the large ADC(4) 2h1p×3h2p
@@ -275,6 +289,10 @@ type DeviceKernels interface {
 	// C22Apply launches the matrix-free order-3 2h1p×2h1p satellite apply (symmetric block,
 	// a single pass — one thread per output row), accumulating into a.Out.
 	C22Apply(a C22Args)
+	// DipSatApply launches the matrix-free DIP 3h1p↔3h1p satellite apply (one thread per
+	// output 3h1p row, symmetry honoured by block orientation — no transpose pass),
+	// accumulating into a.Out. Kernel in adc2dip_kernels.cu; host twin in dip/satscalar.go.
+	DipSatApply(a DipSatArgs)
 }
 
 // Wert2Args carries the device buffers and dimensions for DeviceKernels.Wert2Apply. The
@@ -297,6 +315,21 @@ type C22Args struct {
 	K, L, Vir, Typ                          unsafe.Pointer
 	ERI, Eps                                unsafe.Pointer
 	In, Out                                 Vector
+}
+
+// DipSatArgs carries the device buffers and dimensions for DeviceKernels.DipSatApply. The
+// R* pointers are the per-row config struct-of-arrays (length Nsat); J*/I* are the JII/IJK
+// per-group struct-of-arrays with JVir/IVir the flat concatenated absolute virtual orbitals;
+// ERI is a DeviceERI result, Eps and OrbSym UploadInts/UploadFloats results. In/Out are
+// resident panels (device pointers via DevPtr). The 3h1p region starts at MainOff. Spin is
+// 0 (singlet) or 1 (triplet); Parts is 2 or 3.
+type DipSatArgs struct {
+	Nsat, Njii, Nijk, B, LdIn, LdOut, MainOff, Norb, Parts, Spin int
+	RTyp, RGrp, RPart, RVir                                      unsafe.Pointer
+	JO0, JO1, JSt, JVoff, JNv, JVir                              unsafe.Pointer
+	IO0, IO1, IO2, ISt, IVoff, INv, IVir                         unsafe.Pointer
+	ERI, Eps, OrbSym                                             unsafe.Pointer
+	In, Out                                                      Vector
 }
 
 // hostVec is the Gonum backend's Vector: a plain host slice. Slice shares storage.

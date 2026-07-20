@@ -117,6 +117,12 @@ func (t *triplet) klmIJ(row, col Config) (backend.Mat, bool) {
 	return blk, true
 }
 
+// Satellite gates: triplet has three spin parts, so ijkMLL/ijkLMN carry a ×3 row
+// (and, for ijkLMN, column) multiplier; jiiLKK is spin-part independent.
+func (t *triplet) jiiLKKGate(row, col Config) (int, int, bool) { return t.jiiLKKShape(row, col) }
+func (t *triplet) ijkMLLGate(row, col Config) (int, int, bool) { return t.ijkMLLShape(row, col, 3) }
+func (t *triplet) ijkLMNGate(row, col Config) (int, int, bool) { return t.ijkLMNShape(row, col, 3) }
+
 // jiiLKK: <jiir|H|lkkr'> (Table A.3). nvR×nvC over the row/col virtual groups.
 func (t *triplet) jiiLKK(row, col Config) (backend.Mat, bool) {
 	j, i := row.Occ[0], row.Occ[1]
@@ -125,8 +131,7 @@ func (t *triplet) jiiLKK(row, col Config) (backend.Mat, bool) {
 	deltaIK, deltaJK := i == k, j == k
 	rowSym, colSym := t.virSym(row), t.virSym(col)
 	deltaSym := rowSym == colSym
-	if !(deltaIK || (deltaIK && deltaJL) || (deltaIL && deltaJK) ||
-		(deltaSym && (deltaIK || deltaIL || deltaJK || deltaJL))) {
+	if _, _, ok := t.jiiLKKGate(row, col); !ok {
 		return backend.Mat{}, false
 	}
 	blk := backend.NewMat(t.sizeVirGroup(rowSym), t.sizeVirGroup(colSym))
@@ -174,10 +179,7 @@ func (t *triplet) ijkMLL(row, col Config) (backend.Mat, bool) {
 	deltaIL, deltaJL, deltaKL := i == l, j == l, k == l
 	rowSym, colSym := t.virSym(row), t.virSym(col)
 	deltaSym := rowSym == colSym
-	if !((deltaIM && deltaJL) || (deltaIM && deltaKL) ||
-		(deltaJM && deltaIL) || (deltaJM && deltaKL) ||
-		(deltaKM && deltaIL) || (deltaKM && deltaJL) ||
-		(deltaSym && (deltaIM || deltaIL || deltaJM || deltaJL || deltaKM || deltaKL))) {
+	if _, _, ok := t.ijkMLLGate(row, col); !ok {
 		return backend.Mat{}, false
 	}
 	nv := t.sizeVirGroup(rowSym)
@@ -263,9 +265,7 @@ func (t *triplet) ijkLMN(row, col Config) (backend.Mat, bool) {
 	deltaJN, deltaKN := j == n, k == n
 	rowSym, colSym := t.virSym(row), t.virSym(col)
 	deltaSym := rowSym == colSym
-	if !((deltaIL && deltaJM) || (deltaIL && deltaKM) || (deltaIL && deltaKN) ||
-		(deltaJL && deltaKM) || (deltaJL && deltaKN) || (deltaJM && deltaKN) ||
-		(deltaSym && (deltaIL || deltaJL || deltaJM || deltaJN || deltaKL || deltaKM || deltaKN))) {
+	if _, _, ok := t.ijkLMNGate(row, col); !ok {
 		return backend.Mat{}, false
 	}
 	nvR := t.sizeVirGroup(rowSym)

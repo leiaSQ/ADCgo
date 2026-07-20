@@ -3,16 +3,23 @@ package dip
 import (
 	"github.com/leiaSQ/ADCgo/internal/adc/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/matfree"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // Matrix is the DIP-ADC(2) secular matrix for one (symmetry, spin) sector. It is
 // never stored densely in production — the Lanczos driver calls ApplyFull — but
 // BuildMatrix materializes it for the dense validation path and tests.
 type Matrix struct {
-	sp  *Space
-	blk blocks
-	be  backend.Backend
-	op  *assembledOp // built lazily on the first ApplyFull, reused thereafter
+	sp   *Space
+	blk  blocks
+	be   backend.Backend
+	ints *integrals.Store // kept for the matrix-free device path's ERI flatten
+	eps  []float64        // orbital energies (absolute index), for the device path
+	op   *assembledOp     // built lazily on the first ApplyFull, reused thereafter
+
+	matFree       matfree.Mode // dense (default) vs matrix-free 3h1p↔3h1p satellite region
+	matFreeBudget int64        // Auto threshold: satellite dense bytes above which to go matrix-free
 }
 
 // New builds the matrix engine for space sp over the given integrals and orbital
@@ -25,7 +32,7 @@ func New(sp *Space, ints *integrals.Store, eps []float64, be backend.Backend) *M
 	} else {
 		blk = &singlet{b}
 	}
-	return &Matrix{sp: sp, blk: blk, be: be}
+	return &Matrix{sp: sp, blk: blk, be: be, ints: ints, eps: eps}
 }
 
 // placement is one block of the operator: a backend-resident matrix a applied at
@@ -56,6 +63,10 @@ type assembledOp struct {
 	satBatches []backend.Batch
 	sa         []backend.DeviceMat
 	sb, sc     []backend.BlockView
+	// mf holds the 3h1p↔3h1p satellite region when it is applied matrix-free (recomputed
+	// per mat-vec instead of stored). When set, no satellite blocks appear in parts/satParts;
+	// the mf appliers run after the dense batches in ApplyFull/ApplyBlock/ApplyBlockSatellite.
+	mf []matFreePart
 }
 
 // OperatorNNZ reports the number of stored matrix elements in the assembled
@@ -73,96 +84,172 @@ func (mx *Matrix) OperatorNNZ() (nnz, nblocks int) {
 	return nnz, len(mx.op.parts)
 }
 
-// visitBlocks enumerates the nonzero blocks of the block-sparse operator, mirroring the
-// block enumeration of BuildMatrix, and hands each to emit(block, rowOff, colOff, diag).
-// It is the single source of truth for the operator's structure: assemble() uploads each
-// block, OperatorResidentBytes() sizes them without uploading. The 2h/2h scalar loop is
-// folded into a single dense main block so the whole apply is expressible as resident GEMVs.
-func (mx *Matrix) visitBlocks(emit func(m backend.Mat, r0, c0 int, diag bool)) {
+// blockEmit receives one nonzero block of the operator (dense block, row offset,
+// column offset, on-block-diagonal flag).
+type blockEmit = func(m backend.Mat, r0, c0 int, diag bool)
+
+// mainCouplingTasks enumerates the operator's non-satellite blocks — the 2h/2h main
+// block and the 2h↔3h1p couplings — as independent tasks, one per row-group (plus the
+// main block), each calling emit for its nonzero blocks in the order BuildMatrix
+// produces them. These blocks are always assembled densely (they are small); only the
+// 3h1p↔3h1p satellite region is a matrix-free candidate. Each task reads only immutable
+// space/integral/energy data and writes to task-local storage, so a worker pool can
+// evaluate them concurrently (this runs in the assemble phase, before any GEMM solve,
+// so it does not oversubscribe the BLAS backend — cf. internal/adc/parallel).
+func (mx *Matrix) mainCouplingTasks() []func(emit blockEmit) {
 	sp := mx.sp
+	var tasks []func(emit blockEmit)
 
 	// 2h/2h main block: a dense symmetric square (both triangles filled), applied
-	// as a single GemvN over the main sub-range.
+	// as a single GemvN over the main sub-range. One task; evaluated serially by its
+	// worker (main is small next to the satellite region, which carries the tasks
+	// that actually fill the pool).
 	if main := sp.BeginJII; main > 0 {
-		M := backend.NewMat(main, main)
-		for row := range main {
-			for col := 0; col <= row; col++ {
-				el, ok := mx.twoHoleElement(row, col)
-				if !ok {
-					continue
-				}
-				M.Set(row, col, el)
-				if row != col {
-					M.Set(col, row, el)
+		tasks = append(tasks, func(emit blockEmit) {
+			M := backend.NewMat(main, main)
+			for row := range main {
+				for col := 0; col <= row; col++ {
+					el, ok := mx.twoHoleElement(row, col)
+					if !ok {
+						continue
+					}
+					M.Set(row, col, el)
+					if row != col {
+						M.Set(col, row, el)
+					}
 				}
 			}
-		}
-		emit(M, 0, 0, true)
+			emit(M, 0, 0, true)
+		})
 	}
 
-	// 2h ↔ 3h1p coupling (each an nvR×1 column block at (r0, col)).
+	// 2h ↔ 3h1p coupling (each an nvR×1 column block at (r0, col)): one task per
+	// 3h1p row-group, JII (type I) then IJK (type II).
 	place := func(groups []int, typeII bool) {
 		for _, r0 := range groups {
-			rc := sp.Configs[r0]
-			for col := range sp.BeginJII {
-				blk, ok := mx.couplingBlock(rc, sp.Configs[col], typeII, col >= sp.BeginIJ)
-				if !ok {
-					continue
+			tasks = append(tasks, func(emit blockEmit) {
+				rc := sp.Configs[r0]
+				for col := range sp.BeginJII {
+					blk, ok := mx.couplingBlock(rc, sp.Configs[col], typeII, col >= sp.BeginIJ)
+					if !ok {
+						continue
+					}
+					emit(blk, r0, col, false)
 				}
-				emit(blk, r0, col, false)
-			}
+			})
 		}
 	}
 	place(sp.JII, false)
 	place(sp.IJK, true)
-
-	// 3h1p / 3h1p.
-	for gr, r0 := range sp.JII {
-		for gc := 0; gc <= gr; gc++ {
-			c0 := sp.JII[gc]
-			if blk, ok := mx.blk.jiiLKK(sp.Configs[r0], sp.Configs[c0]); ok {
-				emit(blk, r0, c0, gr == gc)
-			}
-		}
-	}
-	for _, r0 := range sp.IJK {
-		for _, c0 := range sp.JII {
-			if blk, ok := mx.blk.ijkMLL(sp.Configs[r0], sp.Configs[c0]); ok {
-				emit(blk, r0, c0, false)
-			}
-		}
-	}
-	for gr, r0 := range sp.IJK {
-		for gc := 0; gc <= gr; gc++ {
-			c0 := sp.IJK[gc]
-			if blk, ok := mx.blk.ijkLMN(sp.Configs[r0], sp.Configs[c0]); ok {
-				emit(blk, r0, c0, gr == gc)
-			}
-		}
-	}
+	return tasks
 }
 
-// assemble builds the block-sparse operator on the backend, uploading each block via
-// be.UploadMat instead of scattering into a dense matrix (cf. BuildMatrix).
-func (mx *Matrix) assemble() *assembledOp {
-	var parts []placement
-	mx.visitBlocks(func(m backend.Mat, r0, c0 int, diag bool) {
-		parts = append(parts, placement{A: mx.be.UploadMat(m), RowOff: r0, ColOff: c0, Diag: diag})
+// satelliteTasks enumerates the 3h1p↔3h1p satellite blocks (the operator's dominant
+// resident term) as independent tasks, one per row-group, in section order (JII×JII lower
+// triangle, IJK×JII, IJK×IJK lower triangle). These are what the matrix-free path applies
+// on the fly instead of storing (see matfree.go); when matrix-free is off they are
+// assembled densely like everything else.
+func (mx *Matrix) satelliteTasks() []func(emit blockEmit) {
+	sp := mx.sp
+	var tasks []func(emit blockEmit)
+	for gr, r0 := range sp.JII {
+		tasks = append(tasks, func(emit blockEmit) {
+			for gc := 0; gc <= gr; gc++ {
+				c0 := sp.JII[gc]
+				if blk, ok := mx.blk.jiiLKK(sp.Configs[r0], sp.Configs[c0]); ok {
+					emit(blk, r0, c0, gr == gc)
+				}
+			}
+		})
+	}
+	for _, r0 := range sp.IJK {
+		tasks = append(tasks, func(emit blockEmit) {
+			for _, c0 := range sp.JII {
+				if blk, ok := mx.blk.ijkMLL(sp.Configs[r0], sp.Configs[c0]); ok {
+					emit(blk, r0, c0, false)
+				}
+			}
+		})
+	}
+	for gr, r0 := range sp.IJK {
+		tasks = append(tasks, func(emit blockEmit) {
+			for gc := 0; gc <= gr; gc++ {
+				c0 := sp.IJK[gc]
+				if blk, ok := mx.blk.ijkLMN(sp.Configs[r0], sp.Configs[c0]); ok {
+					emit(blk, r0, c0, gr == gc)
+				}
+			}
+		})
+	}
+	return tasks
+}
+
+// runTaskParts evaluates block tasks across a worker pool and returns the uploaded
+// placements. Each task writes only its own results slot; the slots are concatenated in
+// task order, so parts is byte-identical to a serial walk. Blocks upload as they are
+// produced, so host memory holds only the blocks in flight, not the whole operator.
+func (mx *Matrix) runTaskParts(tasks []func(emit blockEmit)) []placement {
+	results := make([][]placement, len(tasks))
+	parallel.Rows(len(tasks), func(t int) {
+		tasks[t](func(m backend.Mat, r0, c0 int, diag bool) {
+			results[t] = append(results[t], placement{A: mx.be.UploadMat(m), RowOff: r0, ColOff: c0, Diag: diag})
+		})
 	})
-	return newAssembledOp(parts, mx.sp.BeginJII)
+	var parts []placement
+	for _, r := range results {
+		parts = append(parts, r...)
+	}
+	return parts
+}
+
+// sumTaskBytes evaluates block tasks across a worker pool and returns their total resident
+// size (Σ rows·cols·8) without uploading.
+func (mx *Matrix) sumTaskBytes(tasks []func(emit blockEmit)) uint64 {
+	sums := make([]uint64, len(tasks))
+	parallel.Rows(len(tasks), func(t int) {
+		var elems uint64
+		tasks[t](func(m backend.Mat, r0, c0 int, diag bool) {
+			elems += uint64(m.Rows) * uint64(m.Cols)
+		})
+		sums[t] = elems
+	})
+	var total uint64
+	for _, s := range sums {
+		total += s
+	}
+	return total * 8 // sizeof(float64)
+}
+
+// assemble builds the block-sparse operator on the backend. The main block and 2h↔3h1p
+// couplings are always uploaded densely; the 3h1p↔3h1p satellite region is either uploaded
+// densely or, when matFreeSatellite() elects it, applied on the fly by op.mf and never
+// stored (the memory fix — the satellite region is the bulk of the resident footprint).
+func (mx *Matrix) assemble() *assembledOp {
+	matFree := mx.matFreeSatellite()
+	tasks := mx.mainCouplingTasks()
+	if !matFree {
+		tasks = append(tasks, mx.satelliteTasks()...)
+	}
+	op := newAssembledOp(mx.runTaskParts(tasks), mx.sp.BeginJII)
+	if matFree {
+		op.mf = []matFreePart{mx.newSatelliteMatFreePart()}
+	}
+	return op
 }
 
 // OperatorResidentBytes reports the device memory the assembled operator would occupy, in
-// bytes, without uploading anything. It walks the same block enumeration as assemble() and
-// sums each block's rows·cols·8, so the backend chooser can decide up front whether a sector
-// fits a GPU — the block-sparse operator is the dominant resident term, and unlike a dense
-// n² model this is its exact size. Costs ~one assemble's worth of host block evaluation.
+// bytes, without uploading anything, so the backend chooser can decide up front whether a
+// sector fits a GPU. It sums the dense main+coupling blocks (worker-pool block eval) plus
+// the satellite region — but when the satellite region is applied matrix-free it contributes
+// zero resident bytes (the whole point), and otherwise it is sized by the cheap gate walk
+// (satelliteResidentBytes, no integral evaluation). This is the exact resident size, not a
+// dense-n² upper bound.
 func (mx *Matrix) OperatorResidentBytes() uint64 {
-	var elems uint64
-	mx.visitBlocks(func(m backend.Mat, r0, c0 int, diag bool) {
-		elems += uint64(m.Rows) * uint64(m.Cols)
-	})
-	return elems * 8 // sizeof(float64)
+	bytes := mx.sumTaskBytes(mx.mainCouplingTasks())
+	if !mx.matFreeSatellite() {
+		bytes += mx.satelliteResidentBytes()
+	}
+	return bytes
 }
 
 // newAssembledOp plans the batched applies and sizes the scratch slices. main is the 2h
@@ -206,6 +293,9 @@ func (mx *Matrix) Release() {
 	}
 	for _, p := range mx.op.parts {
 		mx.be.FreeMat(p.A)
+	}
+	for _, p := range mx.op.mf {
+		p.release()
 	}
 	mx.op = nil
 }
@@ -378,6 +468,14 @@ func (mx *Matrix) ApplyFull(out, in backend.Vector) {
 			mx.be.GemvT(1, p.A, in.Slice(p.RowOff, rows), out.Slice(p.ColOff, cols))
 		}
 	}
+	if len(mx.op.mf) > 0 {
+		n := mx.sp.Size()
+		inV := backend.BlockView{V: in, Rows: n, Cols: 1, Ld: n}
+		outV := backend.BlockView{V: out, Rows: n, Cols: 1, Ld: n}
+		for _, p := range mx.op.mf {
+			p.apply(inV, outV)
+		}
+	}
 }
 
 // ApplyBlock computes out = M·in for every column of in at once.
@@ -397,6 +495,9 @@ func (mx *Matrix) ApplyBlock(out, in backend.BlockView) {
 		mx.op = mx.assemble()
 	}
 	mx.applyBatches(mx.op.parts, mx.op.batches, out, in)
+	for _, p := range mx.op.mf {
+		p.apply(in, out)
+	}
 }
 
 // ApplyBlockSatellite computes out = M_sat·in, where M_sat is M with the 2h main block and
@@ -410,6 +511,11 @@ func (mx *Matrix) ApplyBlockSatellite(out, in backend.BlockView) {
 		mx.op = mx.assemble()
 	}
 	mx.applyBatches(mx.op.satParts, mx.op.satBatches, out, in)
+	// Under matrix-free the satellite region lives in op.mf, not satParts; apply it here so
+	// ApplyBlockSatellite realizes the same 3h1p↔3h1p sub-operator the dense path does.
+	for _, p := range mx.op.mf {
+		p.apply(in, out)
+	}
 }
 
 // applyBatches zeroes out and accumulates the given batched parts into it (beta = 1),

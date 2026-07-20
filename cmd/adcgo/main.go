@@ -213,6 +213,13 @@ func main() {
 			profile:     *profile,
 			spec:        specCfg,
 		}
+		mfMode, err := parseMatFree(*matfree)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "adcgo:", err)
+			os.Exit(2)
+		}
+		cfg.matFree = mfMode
+		cfg.matFreeBudget = int64(*maxMemGB * (1 << 30))
 		if err := runDIP(d, cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
 			os.Exit(1)
@@ -299,6 +306,8 @@ type dipConfig struct {
 	lowmemBlock                                int     // -solver lanczos-lowmem block width (0 = main)
 	profile                                    bool
 	spec                                       specConfig
+	matFree                                    sip.MatFreeMode // dense (default) vs matrix-free 3h1p↔3h1p satellite region
+	matFreeBudget                              int64           // -matfree=auto per-block dense-size threshold (bytes)
 }
 
 // reportTiming prints one solver's phase breakdown to stderr. The percentages are
@@ -371,11 +380,13 @@ func solveDIPSector(ch *chooser, cfg dipConfig, sp *dip.Space, ints *integrals.S
 		be = ch.pickLanczos(label, n, probeB, subspace,
 			func(cand backend.Backend) time.Duration {
 				m := dip.New(sp, ints, eps, cand)
+				m.SetMatFree(cfg.matFree, cfg.matFreeBudget)
 				defer m.Release()
 				return timeApplyBlock(cand, n, probeB, m.ApplyBlock)
 			})
 	}
 	mx := dip.New(sp, ints, eps, be)
+	mx.SetMatFree(cfg.matFree, cfg.matFreeBudget)
 
 	// Pre-flight device-memory guard for the short-recurrence path: SolveLowMem keeps three
 	// n×block panels resident (4·n·b·8) and, on the first apply, uploads the whole block-
@@ -445,17 +456,27 @@ func solveDIPSectorMGPU(subs []backend.Backend, cfg dipConfig, sp *dip.Space, in
 		be = d
 	}
 	mx := dip.New(sp, ints, eps, be)
+	mx.SetMatFree(cfg.matFree, cfg.matFreeBudget)
+
+	// Per-GPU footprint = the ~4 live n×main Krylov panels + the block-sparse operator, split
+	// over the partitions. NOT lanczos.LowMemSectorBytes: its opFrac·n²·8 operator term is a
+	// dense estimate (≈870 TB at melanin's n) — meaningless at this scale. OperatorResidentBytes
+	// sums the real block sizes (and collapses to ~0 when the satellite region is matrix-free);
+	// the operator is replicated across the partitions it touches, so /npart charges each GPU
+	// its share of the panels and an approximate share of the operator.
+	panels := 4 * uint64(n) * uint64(main) * 8 // float64 panels
+	perGPU := (panels + mx.OperatorResidentBytes()) / uint64(npart)
 	if cfg.profile {
-		// Per-GPU footprint = the ~4 live n×main Krylov panels + the block-sparse operator,
-		// split over the partitions. NOT lanczos.LowMemSectorBytes: its opFrac·n²·8 operator
-		// term is a dense estimate (≈870 TB at melanin's n) — meaningless at this scale.
-		// OperatorResidentBytes sums the real block sizes; the operator is replicated across
-		// the partitions it touches, so the /npart below charges each GPU only its share of
-		// the panels and is a lower bound on the operator (fine for a footprint headline).
-		panels := 4 * uint64(n) * uint64(main) * 8 // float64 panels
-		perGPU := (panels + mx.OperatorResidentBytes()) / uint64(npart)
 		fmt.Fprintf(os.Stderr, "dispatch %-18s mgpu n=%d main=%d over %d partition(s), ~%.1f GB/GPU\n",
 			label, n, main, npart, float64(perGPU)/(1<<30))
+	}
+	// Pre-flight guard: the -mgpu path uploads each partition's row-band of the operator plus
+	// its panels on the first apply. If a sub-backend GPU is too small, refuse cleanly here
+	// rather than let a mid-assembly cudaMalloc panic tear the run down (the single-GPU path's
+	// checkDeviceFit had no multi-GPU equivalent until now).
+	if err := checkSubsFit(label, subs[:npart], perGPU); err != nil {
+		mx.Release()
+		return analyze.Sector{}, err
 	}
 	res := lanczos.SolveLowMem(mx, be, lanczos.Options{MaxBlocks: cfg.blocks, LowMemBlock: cfg.lowmemBlock})
 	mx.Release()

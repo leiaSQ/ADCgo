@@ -37,6 +37,30 @@ type blocks interface {
 	jiiLKK(row, col Config) (backend.Mat, bool)
 	ijkMLL(row, col Config) (backend.Mat, bool)
 	ijkLMN(row, col Config) (backend.Mat, bool)
+
+	// Gate variants report the same nonzero decision and the block's dimensions
+	// (rows, cols) without evaluating any integrals — the cheap primitive the
+	// matrix-free satellite path uses to size and to prune candidate blocks. The
+	// value methods above call these, so the nonzero test has one source of truth.
+	jiiLKKGate(row, col Config) (rows, cols int, ok bool)
+	ijkMLLGate(row, col Config) (rows, cols int, ok bool)
+	ijkLMNGate(row, col Config) (rows, cols int, ok bool)
+
+	// Elem variants return one scalar entry of a satellite block: the (row-part pr,
+	// row-virtual ra),(col-part pc, col-virtual sb) element, with ra/sb absolute
+	// virtual orbital indices. They are the per-entry form of the value blocks (a GPU
+	// thread owns one output scalar and recomputes just its entry from the ERIs), and
+	// the single source of truth the CUDA kernel transcribes (satelem.go). jiiLKK has
+	// one spin part per side; ijkMLL's column side has one (pc≡0).
+	jiiLKKElem(row, col Config, ra, sb int) float64
+	ijkMLLElem(row, col Config, pr, ra, sb int) float64
+	ijkLMNElem(row, col Config, pr, ra, pc, sb int) float64
+
+	// virSym is a config's virtual symmetry group; virOrbs is that group's absolute
+	// virtual orbitals in block row/column order. The matrix-free applier and the Elem
+	// callers use them to map a 3h1p config's virtual position to its orbital.
+	virSym(c Config) int
+	virOrbs(sym int) []int
 }
 
 // base holds the SCF/integral data shared by the singlet and triplet block
@@ -75,6 +99,19 @@ func (b *base) sizeVirGroup(sym int) int { return b.ints.SizeVirGroup(sym) }
 // group representative determines the block's virtual dimension).
 func (b *base) virSym(c Config) int { return b.symOrb(b.nocc() + c.Vir) }
 
+// virOrbs returns the absolute virtual orbital indices of symmetry group sym, in the
+// block row/column order (position a ↔ virOrbs(sym)[a]). The matrix-free satellite path
+// maps a 3h1p config's virtual position to its absolute orbital to recompute a block
+// entry from the ERIs (satelem.go); it is the ordering diagEnergies also uses.
+func (b *base) virOrbs(sym int) []int {
+	pos := b.ints.VirGroup(sym)
+	out := make([]int, len(pos))
+	for i, p := range pos {
+		out[i] = b.nocc() + p
+	}
+	return out
+}
+
 // diagEnergies is the vector of virtual-orbital energies for symmetry group sym,
 // ordered to match that group's building-block rows (adc2_dip_blocks.cpp:36-42).
 func (b *base) diagEnergies(sym int) []float64 {
@@ -85,6 +122,63 @@ func (b *base) diagEnergies(sym int) []float64 {
 		}
 	}
 	return d
+}
+
+// Satellite gate/shape helpers. The nonzero (Kronecker-δ) guard conditions are
+// identical for singlet and triplet — only the number of spin parts differs, which
+// scales the row (and, for ijkLMN, the column) dimension. So the guards live here on
+// the shared base, parametrized by parts (2 for singlet, 3 for triplet), and the
+// per-spin gate methods just supply parts. Each returns (rows, cols, nonzero) using
+// only occupied-index equality and virtual-symmetry group sizes — no integrals.
+
+// jiiLKKShape gates the 3h1p-I × 3h1p-I block (Table A.3): nvR × nvC (spin-part
+// independent).
+func (b *base) jiiLKKShape(row, col Config) (int, int, bool) {
+	j, i := row.Occ[0], row.Occ[1]
+	l, k := col.Occ[0], col.Occ[1]
+	deltaIL, deltaJL := i == l, j == l
+	deltaIK, deltaJK := i == k, j == k
+	rowSym, colSym := b.virSym(row), b.virSym(col)
+	deltaSym := rowSym == colSym
+	if !(deltaIK || (deltaIK && deltaJL) || (deltaIL && deltaJK) ||
+		(deltaSym && (deltaIK || deltaIL || deltaJK || deltaJL))) {
+		return 0, 0, false
+	}
+	return b.sizeVirGroup(rowSym), b.sizeVirGroup(colSym), true
+}
+
+// ijkMLLShape gates the 3h1p-II × 3h1p-I block (Tables A.4/A.5): parts·nvR × nvC.
+func (b *base) ijkMLLShape(row, col Config, parts int) (int, int, bool) {
+	i, j, k := row.Occ[0], row.Occ[1], row.Occ[2]
+	m, l := col.Occ[0], col.Occ[1]
+	deltaIM, deltaJM, deltaKM := i == m, j == m, k == m
+	deltaIL, deltaJL, deltaKL := i == l, j == l, k == l
+	rowSym, colSym := b.virSym(row), b.virSym(col)
+	deltaSym := rowSym == colSym
+	if !((deltaIM && deltaJL) || (deltaIM && deltaKL) ||
+		(deltaJM && deltaIL) || (deltaJM && deltaKL) ||
+		(deltaKM && deltaIL) || (deltaKM && deltaJL) ||
+		(deltaSym && (deltaIM || deltaIL || deltaJM || deltaJL || deltaKM || deltaKL))) {
+		return 0, 0, false
+	}
+	return parts * b.sizeVirGroup(rowSym), b.sizeVirGroup(colSym), true
+}
+
+// ijkLMNShape gates the 3h1p-II × 3h1p-II block (Table A.6): parts·nvR × parts·nvC.
+func (b *base) ijkLMNShape(row, col Config, parts int) (int, int, bool) {
+	i, j, k := row.Occ[0], row.Occ[1], row.Occ[2]
+	l, m, n := col.Occ[0], col.Occ[1], col.Occ[2]
+	deltaIL, deltaJL, deltaKL := i == l, j == l, k == l
+	deltaJM, deltaKM := j == m, k == m
+	deltaJN, deltaKN := j == n, k == n
+	rowSym, colSym := b.virSym(row), b.virSym(col)
+	deltaSym := rowSym == colSym
+	if !((deltaIL && deltaJM) || (deltaIL && deltaKM) || (deltaIL && deltaKN) ||
+		(deltaJL && deltaKM) || (deltaJL && deltaKN) || (deltaJM && deltaKN) ||
+		(deltaSym && (deltaIL || deltaJL || deltaJM || deltaJN || deltaKL || deltaKM || deltaKN))) {
+		return 0, 0, false
+	}
+	return parts * b.sizeVirGroup(rowSym), parts * b.sizeVirGroup(colSym), true
 }
 
 // wTerm is the 2nd-order W double-sum (singlet.cpp:15-43; identical for
