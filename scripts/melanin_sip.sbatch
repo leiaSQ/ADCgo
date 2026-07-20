@@ -28,7 +28,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:H200:1
-#SBATCH --mem=120gb
+#SBATCH --mem=240gb
 #SBATCH --time=120:00:00
 #SBATCH --signal=B:USR1@600
 #SBATCH --output=melanin-sip-g%j.out

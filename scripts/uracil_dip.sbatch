@@ -57,6 +57,9 @@ ADCGO="${ADCGO:-$root/adcgo-cuda}"
 BLOCKS="${BLOCKS:-200}"          # theADCcode iter 200
 LOWMEM_BLOCK="${LOWMEM_BLOCK:-0}" # 0 = full 2h main-space block = faithful whole band
 BACKEND="${BACKEND:-cuda}"
+MGPU="${MGPU:-0}"                # 0 = single GPU; N>0 row-partitions ONE whole-band sector
+                                 # across N GPUs (needs -lowmem-block 0 + N H200 on an NVLink
+                                 # node; e.g. uracil1W: MGPU=4 sbatch --gres=gpu:H200:4 --mem=480gb)
 
 export ADCGO_WS_NAME="${ADCGO_WS_NAME:-$MOL}"
 source "$root/scripts/adcgo_ws.sh"
@@ -70,11 +73,11 @@ mo="$WS/${MOL}.mo.json"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-32}"
 export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-32}"
 
-echo "host=$(hostname)  MOL=$MOL  fcidump=$fcidump  blocks=$BLOCKS lowmem-block=$LOWMEM_BLOCK backend=$BACKEND"
+echo "host=$(hostname)  MOL=$MOL  fcidump=$fcidump  blocks=$BLOCKS lowmem-block=$LOWMEM_BLOCK backend=$BACKEND mgpu=$MGPU"
 nvidia-smi -L 2>/dev/null || true
 echo "#begin<adc>"
 "$ADCGO" -fcidump "$fcidump" -mo "$mo" \
-    -dip -order 2 -solver lanczos-lowmem -lowmem-block "$LOWMEM_BLOCK" \
+    -dip -order 2 -solver lanczos-lowmem -lowmem-block "$LOWMEM_BLOCK" -mgpu "$MGPU" \
     -spin both -blocks "$BLOCKS" -backend "$BACKEND" -sym all \
     -out "$WS/${MOL}.dip.json"
 echo "#end<adc>"
