@@ -32,6 +32,7 @@ int adc4_c22_apply(int n2,int b,int ldIn,int ldOut,int mainOff,int norb,int nocc
 // Launcher defined in adc2dip_kernels.cu (extern "C").
 int adc2_dip_sat_apply(int nsat,int njii,int nijk,int b,int ldIn,int ldOut,
     int mainOff,int norb,int parts,int spin,
+    int rowLo,int rowHi,int outRowOff,
     const int* rTyp,const int* rGrp,const int* rPart,const int* rVir,
     const int* jO0,const int* jO1,const int* jSt,const int* jVoff,const int* jNv,const int* jVir,
     const int* iO0,const int* iO1,const int* iO2,const int* iSt,const int* iVoff,const int* iNv,const int* iVir,
@@ -124,6 +125,7 @@ func (b *gpuBackend) DipSatApply(a DipSatArgs) {
 	b.do(func() {
 		C.adc2_dip_sat_apply(C.int(a.Nsat), C.int(a.Njii), C.int(a.Nijk), C.int(a.B),
 			C.int(a.LdIn), C.int(a.LdOut), C.int(a.MainOff), C.int(a.Norb), C.int(a.Parts), C.int(a.Spin),
+			C.int(a.RowLo), C.int(a.RowHi), C.int(a.OutRowOff),
 			(*C.int)(a.RTyp), (*C.int)(a.RGrp), (*C.int)(a.RPart), (*C.int)(a.RVir),
 			(*C.int)(a.JO0), (*C.int)(a.JO1), (*C.int)(a.JSt), (*C.int)(a.JVoff), (*C.int)(a.JNv), (*C.int)(a.JVir),
 			(*C.int)(a.IO0), (*C.int)(a.IO1), (*C.int)(a.IO2), (*C.int)(a.ISt), (*C.int)(a.IVoff), (*C.int)(a.INv), (*C.int)(a.IVir),

@@ -257,13 +257,21 @@ struct RowSoA { const int *typ, *grp, *part, *vir; };
 
 // dip_sat_apply: one thread per output 3h1p row. Accumulates out[main+ri] += Σ_C M[R,C]·in[C]
 // over candidate column groups (shared-occ early-out). spin: 0 singlet, 1 triplet; parts: 2/3.
+//
+// ROW BAND (-mgpu per-device apply). [rowLo,rowHi) restricts the 3h1p rows this launch owns, and
+// outRowOff is subtracted from the global row to index a row-partitioned output panel: device d
+// passes rowLo/rowHi for its own band and outRowOff = bound[d]. `xin` is always indexed by the
+// GLOBAL row, so the caller must hand this kernel a FULL-HEIGHT input (the gathered n×w slab) —
+// a candidate column may live in any partition. Single-device callers pass
+// rowLo=0, rowHi=nsat, outRowOff=0, which reproduces the whole-band behaviour exactly.
 __global__ void dip_sat_apply(int nsat, int njii, int nijk, int b, int ldIn, int ldOut,
                               int mainOff, int norb, int parts, int spin,
+                              int rowLo, int rowHi, int outRowOff,
                               RowSoA rw, JGroups jg, IGroups ig,
                               const double *eri, const double *eps, const int *osym,
                               const double *xin, double *yout) {
-    int ri = blockIdx.x * blockDim.x + threadIdx.x;
-    if (ri >= nsat) return;
+    int ri = rowLo + blockIdx.x * blockDim.x + threadIdx.x;
+    if (ri >= rowHi || ri >= nsat) return;
     int n = norb;
     int rTyp = rw.typ[ri], rGrp = rw.grp[ri], rPart = rw.part[ri], rVir = rw.vir[ri];
 
@@ -271,7 +279,8 @@ __global__ void dip_sat_apply(int nsat, int njii, int nijk, int b, int ldIn, int
     if (rTyp == 0) { ro0 = jg.o0[rGrp]; ro1 = jg.o1[rGrp]; ro2 = -1; rn = 2; }
     else { ro0 = ig.o0[rGrp]; ro1 = ig.o1[rGrp]; ro2 = ig.o2[rGrp]; rn = 3; }
 
-    int R = mainOff + ri;
+    int R = mainOff + ri;        // global row: indexes xin and the candidate comparisons
+    int Rout = R - outRowOff;    // local row within this device's output panel
     // accumulate into a private register bank per panel column (b is small).
     // b can exceed a fixed cap; loop columns in the inner apply instead.
 
@@ -297,7 +306,7 @@ __global__ void dip_sat_apply(int nsat, int njii, int nijk, int b, int ldIn, int
             }
             if (g == 0.0) continue;
             int C = cst + cb;
-            for (int jc = 0; jc < b; jc++) yout[R + jc * ldOut] += g * xin[C + jc * ldIn];
+            for (int jc = 0; jc < b; jc++) yout[Rout + jc * ldOut] += g * xin[C + jc * ldIn];
         }
     }
 
@@ -324,7 +333,7 @@ __global__ void dip_sat_apply(int nsat, int njii, int nijk, int b, int ldIn, int
                 }
                 if (g == 0.0) continue;
                 int C = cst + cpart * cnv + cb;
-                for (int jc = 0; jc < b; jc++) yout[R + jc * ldOut] += g * xin[C + jc * ldIn];
+                for (int jc = 0; jc < b; jc++) yout[Rout + jc * ldOut] += g * xin[C + jc * ldIn];
             }
         }
     }
@@ -336,19 +345,29 @@ __global__ void dip_sat_apply(int nsat, int njii, int nijk, int b, int ldIn, int
 extern "C" {
 
 // adc2_dip_sat_apply launches the satellite apply on the default stream. All pointers are
-// device pointers. Returns the first cudaError_t seen.
+// device pointers. [rowLo,rowHi) is the 3h1p row band this launch owns and outRowOff the global
+// row offset of the output panel (whole-band single-device: 0, nsat, 0). xin must be full height
+// regardless of the band — candidate columns are global. A caller whose band is empty
+// (rowHi <= rowLo) must skip the call; launching zero blocks here is treated as a bug, not a
+// no-op, so an off-by-one in the band derivation is caught rather than silently doing nothing.
+// Returns the first cudaError_t seen.
 int adc2_dip_sat_apply(int nsat, int njii, int nijk, int b, int ldIn, int ldOut,
                        int mainOff, int norb, int parts, int spin,
+                       int rowLo, int rowHi, int outRowOff,
                        const int *rTyp, const int *rGrp, const int *rPart, const int *rVir,
                        const int *jO0, const int *jO1, const int *jSt, const int *jVoff, const int *jNv, const int *jVir,
                        const int *iO0, const int *iO1, const int *iO2, const int *iSt, const int *iVoff, const int *iNv, const int *iVir,
                        const double *eri, const double *eps, const int *osym,
                        const double *xin, double *yout) {
+    if (rowHi > nsat) rowHi = nsat;
+    int rows = rowHi - rowLo;
+    if (rows <= 0) return (int)cudaErrorInvalidValue;
     RowSoA rw = {rTyp, rGrp, rPart, rVir};
     JGroups jg = {jO0, jO1, jSt, jVoff, jNv, jVir};
     IGroups ig = {iO0, iO1, iO2, iSt, iVoff, iNv, iVir};
     int T = 128;
-    dip_sat_apply<<<(nsat + T - 1) / T, T>>>(nsat, njii, nijk, b, ldIn, ldOut, mainOff, norb, parts, spin,
+    dip_sat_apply<<<(rows + T - 1) / T, T>>>(nsat, njii, nijk, b, ldIn, ldOut, mainOff, norb, parts, spin,
+                                             rowLo, rowHi, outRowOff,
                                              rw, jg, ig, eri, eps, osym, xin, yout);
     return (int)cudaGetLastError();
 }

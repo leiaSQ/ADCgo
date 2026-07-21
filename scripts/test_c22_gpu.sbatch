@@ -30,15 +30,25 @@ export CGO_LDFLAGS="-L$CUDA_HOME/lib64 ${CGO_LDFLAGS:-}"
 echo "host=$(hostname)  go=$(go version)"
 nvidia-smi -L || true
 
+# Both objects are required by cuda_kernels.go's #cgo LDFLAGS — omitting adc2dip_kernels.o
+# is what made job 14004566 fail at link ("cannot find adc2dip_kernels.o").
 echo "#begin<nvcc>"
-nvcc -O3 -std=c++14 \
-     -gencode arch=compute_80,code=sm_80 \
-     -gencode arch=compute_86,code=sm_86 \
-     -gencode arch=compute_90,code=sm_90 \
-     -c internal/adc/backend/adc4_kernels.cu \
-     -o internal/adc/backend/adc4_kernels.o
+for ker in adc4_kernels adc2dip_kernels; do
+    echo "nvcc: $ker.cu"
+    nvcc -O3 -std=c++14 \
+         -gencode arch=compute_80,code=sm_80 \
+         -gencode arch=compute_86,code=sm_86 \
+         -gencode arch=compute_90,code=sm_90 \
+         -c "internal/adc/backend/$ker.cu" \
+         -o "internal/adc/backend/$ker.o"
+done
 echo "#end<nvcc>"
 
-echo "#begin<gotest>"
+# SIP: order-3 c22 + CVS-ADC(4) wert2.  DIP: 3h1p satellite (adc2dip_kernels.cu).
+echo "#begin<gotest-sip>"
 go test -tags cuda -v -run 'MatFreeO3DeviceParity|Wert2MatFreeDeviceParity' ./internal/adc/sip/
-echo "#end<gotest>"
+echo "#end<gotest-sip>"
+
+echo "#begin<gotest-dip>"
+go test -tags cuda -v -run 'SatelliteMatFreeDeviceParity' ./internal/adc/dip/
+echo "#end<gotest-dip>"

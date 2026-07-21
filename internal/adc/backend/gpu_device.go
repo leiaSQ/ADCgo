@@ -432,16 +432,20 @@ func (b *gpuBackend) PeerAvailable(from Backend) bool {
 // Sync drains this backend's device stream (see PeerCopier.Sync). Runs on the owning thread.
 func (b *gpuBackend) Sync() { b.do(func() { devSync() }) }
 
-// PeerCopy2D pulls a rows×cols column-major band from src (resident on `from`, column
-// stride srcLd) into dst (resident on this backend, contiguous column stride rows),
-// device-to-device. It runs on this backend's owning thread, which already holds peer
-// read access to `from` (granted by EnablePeerAccess); cudaMemcpy2D with cudaMemcpyDefault
-// resolves both ends from their pointers under UVA. Satisfies backend.PeerCopier.
-func (b *gpuBackend) PeerCopy2D(dst, src Vector, from Backend, rows, cols, srcLd int) {
+// PeerCopy2D pulls a rows×cols column-major band from src (resident on `from`, column stride
+// srcLd) into dst (resident on this backend, column stride dstLd), device-to-device. It runs on
+// this backend's owning thread, which already holds peer read access to `from` (granted by
+// EnablePeerAccess); cudaMemcpy2D with cudaMemcpyDefault resolves both ends from their pointers
+// under UVA. Satisfies backend.PeerCopier.
+//
+// dstLd is explicit so a caller can scatter bands into a taller buffer: the -mgpu satellite
+// gather assembles a full-height n×w slab from every partition's band, passing dstLd = n and a
+// dst already sliced to the band's row offset. Pass dstLd = rows for a compact destination.
+func (b *gpuBackend) PeerCopy2D(dst, src Vector, from Backend, rows, cols, dstLd, srcLd int) {
 	dp := dst.(devVec).ptr()
 	sp := src.(devVec).ptr()
 	b.do(func() {
-		devMemcpy2D(dp, rows*elemSize, sp, srcLd*elemSize, rows*elemSize, cols)
+		devMemcpy2D(dp, dstLd*elemSize, sp, srcLd*elemSize, rows*elemSize, cols)
 	})
 }
 

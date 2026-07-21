@@ -83,10 +83,31 @@ func (mx *Matrix) newSatelliteMatFreePart() matFreePart {
 	if dk, ok := mx.be.(backend.DeviceKernels); ok {
 		return mx.newSatelliteMatFreeDevice(dk)
 	}
+	// Row-partitioned: prefer the per-device on-device apply (each GPU recomputes only its own
+	// output band) and fall back to gather-apply-scatter through the host when the partitions
+	// cannot support it — no device kernels (gonum sub-backends) or not fully peered.
+	if pd, ok := mx.be.(backend.PartitionedDevices); ok && perDeviceSatelliteOK(pd) {
+		return mx.newSatelliteMatFreePerDevice(pd)
+	}
 	if pg, ok := mx.be.(backend.PanelScatterAdd); ok {
 		return mx.newSatelliteMatFreeDistributed(pg)
 	}
 	return mx.newSatelliteMatFree()
+}
+
+// perDeviceSatelliteOK reports whether every partition can run the satellite kernel on its own
+// band: all partitions expose device kernels, and all pairs are peered so the input slab can be
+// gathered device-to-device. Anything less takes the host fallback, which is always correct.
+func perDeviceSatelliteOK(pd backend.PartitionedDevices) bool {
+	if !pd.AllPeered() {
+		return false
+	}
+	for d := range pd.NumParts() {
+		if _, ok := pd.PartKernels(d); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // satelliteResidentBytes returns the dense resident size (Σ rows·cols·8) of the 3h1p↔3h1p
