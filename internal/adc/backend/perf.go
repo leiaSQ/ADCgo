@@ -63,10 +63,14 @@ type PeerCopier interface {
 	Sync()
 
 	// PeerCopy2D copies a rows×cols column-major band from src (resident on `from`, column
-	// stride srcLd) into dst (resident on this backend, contiguous with column stride rows),
-	// device-to-device. dst and src must be this backend's / from's native Vectors. Runs on
-	// this backend's owning thread.
-	PeerCopy2D(dst, src Vector, from Backend, rows, cols, srcLd int)
+	// stride srcLd) into dst (resident on this backend, column stride dstLd), device-to-device.
+	// dst and src must be this backend's / from's native Vectors. Runs on this backend's
+	// owning thread.
+	//
+	// dstLd is explicit so bands can be scattered into a taller buffer: the -mgpu satellite
+	// gather builds a full-height n×w slab out of every partition's band with dstLd = n and dst
+	// pre-sliced to the band's row offset. Pass dstLd = rows for a compact destination.
+	PeerCopy2D(dst, src Vector, from Backend, rows, cols, dstLd, srcLd int)
 }
 
 // calibGemm/calibEig are sized to be representative but cheap. The eig size must exceed

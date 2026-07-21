@@ -49,17 +49,23 @@ if [ -n "$need" ] && [ -n "$have" ]; then
     fi
 fi
 
-# 1. Compile the ADC(4) matrix-free kernel for every Helix GPU model, so the .o runs on
+# 1. Compile the matrix-free kernels for every Helix GPU model, so the .o runs on
 #    whichever variant slurm schedules:
 #      A100 (gpu4/gpu8) = sm_80,  A40 (gpu4) = sm_86,  H200 (gpu8) = sm_90.
 #    sm_90 is needed for the H200 nodes (the SIP solve's ~45 GB basis wants their 141 GB).
+#    BOTH objects are required — cuda_kernels.go's #cgo LDFLAGS links adc4_kernels.o
+#    (CVS-ADC(4) wert2 + order-3 SIP c22) and adc2dip_kernels.o (DIP satellite), so omitting
+#    either one fails the link with "cannot find …_kernels.o".
 echo "#begin<nvcc>"
-nvcc -O3 -std=c++14 \
-     -gencode arch=compute_80,code=sm_80 \
-     -gencode arch=compute_86,code=sm_86 \
-     -gencode arch=compute_90,code=sm_90 \
-     -c internal/adc/backend/adc4_kernels.cu \
-     -o internal/adc/backend/adc4_kernels.o
+for ker in adc4_kernels adc2dip_kernels; do
+    echo "nvcc: $ker.cu"
+    nvcc -O3 -std=c++14 \
+         -gencode arch=compute_80,code=sm_80 \
+         -gencode arch=compute_86,code=sm_86 \
+         -gencode arch=compute_90,code=sm_90 \
+         -c "internal/adc/backend/$ker.cu" \
+         -o "internal/adc/backend/$ker.o"
+done
 echo "#end<nvcc>"
 
 # 2. Build the cuda-tagged binary (links the .o via cuda_kernels.go).

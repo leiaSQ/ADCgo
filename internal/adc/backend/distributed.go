@@ -367,6 +367,61 @@ func (b *distBackend) AddPanel(dst Vector, full []float64) {
 	}
 }
 
+// --- per-device apply capability (PartitionedDevices) ------------------------
+
+// The distributed backend's sub-backends, partition boundaries and peer capability are
+// unexported, so an operator block that wants to run per-device (each device recomputing only
+// its own output band on-device, rather than AddPanel's gather-to-host) has no way to reach
+// them. PartitionedDevices is that handle; see backend.go for the contract.
+
+func (b *distBackend) NumParts() int { return b.ndev() }
+
+// Bounds returns a COPY: callers derive row bands from it, and must not be able to mutate the
+// partitioning the resident panels were allocated against.
+func (b *distBackend) Bounds() []int { return append([]int(nil), b.bound...) }
+
+func (b *distBackend) PartBackend(d int) Backend { return b.subs[d] }
+
+func (b *distBackend) PartKernels(d int) (DeviceKernels, bool) {
+	dk, ok := b.subs[d].(DeviceKernels)
+	return dk, ok
+}
+
+// PartVector returns device d's storage for a row-partitioned panel. It rejects a replicated
+// small buffer and a located row band (a RowRange view): both are shapes the per-device apply
+// must never be handed, and silently accepting one would apply the operator to the wrong rows.
+func (b *distBackend) PartVector(v Vector, d int) Vector {
+	dv, ok := v.(distVec)
+	if !ok {
+		panic("distributed PartVector: not a distributed vector")
+	}
+	if dv.repl {
+		panic("distributed PartVector: expected a row-partitioned panel, got a replicated buffer")
+	}
+	if dv.loc != nil {
+		panic("distributed PartVector: expected a full panel, got a located row band")
+	}
+	return dv.part[d]
+}
+
+// AllPeered reports whether every ordered pair of distinct sub-backends can peer-copy. A single
+// partition is trivially peered (no cross-device traffic at all); any non-PeerCopier sub-backend
+// (Gonum) makes it false, leaving the host-staging fallback in place.
+func (b *distBackend) AllPeered() bool {
+	for i, s := range b.subs {
+		pc, ok := s.(PeerCopier)
+		if !ok {
+			return false
+		}
+		for j, o := range b.subs {
+			if i != j && !pc.PeerAvailable(o) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // --- resident operator blocks ------------------------------------------------
 
 // distMat is a block-sparse operator block held on the host, uploaded lazily to whichever
@@ -440,7 +495,7 @@ func (b *distBackend) gemmMatOne(transA bool, alpha float64, a DeviceMat, bb, c 
 		// (PeerAvailable proved it), so it implements PeerCopier.Sync.
 		b.subs[di].(PeerCopier).Sync()
 		band = b.subs[do].Alloc(rows * cols)
-		pc.PeerCopy2D(band, bdv.part[di], b.subs[di], rows, cols, ld)
+		pc.PeerCopy2D(band, bdv.part[di], b.subs[di], rows, cols, rows, ld) // compact dst
 	} else {
 		span := b.subs[di].Download(bdv.part[di])
 		compact := make([]float64, rows*cols)
@@ -488,4 +543,8 @@ func (b *distBackend) GemvT(float64, DeviceMat, Vector, Vector) {
 	panic("distributed backend: GemvT unsupported (Mode B block-Lanczos path only)")
 }
 
-var _ Backend = (*distBackend)(nil)
+var (
+	_ Backend            = (*distBackend)(nil)
+	_ PanelScatterAdd    = (*distBackend)(nil)
+	_ PartitionedDevices = (*distBackend)(nil)
+)

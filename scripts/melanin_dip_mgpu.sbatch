@@ -30,7 +30,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=64
 #SBATCH --gres=gpu:H200:8
-#SBATCH --mem=480gb
+#SBATCH --mem=2200gb
 #SBATCH --time=120:00:00
 #SBATCH --output=melanin-dip-mgpu-%j.out
 set -euo pipefail
@@ -67,7 +67,7 @@ nvidia-smi -L 2>/dev/null || true
 echo "#begin<adc>"
 "$ADCGO" -fcidump "$fcidump" -mo "$mo" \
     -dip -order 2 -solver lanczos-lowmem -lowmem-block 0 -mgpu "$MGPU" \
-    -spin both -blocks "$BLOCKS" -backend cuda -sym all -profile \
+    -spin both -blocks "$BLOCKS" -backend cuda -sym all -profile -matfree on \
     -out "$WS/melanin.dip.json"
 echo "#end<adc>"
 echo "dip (whole-band Mode B, $MGPU GPUs) -> $WS/melanin.dip.json"

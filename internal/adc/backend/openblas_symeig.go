@@ -10,7 +10,8 @@
 // and dominates everything else.
 //
 // Measured on a Ryzen 5600X, 6 threads, n=4000:  dsyev 39.3 s (2.2 GFLOP/s)
-//                                                dsyevd 3.6 s (23.8 GFLOP/s)
+//
+//	dsyevd 3.6 s (23.8 GFLOP/s)
 //
 // The prototype is declared here rather than via `#include <lapacke.h>` on purpose:
 // pulling in the conda lapacke.h puts it ahead of the header gonum/netlib bundles

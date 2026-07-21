@@ -262,6 +262,47 @@ type PanelScatterAdd interface {
 	AddPanel(dst Vector, full []float64)
 }
 
+// PartitionedDevices is the capability a row-partitioned multi-device backend exposes so an
+// operator block can run a PER-DEVICE apply: each device recomputes only its own output row
+// band on-device, instead of the whole block being gathered to the host, contracted on CPU and
+// scattered back (the PanelScatterAdd path). It is what dip/matfree_dist.go needs and what
+// PanelScatterAdd — a single AddPanel — cannot provide: the sub-backends, their partition
+// boundaries and their peer capability are all unexported state of the distributed backend.
+//
+// Implemented by the distributed backend only. A single-device or host backend does not
+// implement it, so those keep taking the DeviceKernels / HostData paths directly.
+type PartitionedDevices interface {
+	// NumParts is the number of row partitions (one per device).
+	NumParts() int
+
+	// Bounds returns a copy of the NumParts()+1 ascending global row boundaries: device d owns
+	// rows [Bounds()[d], Bounds()[d+1]). Callers MUST derive any row band from this slice
+	// rather than recomputing a partitioning of their own, so a band can never drift from the
+	// one the panels were actually allocated against.
+	Bounds() []int
+
+	// PartBackend returns the sub-backend owning partition d.
+	PartBackend(d int) Backend
+
+	// PartKernels returns partition d's device-kernel handle; ok is false when that
+	// sub-backend has none (e.g. a Gonum sub-backend in a host-side correctness test).
+	PartKernels(d int) (dk DeviceKernels, ok bool)
+
+	// PartVector returns partition d's local storage for the row-partitioned panel v. Its
+	// leading dimension is Bounds()[d+1]-Bounds()[d].
+	//
+	// Resolve this FRESH on every apply. The Mode-B ring buffer hands the operator a column
+	// range whose offset ping-pongs between iterations (lanczos/lowmem.go), and a device
+	// pointer is only materialized when queried — caching one across applies reads the wrong
+	// half of the ring from the second iteration onward, silently.
+	PartVector(v Vector, d int) Vector
+
+	// AllPeered reports whether every ordered pair of distinct sub-backends has peer access,
+	// i.e. whether a device-to-device gather can run over NVLink instead of staging through
+	// the host. False when any sub-backend is not peer-capable (e.g. Gonum).
+	AllPeered() bool
+}
+
 // DeviceKernels is the optional capability a device backend implements to run a
 // matrix-free operator block on-device: the element recompute (wert2elem4) is a custom
 // CUDA kernel reading a device-resident ERI tensor, so the large ADC(4) 2h1p×3h2p
@@ -325,11 +366,20 @@ type C22Args struct {
 // 0 (singlet) or 1 (triplet); Parts is 2 or 3.
 type DipSatArgs struct {
 	Nsat, Njii, Nijk, B, LdIn, LdOut, MainOff, Norb, Parts, Spin int
-	RTyp, RGrp, RPart, RVir                                      unsafe.Pointer
-	JO0, JO1, JSt, JVoff, JNv, JVir                              unsafe.Pointer
-	IO0, IO1, IO2, ISt, IVoff, INv, IVir                         unsafe.Pointer
-	ERI, Eps, OrbSym                                             unsafe.Pointer
-	In, Out                                                      Vector
+
+	// RowLo/RowHi are the half-open 3h1p row band this launch owns and OutRowOff the global
+	// row offset of the output panel, for the per-device (-mgpu) apply: device d passes its own
+	// band and OutRowOff = bounds[d]. In must be FULL HEIGHT regardless of the band — a
+	// candidate column may live in any partition. A whole-band single-device call passes
+	// RowLo=0, RowHi=Nsat, OutRowOff=0. Callers must skip the call entirely when the band is
+	// empty (RowHi <= RowLo) — that is a bug in the band derivation, not a no-op.
+	RowLo, RowHi, OutRowOff int
+
+	RTyp, RGrp, RPart, RVir              unsafe.Pointer
+	JO0, JO1, JSt, JVoff, JNv, JVir      unsafe.Pointer
+	IO0, IO1, IO2, ISt, IVoff, INv, IVir unsafe.Pointer
+	ERI, Eps, OrbSym                     unsafe.Pointer
+	In, Out                              Vector
 }
 
 // hostVec is the Gonum backend's Vector: a plain host slice. Slice shares storage.

@@ -64,8 +64,18 @@ func (mx *Matrix) matFreeWert2(denseBytes int64) bool {
 	return mx.matFreeDecision(denseBytes, host || dev)
 }
 
-// matFreeC22 decides the 2h1p×2h1p block: host-only for now (no device c22 kernel yet).
+// matFreeC22 decides the order-4 2h1p×2h1p block (c22elem4): host-only, because there is no
+// device c22elem4 kernel — a device backend must fall back to the dense block.
+//
+// The DeviceKernels test MUST come first. gpuBackend embeds Gonum (backend/gpu_device.go), so it
+// satisfies HostData through the promoted Gonum.HostSlice even though its vectors are devVec —
+// testing HostData alone selects newC22MatFree on a CUDA backend and panics on the first
+// HostSlice(devVec). Same ordering rationale as dip/matfree.go matFreeSupported. Pinned by
+// TestMatFreeC22RejectsDeviceBackend (no GPU needed).
 func (mx *Matrix) matFreeC22(denseBytes int64) bool {
+	if _, dev := mx.be.(backend.DeviceKernels); dev {
+		return false
+	}
 	_, host := mx.be.(backend.HostData)
 	return mx.matFreeDecision(denseBytes, host)
 }
