@@ -78,7 +78,12 @@ func floatBytes(f []float64) []byte {
 
 // writeCheckpoint serializes s to path atomically (tmp + fsync + rename), keeping the prior
 // file as ".bak".
-func writeCheckpoint(path string, s *ckptState) error {
+//
+// basisLen is the declared basis element count and writeBasis streams those elements to the
+// file. Passing nil for writeBasis writes s.Basis directly (the in-memory form); saveKrylov
+// instead streams the basis off the backend in column chunks so the host never materializes it
+// — see there for why that matters.
+func writeCheckpoint(path string, s *ckptState, basisLen int, writeBasis func(io.Writer) error) error {
 	tmp := path + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -98,14 +103,18 @@ func writeCheckpoint(path string, s *ckptState) error {
 		ckptVersion,
 		int64(s.N), int64(s.Main), int64(s.Maxdim), int64(s.MaxBlocks),
 		int64(s.Dim), int64(s.BlkStart), int64(s.BlkSize), int64(s.Iter),
-		int64(len(s.Basis)), int64(len(s.T)),
+		int64(basisLen), int64(len(s.T)),
 	}
 	for _, v := range hdr {
 		if err := binary.Write(w, binary.LittleEndian, v); err != nil {
 			return fail(err)
 		}
 	}
-	if _, err := w.Write(floatBytes(s.Basis)); err != nil {
+	if writeBasis != nil {
+		if err := writeBasis(w); err != nil {
+			return fail(err)
+		}
+	} else if _, err := w.Write(floatBytes(s.Basis)); err != nil {
 		return fail(err)
 	}
 	if _, err := w.Write(floatBytes(s.T)); err != nil {
@@ -191,20 +200,42 @@ func removeCheckpoint(path string) {
 	}
 }
 
-// saveKrylov pulls the first dim basis columns off the backend and writes a checkpoint. The
-// basis columns are contiguous (column-major, leading dimension n), so the first dim columns
-// are exactly the first n*dim elements; only they are transferred, not the full n*maxdim
-// panel. T's populated leading dim×dim block is copied out of the maxdim-wide host matrix.
+// ckptBasisChunkCols is how many basis columns saveKrylov pulls off the backend at a time.
+// Host cost is n*ckptBasisChunkCols*8 bytes (melanin SIP, n≈518k: ~1.1 GB) instead of the whole
+// n*dim basis.
+const ckptBasisChunkCols = 256
+
+// saveKrylov streams the first dim basis columns off the backend into a checkpoint. The basis
+// columns are contiguous (column-major, leading dimension n), so the first dim columns are
+// exactly the first n*dim elements, and any column range of them is likewise contiguous — which
+// is what lets this be chunked. T's populated leading dim×dim block is copied out of the
+// maxdim-wide host matrix.
+//
+// It is chunked because downloading the whole basis at once is what made the melanin SIP solve
+// exceed its host memory: at -blocks 200 the basis is n*maxdim = 518k×11,600 = 48 GB, and a
+// fresh 48 GB host slice was allocated on EVERY checkpoint. Go's scavenger returns large spans
+// to the OS only lazily, so successive checkpoints stacked RSS until the cgroup OOM-killed the
+// run 4.5 h in (job 14010104, MaxRSS 251.6 GB against --mem=240G). Streaming caps the host cost
+// at one chunk regardless of dim; the on-disk format is unchanged, so old checkpoints still load.
 func saveKrylov(be backend.Backend, path string, basis backend.BlockView, t backend.Mat,
 	n, main, maxdim, maxBlocks, dim, blkStart, blkSize, iter int) error {
-	basisHost := be.Download(basis.ColRange(0, dim).V) // length n*dim
 	tHost := make([]float64, dim*dim)
 	for i := 0; i < dim; i++ {
 		copy(tHost[i*dim:(i+1)*dim], t.Data[i*maxdim:i*maxdim+dim])
 	}
+	writeBasis := func(w io.Writer) error {
+		for c0 := 0; c0 < dim; c0 += ckptBasisChunkCols {
+			cw := min(ckptBasisChunkCols, dim-c0)
+			chunk := be.Download(basis.ColRange(c0, c0+cw).V) // length n*cw
+			if _, err := w.Write(floatBytes(chunk)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	return writeCheckpoint(path, &ckptState{
 		N: n, Main: main, Maxdim: maxdim, MaxBlocks: maxBlocks,
 		Dim: dim, BlkStart: blkStart, BlkSize: blkSize, Iter: iter,
-		Basis: basisHost, T: tHost,
-	})
+		T: tHost,
+	}, n*dim, writeBasis)
 }

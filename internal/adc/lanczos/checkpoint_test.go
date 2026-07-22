@@ -1,6 +1,8 @@
 package lanczos
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync/atomic"
@@ -23,7 +25,8 @@ func TestCheckpointRoundTrip(t *testing.T) {
 		t.Fatalf("test setup: payload lengths inconsistent with dims")
 	}
 	p := filepath.Join(t.TempDir(), "rt.ckpt")
-	if err := writeCheckpoint(p, s); err != nil {
+	// nil writeBasis = the in-memory form, writing s.Basis directly.
+	if err := writeCheckpoint(p, s, len(s.Basis), nil); err != nil {
 		t.Fatalf("writeCheckpoint: %v", err)
 	}
 	got, err := readCheckpoint(p)
@@ -121,4 +124,74 @@ func abs(x float64) float64 {
 		return -x
 	}
 	return x
+}
+
+// TestSaveKrylovStreamMatchesInMemory pins the chunked basis write against the whole-basis one:
+// saveKrylov streams the basis off the backend in ckptBasisChunkCols-wide pieces (so the host
+// never holds the 48 GB melanin SIP basis at once), and the file it produces must be
+// byte-identical to writing it in a single blob. It also crosses a chunk boundary — dim is set
+// past ckptBasisChunkCols — so an off-by-one in the chunk loop cannot pass.
+func TestSaveKrylovStreamMatchesInMemory(t *testing.T) {
+	const n, main = 7, 2
+	dim := ckptBasisChunkCols + 3 // > one chunk, and not a multiple of the chunk width
+	maxdim := dim + 5             // basis panel is wider than the populated part
+	const maxBlocks, blkStart, blkSize, iter = 99, 4, 2, 3
+
+	be := backend.Gonum{}
+	host := make([]float64, n*maxdim)
+	for i := range host {
+		host[i] = float64(i%97) - 48.5
+	}
+	basis := backend.BlockView{V: be.Upload(host), Rows: n, Cols: maxdim, Ld: n}
+
+	tm := backend.NewMat(maxdim, maxdim)
+	for i := range tm.Data {
+		tm.Data[i] = float64(i%13) * 0.25
+	}
+
+	streamed := filepath.Join(t.TempDir(), "stream.ckpt")
+	if err := saveKrylov(be, streamed, basis, tm, n, main, maxdim, maxBlocks, dim, blkStart, blkSize, iter); err != nil {
+		t.Fatalf("saveKrylov: %v", err)
+	}
+
+	// Reference: the same state written from a single in-memory basis slice.
+	tHost := make([]float64, dim*dim)
+	for i := range dim {
+		copy(tHost[i*dim:(i+1)*dim], tm.Data[i*maxdim:i*maxdim+dim])
+	}
+	ref := filepath.Join(t.TempDir(), "ref.ckpt")
+	s := &ckptState{
+		N: n, Main: main, Maxdim: maxdim, MaxBlocks: maxBlocks,
+		Dim: dim, BlkStart: blkStart, BlkSize: blkSize, Iter: iter,
+		Basis: host[:n*dim], T: tHost,
+	}
+	if err := writeCheckpoint(ref, s, len(s.Basis), nil); err != nil {
+		t.Fatalf("writeCheckpoint(ref): %v", err)
+	}
+
+	a, err := os.ReadFile(streamed)
+	if err != nil {
+		t.Fatalf("read streamed: %v", err)
+	}
+	b, err := os.ReadFile(ref)
+	if err != nil {
+		t.Fatalf("read ref: %v", err)
+	}
+	if !bytes.Equal(a, b) {
+		t.Fatalf("streamed checkpoint differs from in-memory one (%d vs %d bytes)", len(a), len(b))
+	}
+
+	// And it must still load back correctly through the normal path.
+	got, err := readCheckpoint(streamed)
+	if err != nil {
+		t.Fatalf("readCheckpoint: %v", err)
+	}
+	if !got.matches(n, main, maxdim, maxBlocks) {
+		t.Fatal("streamed checkpoint fails its own guard")
+	}
+	for i := range n * dim {
+		if got.Basis[i] != host[i] {
+			t.Fatalf("basis[%d] = %g, want %g", i, got.Basis[i], host[i])
+		}
+	}
 }

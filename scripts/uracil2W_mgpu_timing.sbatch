@@ -20,7 +20,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --mem=240gb
-#SBATCH --time=02:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=u2w-mgpu-timing-%j.out
 set -euo pipefail
 
@@ -45,7 +45,10 @@ mo="$WS/${MOL}.mo.json"
 OLD_BIN="${OLD_BIN:-/gpfs/bwfor/work/ws/hd_hh323-melanin/adcgo/runsrc-20260721/adcgo-cuda}"
 NEW_BIN="${NEW_BIN:-/gpfs/bwfor/work/ws/hd_hh323-melanin/adcgo/runsrc-fastpath-20260721/adcgo-cuda}"
 
-BLOCKS="${BLOCKS:-10}"   # a few Lanczos iterations is enough to time a mat-vec; not a converged solve
+# 3, not 10: the first attempt (job 14011362) spent its whole 2 h inside run A without finishing
+# 10 blocks, so it produced no comparison at all. The host path is ~minutes per mat-vec even at
+# this scale — a handful of iterations is all that is needed to time one.
+BLOCKS="${BLOCKS:-3}"
 MGPU="${MGPU:-4}"
 
 for f in "$fcidump" "$mo" "$OLD_BIN" "$NEW_BIN"; do
@@ -75,7 +78,10 @@ run() {
     echo "#end<$tag>"
 }
 
-run "A-host-gather-scatter" "$OLD_BIN"
+# B FIRST. The previous attempt ordered A first and the walltime expired inside it, so the run
+# that actually matters produced no number. B is the one being evaluated; A is the baseline and
+# may legitimately be truncated.
 run "B-per-device-nvlink"   "$NEW_BIN"
+run "A-host-gather-scatter" "$OLD_BIN"
 
 echo "compare the two 'wall' lines and the mat-vec share in each -profile breakdown"

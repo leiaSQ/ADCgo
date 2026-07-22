@@ -33,7 +33,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:H200:1
-#SBATCH --mem=240gb
+#SBATCH --mem=700gb
 #SBATCH --time=120:00:00
 #SBATCH --signal=B:USR1@600
 #SBATCH --output=melanin-sip-g%j.out
@@ -92,8 +92,19 @@ echo "#begin<adc>"
 adc_pid=$!
 trap 'kill -USR1 "$adc_pid" 2>/dev/null || true' USR1
 rc=0; wait "$adc_pid" || rc=$?
-while [ "$rc" -gt 128 ]; do rc=0; wait "$adc_pid" || rc=$?; done   # wait interrupted by trap
+# Re-wait ONLY while the child is genuinely still running, i.e. the wait was interrupted by the
+# USR1 trap. A child KILLED by a signal also reports rc>128 (137 = SIGKILL, what the cgroup OOM
+# killer sends) but is already gone — looping on rc alone spins this shell forever at 100% CPU,
+# holding the GPU allocation with nothing running on it. That cost 4.5 h of an idle H200 on job
+# 14010104 and ~1 h on 13999776 before it was caught. kill -0 is the liveness test that
+# distinguishes the two cases.
+while [ "$rc" -gt 128 ] && kill -0 "$adc_pid" 2>/dev/null; do
+    rc=0; wait "$adc_pid" || rc=$?
+done
 echo "#end<adc>"
+if [ "$rc" -gt 128 ]; then
+    echo "gen $GEN: solver killed by signal $((rc - 128))$([ "$rc" = 137 ] && echo ' (SIGKILL — almost certainly the cgroup OOM killer; check MaxRSS against --mem)')" >&2
+fi
 
 case "$rc" in
     0)
