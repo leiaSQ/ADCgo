@@ -83,6 +83,7 @@ func main() {
 	backendName := flag.String("backend", "gonum", "linear-algebra backend: gonum | hip | cuda | auto (auto calibrates and picks per sector; build-tag gated)")
 	gpus := flag.Int("gpus", 0, "-backend cuda|hip only: max GPUs for concurrent per-sector solves (0 = all visible). Independent sectors (DIP spin×irrep, SIP irrep) run one per GPU")
 	mgpu := flag.Int("mgpu", 0, "-dip -solver lanczos-lowmem -lowmem-block 0 only: row-partition ONE sector across this many GPUs (0 = off), so a whole-band Mode B Krylov block that dwarfs a single GPU fits across a node. Sectors run serially, each spanning the pool; needs a fast inter-GPU link (NVLink)")
+	satChunk := flag.Int("satchunk", dip.SatChunkCols, "-mgpu matrix-free DIP only: column-chunk width of the per-device satellite gather. Each device stages a full-height n×w slab (n·w·8 bytes), and the applier fences twice per chunk — so raising this cuts both the ceil(b/w) element recompute (~15% at 64, ~8% at 128) and the barrier count, at proportionally more slab VRAM")
 	matfree := flag.String("matfree", "off", "matrix-free apply of large blocks — CVS-ADC(4) 2h1p×3h2p/2h1p² coupling and the order-3 SIP 2h1p×2h1p satellite (recompute vs store): off | auto | on. Trades resident memory for per-mat-vec recompute; auto switches per block using -maxmem. Required for large SIP-ADC(3) sectors whose dense satellite block is TB-scale (e.g. melanin)")
 	maxMemGB := flag.Float64("maxmem", 4.0, "matrix-free -matfree=auto threshold: a coupling block whose dense size exceeds this many GB is applied matrix-free")
 	wert3 := flag.Bool("wert3", true, "include the WERT3 5th-order 3h2p-diagonal correction in CVS-ADC(4) (the full EIGAB effective diagonal theADCcode itself uses; bit-exact vs its FT19 tape). -wert3=false for the bare 0th-order 3h2p diagonal.")
@@ -111,6 +112,14 @@ func main() {
 	flag.Var(&groups, "group", "decay-site grouping NAME=col1,col2 (repeatable; ~col makes a column passive); a bare -group prompts interactively; default each population column is its own site")
 	convert := flag.String("convert", "", "read a previously emitted solver document JSON (the default -dip/-sip output) and emit its bare stick spectrum without re-solving; needs -dip or -sip to say which kind")
 	flag.Parse()
+
+	// Applied before any Matrix is built: the per-device satellite appliers latch the chunk
+	// width when they are CONSTRUCTED, because it sizes their slab allocation.
+	if *satChunk < 1 {
+		fmt.Fprintf(os.Stderr, "adcgo: -satchunk must be >= 1 (got %d)\n", *satChunk)
+		os.Exit(2)
+	}
+	dip.SatChunkCols = *satChunk
 
 	// -convert post-processes an existing output file; it re-solves nothing and so
 	// needs no FCIDUMP.

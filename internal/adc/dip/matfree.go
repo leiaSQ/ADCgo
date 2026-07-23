@@ -79,6 +79,43 @@ func (mx *Matrix) matFreeSupported() bool {
 // per-scalar CUDA kernel on a DeviceKernels device, the gather-apply-scatter path on a
 // row-partitioned (PanelScatterAdd) backend, else the host block applier. Same ordering
 // rationale as matFreeSupported (distributed satisfies HostData via embedded Gonum).
+// newSatelliteMatFreeParts builds the satellite matrix-free appliers for the current backend.
+//
+// On a plain HOST backend the jiiLKK blocks are split out into the batched-GEMM applier
+// (matfree_batched.go) and the remainder (ijkMLL/ijkLMN) keeps the loop applier — BLAS beats the
+// hand loop at every block size measured, and jiiLKK is the block that has been validated for
+// this treatment (BenchmarkBlockApplyCrossover, TestJIIMatFreeBatchedEqualsLoop). Every other
+// backend keeps its single whole-region applier unchanged; the device and distributed paths are
+// not touched by this split.
+func (mx *Matrix) newSatelliteMatFreeParts() []matFreePart {
+	// Single GPU: the batched contraction path (fill kernel + cuBLAS batched GEMM). The
+	// per-scalar DipSatApply applier remains available via newSatelliteMatFreePart and is what
+	// the parity tests compare against.
+	if dk, ok := mx.be.(backend.DeviceKernels); ok {
+		return []matFreePart{mx.newSatBatchedDevice(dk)}
+	}
+	// Multi-GPU: the batched contraction path when every partition has kernels and all pairs are
+	// peered; otherwise fall through to the per-scalar per-device applier / host fallback, which
+	// newSatelliteMatFreePart selects.
+	if pd, ok := mx.be.(backend.PartitionedDevices); ok {
+		if perDeviceSatelliteOK(pd) {
+			return []matFreePart{mx.newSatBatchedPerDevice(pd)}
+		}
+		return []matFreePart{mx.newSatelliteMatFreePart()}
+	}
+	if _, ok := mx.be.(backend.PanelScatterAdd); ok {
+		return []matFreePart{mx.newSatelliteMatFreePart()}
+	}
+	if _, ok := mx.be.(backend.HostData); ok {
+		// Host: the batched plan now covers ALL THREE satellite blocks (jiiLKK, ijkMLL,
+		// ijkLMN), so the loop applier is bypassed entirely. It is retained as the reference
+		// implementation the batched path is validated against
+		// (TestSatelliteMatFreeBatchedEqualsLoop) — not dead code.
+		return []matFreePart{mx.newJIIMatFreeBatched()}
+	}
+	return []matFreePart{mx.newSatelliteMatFreePart()}
+}
+
 func (mx *Matrix) newSatelliteMatFreePart() matFreePart {
 	if dk, ok := mx.be.(backend.DeviceKernels); ok {
 		return mx.newSatelliteMatFreeDevice(dk)
@@ -245,7 +282,14 @@ func gemvTranspose(block backend.Mat, rowOff, colOff int, xin, yout []float64, b
 // newSatelliteMatFree builds the matrix-free applier for the 3h1p↔3h1p satellite region, the
 // on-the-fly equivalent of the dense satelliteTasks. See the file comment for the two-pass,
 // occupied-index-pruned design.
+// skipJII, when true, omits every jiiLKK block from this applier — the caller is supplying them
+// through the batched-GEMM path instead (matfree_batched.go). The ijkMLL/ijkLMN blocks are
+// unaffected and keep their loop applier. Passing false gives the original whole-region behaviour.
 func (mx *Matrix) newSatelliteMatFree() matFreePart {
+	return mx.newSatelliteMatFreeExcept(false)
+}
+
+func (mx *Matrix) newSatelliteMatFreeExcept(skipJII bool) matFreePart {
 	sp := mx.sp
 	hd := mx.be.(backend.HostData)
 	bk := mx.buildSatBuckets()
@@ -260,25 +304,27 @@ func (mx *Matrix) newSatelliteMatFree() matFreePart {
 		// worker owns its row-groups' output bands exclusively. ---
 
 		// 1a: JII row-groups → jiiLKK over candidate JII col-groups (gc <= gr).
-		parallel.Chunks(njii, parallel.ChunkWorkers(njii), func(_, lo, hi int) {
-			stamp := newStamp(njii)
-			var cand []int32
-			for gr := lo; gr < hi; gr++ {
-				r0 := sp.JII[gr]
-				rc := sp.Configs[r0]
-				cand = gatherCand(rc.Occ[:2], bk.jii, stamp, int32(gr), cand)
-				for _, gc32 := range cand {
-					gc := int(gc32)
-					if gc > gr {
-						continue
-					}
-					c0 := sp.JII[gc]
-					if blk, ok := mx.blk.jiiLKK(rc, sp.Configs[c0]); ok {
-						gemvForward(blk, r0, c0, xin, yout, b, ldi, ldo)
+		if !skipJII {
+			parallel.Chunks(njii, parallel.ChunkWorkers(njii), func(_, lo, hi int) {
+				stamp := newStamp(njii)
+				var cand []int32
+				for gr := lo; gr < hi; gr++ {
+					r0 := sp.JII[gr]
+					rc := sp.Configs[r0]
+					cand = gatherCand(rc.Occ[:2], bk.jii, stamp, int32(gr), cand)
+					for _, gc32 := range cand {
+						gc := int(gc32)
+						if gc > gr {
+							continue
+						}
+						c0 := sp.JII[gc]
+						if blk, ok := mx.blk.jiiLKK(rc, sp.Configs[c0]); ok {
+							gemvForward(blk, r0, c0, xin, yout, b, ldi, ldo)
+						}
 					}
 				}
-			}
-		})
+			})
+		}
 
 		// 1b: IJK row-groups → ijkMLL over candidate JII col-groups (all) + ijkLMN over
 		// candidate IJK col-groups (gc <= gr). Both write the same IJK row band, done by the
@@ -321,15 +367,17 @@ func (mx *Matrix) newSatelliteMatFree() matFreePart {
 			for gc := lo; gc < hi; gc++ {
 				c0 := sp.JII[gc]
 				cc := sp.Configs[c0]
-				candJ = gatherCand(cc.Occ[:2], bk.jii, stampJ, int32(gc), candJ)
-				for _, gr32 := range candJ {
-					gr := int(gr32)
-					if gr <= gc {
-						continue
-					}
-					r0 := sp.JII[gr]
-					if blk, ok := mx.blk.jiiLKK(sp.Configs[r0], cc); ok {
-						gemvTranspose(blk, r0, c0, xin, yout, b, ldi, ldo)
+				if !skipJII {
+					candJ = gatherCand(cc.Occ[:2], bk.jii, stampJ, int32(gc), candJ)
+					for _, gr32 := range candJ {
+						gr := int(gr32)
+						if gr <= gc {
+							continue
+						}
+						r0 := sp.JII[gr]
+						if blk, ok := mx.blk.jiiLKK(sp.Configs[r0], cc); ok {
+							gemvTranspose(blk, r0, c0, xin, yout, b, ldi, ldo)
+						}
 					}
 				}
 				candI = gatherCand(cc.Occ[:2], bk.ijk, stampI, int32(gc), candI)

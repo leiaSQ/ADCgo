@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // PreconOperator is an Operator that can also expose its matrix diagonal as a resident
@@ -198,13 +199,28 @@ func SolveDavidson(op PreconOperator, be backend.Backend, opts Options) Result {
 		// swap out at the window boundary.
 		t0 = time.Now()
 		rHost := be.Download(cbuf)
-		cor := make([]float64, 0, n*nw)
-		nunc := 0
+		// Collect the unconverged column indices first so the correction block can be sized and
+		// filled in one allocation: the previous form allocated a fresh n-vector per column and
+		// appended it, i.e. nunc+1 allocations plus a copy on every Davidson iteration.
+		unc := make([]int, 0, nw)
 		for k := range nw {
-			if residNorm[k] <= opts.ConvThr {
-				continue
+			if residNorm[k] > opts.ConvThr {
+				unc = append(unc, k)
 			}
-			col := make([]float64, n)
+		}
+		nunc := len(unc)
+		cor := make([]float64, n*nunc) // n×nunc, column-major
+		// Parallel over correction columns: column c writes only cor[c*n:(c+1)*n], so the work
+		// items are disjoint (parallel.Rows' contract). Bit-identical to the serial form — every
+		// element uses the same expression and nrm2 still accumulates in ascending j within a
+		// column; only the order across independent columns changes.
+		//
+		// Note this runs mid-solve, unlike parallel's assemble-phase framing. That is safe here
+		// because the device is idle at this point: the residual has just been downloaded and the
+		// correction is not uploaded until below, so there is no concurrent BLAS to oversubscribe.
+		parallel.Rows(nunc, func(c int) {
+			k := unc[c]
+			col := cor[c*n : (c+1)*n]
 			var nrm2 float64
 			for j := range n {
 				a1 := theta[k] - dHost[j]
@@ -225,9 +241,7 @@ func SolveDavidson(op PreconOperator, be backend.Backend, opts Options) Result {
 					col[j] *= s
 				}
 			}
-			cor = append(cor, col...)
-			nunc++
-		}
+		})
 		corUp := be.Upload(cor) // n×nunc, column-major
 		corBlk := backend.BlockView{V: corUp, Rows: n, Cols: nunc, Ld: n}
 

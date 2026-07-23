@@ -169,6 +169,15 @@ func devD2D(dst, src unsafe.Pointer, n int) {
 	C.dev_d2d(dst, src, C.size_t(n*elemSize))
 }
 
+// devHostAlloc / devHostFree: pinned-host-memory hooks that gpu_device.go (shared by the cuda
+// and hip builds) calls for its batched-GEMM pointer staging. There is no hipHostMalloc binding
+// here yet, and returning nil is the documented "not available" answer — the caller then stages
+// through ordinary Go-heap memory, which is exactly what this backend did before the hook
+// existed. Wiring the real hipHostMalloc/hipHostFree is a straight transcription of the cuda.go
+// pair whenever an AMD target actually needs it.
+func devHostAlloc(int) unsafe.Pointer { return nil }
+func devHostFree(unsafe.Pointer)      {}
+
 // devCanPeer reports whether device dev may access device peer's memory.
 func devCanPeer(dev, peer int) bool { return int(C.dev_can_peer(C.int(dev), C.int(peer))) != 0 }
 

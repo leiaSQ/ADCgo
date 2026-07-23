@@ -11,6 +11,15 @@
 // element twice (once per direction); the fused single-eval variant needs a slab reduce
 // (docs/adc4_matfree_gpu.md) and is a follow-up.
 //
+// Determinism note (2026-07-23). wert2_fwd/wert2_trans accumulate straight into yout per
+// element rather than into a per-column register and adding once at the end. Both forms sum
+// in the same fixed index order, so the run-to-run guarantee above is unchanged — but the
+// association differs: y + (g0x0 + g1x1 + ...) became ((y + g0x0) + g1x1) + ... . Where yout
+// is non-zero on entry (appliers accumulate in sequence) results may move by an ulp against
+// the pre-2026-07-23 kernel. Parity tests run at 1e-10..1e-14; this is ~1e-16 relative.
+// Keeping the register accumulator would have required holding b of them, and b is unbounded
+// on the SIP path — that is the register-tiling follow-up, not something to do here.
+//
 // Build: nvcc -O3 -c adc4_kernels.cu -o adc4_kernels.o   (see cuda_kernels.go go:generate)
 
 #include <cuda_runtime.h>
@@ -90,36 +99,42 @@ struct ColSoA { const int *I, *J, *K, *L, *M, *Spin; };
 // Forward pass: y2[main+r] += Σ_c wert2(r,c)·x3[off3+c], one thread per 2h1p row r.
 __global__ void wert2_fwd(int n2, int n3, int b, int ldIn, int ldOut, int mainOff, int off3,
                           int norb, int nocc, RowSoA rw, ColSoA cl,
-                          const double *xin, double *yout, const double *eri) {
+                          const double *__restrict__ xin, double *__restrict__ yout,
+                          const double *__restrict__ eri) {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
     if (r >= n2) return;
     int Vir = rw.Vir[r], K = rw.K[r], L = rw.L[r], Typ = rw.Typ[r];
-    for (int j = 0; j < b; j++) {
-        double acc = 0.0;
-        for (int c = 0; c < n3; c++) {
-            double g = d_wert2(Vir, K, L, Typ, cl.I[c], cl.J[c], cl.K[c], cl.L[c], cl.M[c],
-                               cl.Spin[c], eri, norb, nocc);
-            if (g != 0.0) acc += g * xin[(off3 + c) + j * ldIn];
+    // Element-outer, column-inner — the same nest c22_apply uses below. g depends only on
+    // (r,c), so the previous column-outer form re-evaluated d_wert2 b times per (r,c): a
+    // 31-entry local array, up to ~16 conditional ERI loads and a 30-term dot product, all
+    // repeated per panel column. SIP passes b unchunked (sip/matfree.go), so that was a full
+    // b-fold multiplier on the dominant cost, not an amortized chunking tax.
+    for (int c = 0; c < n3; c++) {
+        double g = d_wert2(Vir, K, L, Typ, cl.I[c], cl.J[c], cl.K[c], cl.L[c], cl.M[c],
+                           cl.Spin[c], eri, norb, nocc);
+        if (g == 0.0) continue;
+        for (int j = 0; j < b; j++) {
+            yout[(mainOff + r) + j * ldOut] += g * xin[(off3 + c) + j * ldIn];
         }
-        yout[(mainOff + r) + j * ldOut] += acc;
     }
 }
 
 // Transpose pass: y3[off3+c] += Σ_r wert2(r,c)·x2[main+r], one thread per 3h2p column c.
 __global__ void wert2_trans(int n2, int n3, int b, int ldIn, int ldOut, int mainOff, int off3,
                             int norb, int nocc, RowSoA rw, ColSoA cl,
-                            const double *xin, double *yout, const double *eri) {
+                            const double *__restrict__ xin, double *__restrict__ yout,
+                            const double *__restrict__ eri) {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= n3) return;
     int I = cl.I[c], J = cl.J[c], K = cl.K[c], L = cl.L[c], M = cl.M[c], Spin = cl.Spin[c];
-    for (int j = 0; j < b; j++) {
-        double acc = 0.0;
-        for (int r = 0; r < n2; r++) {
-            double g = d_wert2(rw.Vir[r], rw.K[r], rw.L[r], rw.Typ[r], I, J, K, L, M, Spin,
-                               eri, norb, nocc);
-            if (g != 0.0) acc += g * xin[(mainOff + r) + j * ldIn];
+    // Element-outer, column-inner — see wert2_fwd above for why.
+    for (int r = 0; r < n2; r++) {
+        double g = d_wert2(rw.Vir[r], rw.K[r], rw.L[r], rw.Typ[r], I, J, K, L, M, Spin,
+                           eri, norb, nocc);
+        if (g == 0.0) continue;
+        for (int j = 0; j < b; j++) {
+            yout[(off3 + c) + j * ldOut] += g * xin[(mainOff + r) + j * ldIn];
         }
-        yout[(off3 + c) + j * ldOut] += acc;
     }
 }
 
@@ -229,8 +244,10 @@ __device__ double d_c22off(int K, int L, int Vir, int Typ,
 // The element is computed once per (r,c) and applied across all b panel columns; the single
 // owning thread makes the row's output race-free and reduction-jitter-free.
 __global__ void c22_apply(int n2, int b, int ldIn, int ldOut, int mainOff, int norb, int nocc,
-                          const int *K, const int *L, const int *Vir, const int *Typ,
-                          const double *eri, const double *eps, const double *xin, double *yout) {
+                          const int *__restrict__ K, const int *__restrict__ L,
+                          const int *__restrict__ Vir, const int *__restrict__ Typ,
+                          const double *__restrict__ eri, const double *__restrict__ eps,
+                          const double *__restrict__ xin, double *__restrict__ yout) {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
     if (r >= n2) return;
     int Kr = K[r], Lr = L[r], Vr = Vir[r], Tr = Typ[r];

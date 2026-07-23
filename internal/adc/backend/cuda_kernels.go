@@ -30,6 +30,13 @@ int adc4_c22_apply(int n2,int b,int ldIn,int ldOut,int mainOff,int norb,int nocc
     const double* eri,const double* eps,const double* xin,double* yout);
 
 // Launcher defined in adc2dip_kernels.cu (extern "C").
+int adc2_dip_fill_sat(int nslot,int spin,int norb,int parts,int maxElems,
+    const int* kind,
+    const int* rowO0,const int* rowO1,const int* rowO2,
+    const int* colO0,const int* colO1,const int* colO2,
+    const int* rowVOff,const int* rowNv,const int* colVOff,const int* colNv,
+    const int* bufOff,const int* virs,
+    const double* eri,const double* eps,const int* osym,double* buf);
 int adc2_dip_sat_apply(int nsat,int njii,int nijk,int b,int ldIn,int ldOut,
     int mainOff,int norb,int parts,int spin,
     int rowLo,int rowHi,int outRowOff,
@@ -102,6 +109,56 @@ func (b *gpuBackend) Wert2Apply(a Wert2Args) {
 			(*C.int)(a.CI), (*C.int)(a.CJ), (*C.int)(a.CK), (*C.int)(a.CL), (*C.int)(a.CM), (*C.int)(a.CSpin),
 			(*C.double)(a.ERI), xin, yout)
 	})
+}
+
+// DipSatFillJII materializes a batch of jiiLKK blocks into a persistent device scratch buffer and
+// returns DeviceMat handles into it.
+//
+// The scratch is grown on demand and reused across applies, following the same precedent as the
+// batched-GEMM pointer arrays (ensurePtrCap): this runs once per mat-vec, so a cudaMalloc/cudaFree
+// pair per call would put allocator churn on the hot path. Handles are invalidated by the next
+// call, which is why the caller consumes them immediately via GemmMatBatched.
+func (b *gpuBackend) DipSatFillJII(a DipFillJIIArgs) []DeviceMat {
+	if a.NSlot == 0 {
+		return nil
+	}
+	b.do(func() {
+		if b.jiiCap < a.TotalElems {
+			if b.jiiBuf != nil {
+				devFree(b.jiiBuf)
+			}
+			b.jiiBuf = devMalloc(a.TotalElems)
+			b.jiiCap = a.TotalElems
+		}
+		C.adc2_dip_fill_sat(C.int(a.NSlot), C.int(a.Spin), C.int(a.Norb), C.int(a.Parts),
+			C.int(a.MaxElems), (*C.int)(a.Kind),
+			(*C.int)(a.RowO0), (*C.int)(a.RowO1), (*C.int)(a.RowO2),
+			(*C.int)(a.ColO0), (*C.int)(a.ColO1), (*C.int)(a.ColO2),
+			(*C.int)(a.RowVOff), (*C.int)(a.RowNv), (*C.int)(a.ColVOff), (*C.int)(a.ColNv),
+			(*C.int)(a.BufOff), (*C.int)(a.Virs),
+			(*C.double)(a.ERI), (*C.double)(a.Eps), (*C.int)(a.OrbSym),
+			(*C.double)(b.jiiBuf))
+	})
+
+	// Shape the handles from the host-side dims; offsets are the same prefix sum the kernel used.
+	out := make([]DeviceMat, a.NSlot)
+	off := 0
+	for i := range a.NSlot {
+		out[i] = devMat{p: unsafe.Add(b.jiiBuf, off*elemSize), rows: a.Rows[i], cols: a.Cols[i]}
+		off += a.Rows[i] * a.Cols[i]
+	}
+	return out
+}
+
+// DownloadMat copies a resident block back to the host (row-major). Verification only.
+func (b *gpuBackend) DownloadMat(m DeviceMat) []float64 {
+	dm := m.(devMat)
+	out := make([]float64, dm.rows*dm.cols)
+	if len(out) == 0 {
+		return out
+	}
+	b.do(func() { devD2H(out, dm.p) })
+	return out
 }
 
 // C22Apply launches the matrix-free order-3 2h1p×2h1p satellite apply (single symmetric pass)

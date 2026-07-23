@@ -24,7 +24,10 @@ package backend
 // NewDistributed enforces n > 2·main² so the two can never alias — trivially true at the
 // production scale this exists for (melanin: n ≈ 14.75M ≫ 2.7M).
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // distBackend spreads the row dimension across subs. bound holds the G+1 partition
 // boundaries (bound[0]=0, bound[G]=n); device d owns global rows [bound[d], bound[d+1]).
@@ -319,18 +322,42 @@ func (b *distBackend) Gemm(transA, transB bool, alpha float64, a, bb BlockView, 
 		// All-reduce: sum the per-device buffers and replicate the total back to every device.
 		// Gaps outside the c.Rows×c.Cols result region are never read by the consumer, so
 		// summing whole buffers is safe.
-		acc := b.subs[0].Download(cdv.part[0])
-		for d := 1; d < b.ndev(); d++ {
-			part := b.subs[d].Download(cdv.part[d])
+		// Both halves of the all-reduce are issued concurrently: every Download/Upload is a
+		// blocking round-trip through that device's owning goroutine, and the devices are
+		// independent, so serially this cost 2·ndev synchronous transfers on a path the solver
+		// takes several times per Lanczos iteration (alpha, Gram, every CGS2 projection) — not
+		// once per mat-vec.
+		//
+		// The ARITHMETIC stays serial and in ascending device order. Floating-point addition is
+		// not associative, so the reduction order is a deliberate choice, not an incidental one:
+		// summing as the partials happened to land would make results depend on transfer timing.
+		// Only the transfers overlap. Download returns a fresh host copy on every backend, so
+		// the partials do not alias device storage.
+		nd := b.ndev()
+		parts := make([][]float64, nd)
+		var wgDown sync.WaitGroup
+		for d := range nd {
+			wgDown.Go(func() { parts[d] = b.subs[d].Download(cdv.part[d]) })
+		}
+		wgDown.Wait()
+
+		acc := parts[0]
+		for d := 1; d < nd; d++ {
 			for i := range acc {
-				acc[i] += part[i]
+				acc[i] += parts[d][i]
 			}
 		}
-		for d := range b.ndev() {
-			up := b.subs[d].Upload(acc)
-			b.subs[d].Copy(cdv.part[d], up)
-			b.subs[d].Free(up)
+
+		// Replicate the total back. acc is read-only here, shared across the workers.
+		var wgUp sync.WaitGroup
+		for d := range nd {
+			wgUp.Go(func() {
+				up := b.subs[d].Upload(acc)
+				b.subs[d].Copy(cdv.part[d], up)
+				b.subs[d].Free(up)
+			})
 		}
+		wgUp.Wait()
 		return
 	}
 	for d := range b.ndev() {
@@ -513,9 +540,55 @@ func (b *distBackend) GemmMat(transA bool, alpha float64, a DeviceMat, bb BlockV
 	b.gemmMatOne(transA, alpha, a, bb, c, beta)
 }
 
+// GemmMatBatched groups the batch by the device owning each output band and issues one real
+// batched GEMM per device, instead of one cuBLAS call per block.
+//
+// Why regrouping is numerically free: gpuBackend.GemmMatBatched's contract (gpu_device.go)
+// already requires batch members to have pairwise non-overlapping outputs and uniform shapes —
+// they execute concurrently and cannot interact. Partitioning an independent set therefore
+// changes no arithmetic, only the launch count. The previous form unpacked the batch into
+// len(a) sequential gemmMatOne calls, reintroducing exactly the dispatch tax batching exists to
+// remove (measured there at 181 s of a 379 s formic-acid sector).
+//
+// Blocks whose INPUT band is remote still go one at a time through gemmMatOne: each needs its
+// own gathered, compacted band (Ld = rows), which would break the uniform-Ld requirement if
+// mixed into a batch of local bands. Batching those too means sub-bucketing by leading
+// dimension and holding every gathered band alive across the call — worthwhile only if a
+// profile shows remote-input blocks dominating, which row-partitioning is chosen to avoid.
 func (b *distBackend) GemmMatBatched(transA bool, alpha float64, a []DeviceMat, bb []BlockView, beta float64, c []BlockView) {
+	if len(a) == 0 {
+		return
+	}
+	nd := b.ndev()
+	// Per-device local-input members, in their original batch order.
+	la := make([][]DeviceMat, nd)
+	lb := make([][]BlockView, nd)
+	lc := make([][]BlockView, nd)
+
 	for i := range a {
-		b.gemmMatOne(transA, alpha, a[i], bb[i], c[i], beta)
+		cdv := c[i].V.(distVec)
+		if cdv.loc == nil {
+			panic("distributed GemmMatBatched: output is not a located row band")
+		}
+		bdv := bb[i].V.(distVec)
+		if bdv.loc == nil {
+			panic("distributed GemmMatBatched: input is not a located row band")
+		}
+		do := cdv.loc.dev
+		if bdv.loc.dev != do {
+			b.gemmMatOne(transA, alpha, a[i], bb[i], c[i], beta) // remote input: see above
+			continue
+		}
+		la[do] = append(la[do], a[i].(*distMat).on(do))
+		lb[do] = append(lb[do], BlockView{V: bdv.part[do], Rows: bdv.loc.rows, Cols: bb[i].Cols, Ld: bdv.loc.ld})
+		lc[do] = append(lc[do], BlockView{V: cdv.part[do], Rows: cdv.loc.rows, Cols: c[i].Cols, Ld: cdv.loc.ld})
+	}
+
+	for d := range nd {
+		if len(la[d]) == 0 {
+			continue
+		}
+		b.subs[d].GemmMatBatched(transA, alpha, la[d], lb[d], beta, lc[d])
 	}
 }
 

@@ -232,7 +232,7 @@ func (mx *Matrix) assemble() *assembledOp {
 	}
 	op := newAssembledOp(mx.runTaskParts(tasks), mx.sp.BeginJII)
 	if matFree {
-		op.mf = []matFreePart{mx.newSatelliteMatFreePart()}
+		op.mf = mx.newSatelliteMatFreeParts()
 	}
 	return op
 }

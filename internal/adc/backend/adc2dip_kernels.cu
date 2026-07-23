@@ -268,8 +268,9 @@ __global__ void dip_sat_apply(int nsat, int njii, int nijk, int b, int ldIn, int
                               int mainOff, int norb, int parts, int spin,
                               int rowLo, int rowHi, int outRowOff,
                               RowSoA rw, JGroups jg, IGroups ig,
-                              const double *eri, const double *eps, const int *osym,
-                              const double *xin, double *yout) {
+                              const double *__restrict__ eri, const double *__restrict__ eps,
+                              const int *__restrict__ osym,
+                              const double *__restrict__ xin, double *__restrict__ yout) {
     int ri = rowLo + blockIdx.x * blockDim.x + threadIdx.x;
     if (ri >= rowHi || ri >= nsat) return;
     int n = norb;
@@ -339,10 +340,113 @@ __global__ void dip_sat_apply(int nsat, int njii, int nijk, int b, int ldIn, int
     }
 }
 
+// ============================================================================
+// jiiLKK block FILL — the contraction path (docs/sigma_build_contractions.md).
+//
+// dip_sat_apply above recomputes each element and immediately broadcasts it across the b panel
+// columns with a scalar loop, which is bandwidth-bound and measured 0.58% of fp64 peak. This
+// kernel instead MATERIALIZES a batch of jiiLKK blocks into scratch, so the panel multiply is
+// then done by cuBLAS batched dgemm — each block element is read by a tiled GEMM b times instead
+// of being re-broadcast by hand. At melanin's b=1653 that reuse is the whole point.
+//
+// The arithmetic is unchanged: it calls the SAME d_jii_s / d_jii_t the per-scalar kernel uses,
+// which are pinned against the dense reference by TestSatelliteScalarMatchesDense. Only the
+// consumer differs.
+//
+// Orientation: the Go planner enumerates gc <= gr, so the row config is always the higher-indexed
+// group — matching d_jii_s's (j,i | l,k) order with row first, i.e. the `rGrp >= cg` branch of
+// dip_sat_apply. Blocks are written ROW-MAJOR (buf[bufOff + r*nc + c]), which is what
+// backend.Mat / devMat is.
+// ============================================================================
+
+// Slot kinds, mirroring dip.satKind. The three blocks differ in how a flat (r,c) element index
+// decodes into (spin part, virtual orbital) — their dims already fold in the parts factor
+// (blocks.go ijkMLLShape/ijkLMNShape), so the block is a plain dense Mat in every case:
+//   JII    : nvR        × nvC          r = a
+//   IJKMLL : parts·nvR  × nvC          r = pr·nvR + a
+//   IJKLMN : parts·nvR  × parts·nvC    r = pr·nvR + a,  c = pc·nvC + bIdx
+#define DIPK_JII 0
+#define DIPK_IJKMLL 1
+#define DIPK_IJKLMN 2
+
+// One CUDA block-row per slot (blockIdx.y), grid-stride over that slot's elements. Blocks are
+// written ROW-MAJOR (buf[bufOff + r*totalCols + c]), matching backend.Mat/devMat.
+__global__ void dip_fill_sat(int nslot, int spin, int norb, int parts,
+                             const int *__restrict__ kind,
+                             const int *__restrict__ rowO0, const int *__restrict__ rowO1,
+                             const int *__restrict__ rowO2,
+                             const int *__restrict__ colO0, const int *__restrict__ colO1,
+                             const int *__restrict__ colO2,
+                             const int *__restrict__ rowVOff, const int *__restrict__ rowNv,
+                             const int *__restrict__ colVOff, const int *__restrict__ colNv,
+                             const int *__restrict__ bufOff, const int *__restrict__ virs,
+                             const double *__restrict__ eri, const double *__restrict__ eps,
+                             const int *__restrict__ osym,
+                             double *__restrict__ buf) {
+    int s = blockIdx.y;
+    if (s >= nslot) return;
+    int kd = kind[s];
+    int nvR = rowNv[s], nvC = colNv[s];
+    int rvo = rowVOff[s], cvo = colVOff[s], bo = bufOff[s];
+
+    // Full block dims including the parts factor.
+    int nr = (kd == DIPK_JII) ? nvR : parts * nvR;
+    int nc = (kd == DIPK_IJKLMN) ? parts * nvC : nvC;
+    int total = nr * nc;
+
+    int ro0 = rowO0[s], ro1 = rowO1[s], ro2 = rowO2[s];
+    int co0 = colO0[s], co1 = colO1[s], co2 = colO2[s];
+
+    for (int e = blockIdx.x * blockDim.x + threadIdx.x; e < total; e += gridDim.x * blockDim.x) {
+        int r = e / nc, c = e - r * nc;
+        double v;
+        if (kd == DIPK_JII) {
+            int ra = virs[rvo + r], sb = virs[cvo + c];
+            v = (spin == 0) ? d_jii_s(ro0, ro1, co0, co1, ra, sb, eri, eps, osym, norb)
+                            : d_jii_t(ro0, ro1, co0, co1, ra, sb, eri, eps, osym, norb);
+        } else if (kd == DIPK_IJKMLL) {
+            int pr = r / nvR, a = r - pr * nvR;
+            int ra = virs[rvo + a], sb = virs[cvo + c];
+            v = (spin == 0) ? d_ijkMLL_s(ro0, ro1, ro2, co0, co1, pr, ra, sb, eri, osym, norb)
+                            : d_ijkMLL_t(ro0, ro1, ro2, co0, co1, pr, ra, sb, eri, osym, norb);
+        } else {
+            int pr = r / nvR, a = r - pr * nvR;
+            int pc = c / nvC, bIdx = c - pc * nvC;
+            int ra = virs[rvo + a], sb = virs[cvo + bIdx];
+            v = (spin == 0) ? d_ijkLMN_s(ro0, ro1, ro2, co0, co1, co2, pr, pc, ra, sb, eri, eps, osym, norb)
+                            : d_ijkLMN_t(ro0, ro1, ro2, co0, co1, co2, pr, pc, ra, sb, eri, eps, osym, norb);
+        }
+        buf[bo + e] = v;
+    }
+}
+
 #undef AA
 #undef BB
 
 extern "C" {
+
+// adc2_dip_fill_sat materializes nslot satellite blocks (any kind) into buf. maxElems is the largest single
+// block's element count, used only to size the grid's x extent (the grid-stride loop covers any
+// remainder). Returns the first cudaError_t seen.
+int adc2_dip_fill_sat(int nslot, int spin, int norb, int parts, int maxElems,
+                      const int *kind,
+                      const int *rowO0, const int *rowO1, const int *rowO2,
+                      const int *colO0, const int *colO1, const int *colO2,
+                      const int *rowVOff, const int *rowNv, const int *colVOff, const int *colNv,
+                      const int *bufOff, const int *virs,
+                      const double *eri, const double *eps, const int *osym, double *buf) {
+    if (nslot <= 0) return 0;
+    int T = 128;
+    int gx = (maxElems + T - 1) / T;
+    if (gx < 1) gx = 1;
+    if (gx > 256) gx = 256;
+    dim3 grid(gx, nslot);
+    dip_fill_sat<<<grid, T>>>(nslot, spin, norb, parts, kind,
+                              rowO0, rowO1, rowO2, colO0, colO1, colO2,
+                              rowVOff, rowNv, colVOff, colNv, bufOff, virs,
+                              eri, eps, osym, buf);
+    return (int)cudaGetLastError();
+}
 
 // adc2_dip_sat_apply launches the satellite apply on the default stream. All pointers are
 // device pointers. [rowLo,rowHi) is the 3h1p row band this launch owns and outRowOff the global

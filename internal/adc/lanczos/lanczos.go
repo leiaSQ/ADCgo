@@ -500,11 +500,23 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 	// Ritz vectors' main-space part: mainVecs = Bmain·S, one host GEMM. Only the
 	// leading `main` rows of each basis column come back from the device.
 	tBack := time.Now()
+	// The leading `main` rows of every basis column: `dim` short runs, basis.Ld apart. A
+	// StridedDownloader fetches the whole rectangle in one transfer; without it this is one
+	// blocking round-trip per column, and dim reaches the thousands on a large sector.
 	bmain := backend.NewMat(main, dim)
-	for j := range dim {
-		col := be.Download(basis.Col(j).Slice(0, main))
-		for c := range main {
-			bmain.Set(c, j, col[c])
+	if sd, ok := be.(backend.StridedDownloader); ok {
+		flat := sd.Download2D(basis.V, main, dim, basis.Ld) // main×dim, column-major
+		for j := range dim {
+			for c := range main {
+				bmain.Set(c, j, flat[j*main+c])
+			}
+		}
+	} else {
+		for j := range dim {
+			col := be.Download(basis.Col(j).Slice(0, main))
+			for c := range main {
+				bmain.Set(c, j, col[c])
+			}
 		}
 	}
 	mainVecs := backend.MatMul(bmain, s)

@@ -58,7 +58,12 @@ source "$root/scripts/melanin_ws.sh"   # resolves + exports ADCGO_WS (ws_allocat
 WS="$ADCGO_WS"
 GEN="${GEN:-0}"
 MAX_GEN="${MAX_GEN:-20}"
-CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-25}"
+# 5, not 25: at melanin scale job 14015378 ran 17h38m without reaching the 25-block interval, so
+# it would have hit the 120 h walltime with NO restart point and its afterany successor would have
+# restarted from scratch — repeating until MAX_GEN. The interval has to be short enough that a
+# checkpoint exists within hours, not within a day. Checkpointing is cheap now that the basis is
+# streamed to disk in chunks (lanczos/checkpoint.go saveKrylov) instead of being downloaded whole.
+CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-5}"
 fcidump="$WS/melanin.fcidump"
 mo="$WS/melanin.mo.json"
 ckpt="$WS/melanin.sip.ckpt"      # adcgo appends a per-irrep suffix (.i<irrep>)

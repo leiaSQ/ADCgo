@@ -3,6 +3,7 @@ package sip
 import (
 	"github.com/leiaSQ/ADCgo/internal/adc/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // Matrix is the IP-ADC(n) secular matrix for one target-symmetry sector. It is
@@ -95,25 +96,39 @@ func (mx *Matrix) mainBlock() backend.Mat {
 }
 
 // coupling builds the dense 1h×2h1p coupling block (c12).
+//
+// Parallel over rows: row r writes only row r of C, so the work items are trivially disjoint
+// (parallel.Rows' contract). Bit-identical to the serial fill — each cell is still computed
+// exactly once by the same expression; only the order in which independent cells are filled
+// changes. Same treatment matvec4.go already gives the ADC(4) blocks (coupling2_4 etc.).
 func (mx *Matrix) coupling() backend.Mat {
 	sp := mx.sp
 	nSat := sp.Size() - sp.BeginSat
 	C := backend.NewMat(sp.BeginSat, nSat)
-	for r := range sp.BeginSat {
+	parallel.Rows(sp.BeginSat, func(r int) {
 		j := sp.Configs[r].Occ[0]
 		for cIdx := range nSat {
 			C.Set(r, cIdx, mx.el.c12(j, sp.Configs[sp.BeginSat+cIdx]))
 		}
-	}
+	})
 	return C
 }
 
 // satBlock builds the dense symmetric 2h1p/2h1p satellite block (k2 + c22_1).
+//
+// Parallel over rows. Worker r writes the diagonal (r,r) plus the upper-row pairs (r,c) and
+// (c,r) for c>r — so cell (i,j) is owned by worker min(i,j) and by no other: the upper triangle
+// comes from its own row, the lower triangle is written only as the mirror of the row above it.
+// Disjoint, hence bit-identical to the serial fill (each element evaluated once, same call).
+//
+// This is the nSat² block, so it is where the parallelism actually pays — but note it is skipped
+// entirely when matFreeC22O3 selects the matrix-free applier (assemble, below), which is the
+// production path for large sectors.
 func (mx *Matrix) satBlock() backend.Mat {
 	sp := mx.sp
 	nSat := sp.Size() - sp.BeginSat
 	S := backend.NewMat(nSat, nSat)
-	for r := range nSat {
+	parallel.Rows(nSat, func(r int) {
 		S.Set(r, r, mx.el.c22diag(sp.Configs[sp.BeginSat+r]))
 		for c := r + 1; c < nSat; c++ {
 			// Reference fills column = higher index (the FOR_ALL outer config).
@@ -121,8 +136,64 @@ func (mx *Matrix) satBlock() backend.Mat {
 			S.Set(r, c, el)
 			S.Set(c, r, el)
 		}
-	}
+	})
 	return S
+}
+
+// OperatorResidentBytes reports the device memory the assembled operator would occupy, without
+// uploading anything, so a caller can refuse a sector up front instead of letting a mid-assembly
+// cudaMalloc panic tear the run down. It mirrors assemble/assemble4 block for block, reusing the
+// SAME matFree* gates, so a block applied matrix-free contributes zero — which is the whole point
+// at production sizes, where the dense 2h1p×2h1p block alone is terabytes.
+//
+// This is the SIP twin of dip.Matrix.OperatorResidentBytes. It deliberately does not use
+// backend.SectorBytes, whose opFrac·n² operator term is a dense upper bound that checkDeviceFit's
+// own doc calls meaningless at these sizes.
+//
+// Not counted: the norb⁴ ERI tensor a device matrix-free applier uploads (~16 GB at melanin's
+// norb=212, see scripts/melanin_sip.sbatch) and the Krylov basis. Both are the caller's to add —
+// the basis because only the solver knows its subspace dimension.
+func (mx *Matrix) OperatorResidentBytes() uint64 {
+	sp := mx.sp
+	main := sp.BeginSat
+	const w = 8 // sizeof(float64)
+	var bytes uint64
+
+	if mx.isADC4() {
+		n2 := sp.Begin3h2p - main // 2h1p
+		n3 := len(sp.Sat3)        // 3h2p
+		if main > 0 {
+			bytes += uint64(main) * uint64(main) * w
+			if n2 > 0 {
+				bytes += uint64(main) * uint64(n2) * w
+			}
+			if n3 > 0 {
+				bytes += uint64(main) * uint64(n3) * w
+			}
+		}
+		if n2 > 0 && !mx.matFreeC22(int64(n2)*int64(n2)*w) {
+			bytes += uint64(n2) * uint64(n2) * w
+		}
+		if n3 > 0 {
+			bytes += uint64(n3) * w // 3h2p/3h2p is diagonal: a vector, not a block
+			if n2 > 0 && !mx.matFreeWert2(int64(n2)*int64(n3)*w) {
+				bytes += uint64(n2) * uint64(n3) * w
+			}
+		}
+		return bytes
+	}
+
+	nSat := sp.Size() - main
+	if main > 0 {
+		bytes += uint64(main) * uint64(main) * w
+		if nSat > 0 {
+			bytes += uint64(main) * uint64(nSat) * w // coupling: always dense today
+		}
+	}
+	if nSat > 0 && !mx.matFreeC22O3(int64(nSat)*int64(nSat)*w) {
+		bytes += uint64(nSat) * uint64(nSat) * w
+	}
+	return bytes
 }
 
 // assemble uploads the blocks once for the resident matrix-vector product. Order 4

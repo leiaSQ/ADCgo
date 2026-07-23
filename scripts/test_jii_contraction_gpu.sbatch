@@ -1,23 +1,24 @@
 #!/bin/bash
-# Multi-GPU parity for the per-device DIP satellite apply (TestSatelliteMatFreePerDeviceParity).
+# GPU validation for the jiiLKK contraction path (docs/sigma_build_contractions.md).
 #
-# Gates the -mgpu fast path: each GPU recomputing only its own output row band, reading a
-# full-height slab gathered over NVLink, must reproduce BOTH the dense operator and the host
-# gather-apply-scatter path it replaces — bit-exact (<=1e-10).
-#
-# Needs >= 4 devices (at 2 the partition-resolution and row-band clamping are trivial) AND peer
-# access between every pair, else the test skips. The workload is h2o-sized, so any GPU model
-# will do; the interconnect is what matters, hence the topology dump below.
+# Runs, in order of increasing scope:
+#   TestJIIFillDeviceMatchesHost      — the fill kernel's blocks vs the host builder, ENTRY BY
+#                                       ENTRY. This is the per-element oracle the contraction
+#                                       rewrite was warned would be lost; it is recoverable here
+#                                       precisely because the fill kernel's output IS the block.
+#   TestJIIMatFreeBatchedDeviceParity — fill + batched GEMM vs the host loop applier.
+#   TestSatelliteMatFreeDeviceParity  — the pre-existing per-scalar device path, unchanged, to
+#                                       prove this work did not disturb it.
 #
 #SBATCH --account=bw22i008
-#SBATCH --job-name=mgpu-sat-test
+#SBATCH --job-name=jii-contraction
 #SBATCH --partition=gpu-single
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:1
 #SBATCH --mem=64gb
-#SBATCH --time=00:30:00
-#SBATCH --output=mgpu-sat-test-%j.out
+#SBATCH --time=00:40:00
+#SBATCH --output=jii-contraction-%j.out
 set -euo pipefail
 
 self="$0"
@@ -37,8 +38,6 @@ export CGO_LDFLAGS="-L$CUDA_HOME/lib64 ${CGO_LDFLAGS:-}"
 
 echo "host=$(hostname)  go=$(go version)"
 nvidia-smi -L || true
-echo "--- interconnect (peer path must be NVLink/NVSwitch, not PHB, for the gather to be fast) ---"
-nvidia-smi topo -m 2>/dev/null || true
 
 echo "#begin<nvcc>"
 for ker in adc4_kernels adc2dip_kernels; do
@@ -52,7 +51,6 @@ for ker in adc4_kernels adc2dip_kernels; do
 done
 echo "#end<nvcc>"
 
-# -v so a SKIP (too few devices / not peered) is visible rather than passing silently.
 echo "#begin<gotest>"
-go test -tags cuda -v -run 'TestSatelliteMatFreePerDeviceParity|TestSatBatchedPerDeviceParity' ./internal/adc/dip/
+go test -tags cuda -v -run 'TestJIIFillDeviceMatchesHost|TestJIIMatFreeBatchedDeviceParity|TestSatelliteMatFreeDeviceParity' ./internal/adc/dip/
 echo "#end<gotest>"

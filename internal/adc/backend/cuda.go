@@ -51,6 +51,12 @@ static int  dev_memcpy2d(void* dst, size_t dpitch, const void* src, size_t spitc
 	return (int)cudaMemcpy2D(dst, dpitch, src, spitch, width, height, cudaMemcpyDefault);
 }
 
+// Page-locked (pinned) host memory. A transfer from pageable memory is staged by the driver
+// through an internal bounce buffer; a pinned source is DMA'd directly, and is additionally the
+// precondition for cudaMemcpyAsync ever overlapping a copy with compute on a stream.
+static int  dev_host_alloc(void** p, size_t bytes) { return (int)cudaHostAlloc(p, bytes, cudaHostAllocDefault); }
+static int  dev_host_free(void* p)                 { return (int)cudaFreeHost(p); }
+
 static cublasHandle_t blas_create(int* status) { cublasHandle_t h = NULL; *status = (int)cublasCreate(&h); return h; }
 
 static void   blas_axpy(cublasHandle_t h, int n, double a, const double* x, double* y) { cublasDaxpy(h, n, &a, x, 1, y, 1); }
@@ -215,6 +221,25 @@ func devEnablePeer(peer int) int { return int(C.dev_enable_peer(C.int(peer))) }
 // from the pointers (UVA + enabled peer access).
 func devMemcpy2D(dst unsafe.Pointer, dpitch int, src unsafe.Pointer, spitch, width, height int) {
 	ckCuda(C.dev_memcpy2d(dst, C.size_t(dpitch), src, C.size_t(spitch), C.size_t(width), C.size_t(height)), "cudaMemcpy2D peer")
+}
+
+// devHostAlloc allocates `bytes` of page-locked host memory, or returns nil if the driver
+// declines. Deliberately NOT a ckCuda panic: pinned memory is a limited system-wide resource,
+// so exhaustion must degrade to ordinary pageable staging rather than kill a long solve. Every
+// caller therefore has to handle nil.
+func devHostAlloc(bytes int) unsafe.Pointer {
+	var p unsafe.Pointer
+	if int(C.dev_host_alloc(&p, C.size_t(bytes))) != 0 {
+		return nil
+	}
+	return p
+}
+
+// devHostFree releases a devHostAlloc block. Safe on nil.
+func devHostFree(p unsafe.Pointer) {
+	if p != nil {
+		ckCuda(C.dev_host_free(p), "cudaFreeHost")
+	}
 }
 
 // devSync blocks until all queued device work completes, and reports any error the

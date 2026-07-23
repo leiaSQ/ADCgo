@@ -16,15 +16,17 @@ import (
 // selection logic under test, so they are inert.
 type stubDeviceBackend struct{ backend.Gonum }
 
-func (stubDeviceBackend) SetCoeff1([]float64)                   {}
-func (stubDeviceBackend) DeviceERI([]float64) unsafe.Pointer    { return nil }
-func (stubDeviceBackend) UploadInts([]int32) unsafe.Pointer     { return nil }
-func (stubDeviceBackend) UploadFloats([]float64) unsafe.Pointer { return nil }
-func (stubDeviceBackend) FreeDev(unsafe.Pointer)                {}
-func (stubDeviceBackend) DevPtr(backend.Vector) unsafe.Pointer  { return nil }
-func (stubDeviceBackend) Wert2Apply(backend.Wert2Args)          {}
-func (stubDeviceBackend) C22Apply(backend.C22Args)              {}
-func (stubDeviceBackend) DipSatApply(backend.DipSatArgs)        {}
+func (stubDeviceBackend) SetCoeff1([]float64)                                      {}
+func (stubDeviceBackend) DeviceERI([]float64) unsafe.Pointer                       { return nil }
+func (stubDeviceBackend) UploadInts([]int32) unsafe.Pointer                        { return nil }
+func (stubDeviceBackend) UploadFloats([]float64) unsafe.Pointer                    { return nil }
+func (stubDeviceBackend) FreeDev(unsafe.Pointer)                                   {}
+func (stubDeviceBackend) DevPtr(backend.Vector) unsafe.Pointer                     { return nil }
+func (stubDeviceBackend) Wert2Apply(backend.Wert2Args)                             {}
+func (stubDeviceBackend) C22Apply(backend.C22Args)                                 {}
+func (stubDeviceBackend) DipSatApply(backend.DipSatArgs)                           {}
+func (stubDeviceBackend) DipSatFillJII(backend.DipFillJIIArgs) []backend.DeviceMat { return nil }
+func (stubDeviceBackend) DownloadMat(backend.DeviceMat) []float64                  { return nil }
 
 // Compile-time proof the stub really does present both capabilities — if either assertion
 // breaks, the test below stops exercising the condition it exists for.
