@@ -238,6 +238,24 @@ type Backend interface {
 	SymEig(a Mat) (evals []float64, evecs Mat)
 }
 
+// StridedDownloader is an optional capability: copy a strided sub-block of a resident panel
+// to the host in ONE transfer.
+//
+// It exists for the Ritz back-transform, which needs only the leading `main` rows of every
+// basis column. Those rows are `cols` short runs `ld` apart — a rectangle, not a contiguous
+// span — so without this the only options were one Download per column (a blocking round-trip
+// each, and `dim` runs into the thousands) or downloading the whole n×dim basis, which is the
+// hundreds of GB the low-memory solver exists to avoid.
+//
+// Backends that do not implement it simply keep the per-column loop; there is no correctness
+// difference, so this is a capability rather than a Backend method.
+type StridedDownloader interface {
+	// Download2D returns a compact rows×cols column-major host copy of the sub-block whose
+	// first column begins at v's start and whose columns are ld elements apart. Requires
+	// rows <= ld and (cols-1)*ld+rows within v.
+	Download2D(v Vector, rows, cols, ld int) Vec
+}
+
 // HostData is an optional capability implemented by host-resident backends (Gonum):
 // it exposes the raw backing slice of a resident Vector so a matrix-free operator
 // block can read/write panel data in place, without Download/Upload copies. Device
@@ -334,6 +352,46 @@ type DeviceKernels interface {
 	// output 3h1p row, symmetry honoured by block orientation — no transpose pass),
 	// accumulating into a.Out. Kernel in adc2dip_kernels.cu; host twin in dip/satscalar.go.
 	DipSatApply(a DipSatArgs)
+
+	// DipSatFillJII materializes a batch of DIP jiiLKK satellite blocks into device scratch and
+	// returns one DeviceMat handle per slot, pointing into that scratch. The handles are valid
+	// until the next DipSatFillJII call on the same backend (the scratch is reused).
+	//
+	// It is the contraction path's producer: the blocks it fills are consumed by
+	// GemmMatBatched, so each element is read by a tiled GEMM once per panel column instead of
+	// being re-broadcast element-by-element as DipSatApply does. See
+	// docs/sigma_build_contractions.md.
+	DipSatFillJII(a DipFillJIIArgs) []DeviceMat
+
+	// DownloadMat copies a resident block back to the host, row-major, len = rows*cols. It
+	// exists for verification only — it is what lets the fill kernel's output be compared
+	// entry-by-entry against the host block builder (dip TestJIIFillDeviceMatchesHost), i.e. it
+	// preserves per-element verifiability for the contraction path. Not used on any hot path.
+	DownloadMat(m DeviceMat) []float64
+}
+
+// DipFillJIIArgs carries the per-slot block geometry and the shared integral tensors for
+// DeviceKernels.DipSatFillJII. Every Row*/Col*/BufOff/Virs pointer is an UploadInts result
+// indexed by slot (Virs is a flat concatenation of per-group virtual-orbital lists, addressed via
+// RowVOff/ColVOff); ERI/Eps/OrbSym are the same device tensors DipSatApply uses.
+//
+// Rows/Cols mirror RowNv/ColNv on the host so the returned DeviceMat handles can be shaped
+// without a device round-trip. TotalElems sizes the scratch; MaxElems only sizes the grid.
+type DipFillJIIArgs struct {
+	NSlot, Spin, Norb, Parts int
+	TotalElems, MaxElems     int
+	Rows, Cols               []int // per-slot FULL block dims (parts already folded in)
+
+	// Kind selects the element function and how a flat (r,c) decodes into (spin part, virtual):
+	// 0 = jiiLKK, 1 = ijkMLL, 2 = ijkLMN. Mirrors dip.satKind.
+	Kind unsafe.Pointer
+
+	RowO0, RowO1, RowO2 unsafe.Pointer // O2 unused (-1) for the 2-occupied JII family
+	ColO0, ColO1, ColO2 unsafe.Pointer
+	RowVOff, RowNv      unsafe.Pointer // virtual-group offset/size, WITHOUT the parts factor
+	ColVOff, ColNv      unsafe.Pointer
+	BufOff, Virs        unsafe.Pointer
+	ERI, Eps, OrbSym    unsafe.Pointer
 }
 
 // Wert2Args carries the device buffers and dimensions for DeviceKernels.Wert2Apply. The
@@ -410,6 +468,17 @@ func (Gonum) Upload(h Vec) Vector {
 	d := make([]float64, len(h))
 	copy(d, h)
 	return hostVec{d: d}
+}
+
+// Download2D satisfies StridedDownloader (see its doc). On a host backend this is a gather,
+// not a transfer, but implementing it keeps the fast path exercised by the gonum-backed tests.
+func (Gonum) Download2D(v Vector, rows, cols, ld int) Vec {
+	s := host(v)
+	out := make([]float64, rows*cols)
+	for c := range cols {
+		copy(out[c*rows:(c+1)*rows], s[c*ld:c*ld+rows])
+	}
+	return out
 }
 
 func (Gonum) Download(v Vector) Vec {

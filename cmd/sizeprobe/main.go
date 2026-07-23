@@ -18,9 +18,10 @@ import (
 
 const GB = 1 << 30
 
-// satChunkCols mirrors dip.satChunkCols (unexported): the per-device gather slab width, so the
-// budget below reports the same staging cost the applier will actually allocate.
-const satChunkCols = 64
+// satChunkCols is the per-device gather slab width, read straight from the applier's own
+// dip.SatChunkCols so the budget below reports the staging cost that will actually be allocated.
+// It used to be a hand-copied mirror of an unexported const, which was a standing drift risk.
+var satChunkCols = dip.SatChunkCols
 
 func main() {
 	for _, path := range os.Args[1:] {

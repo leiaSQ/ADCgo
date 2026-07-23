@@ -120,6 +120,24 @@ func solveSIPSpace(ch *chooser, label string, sp *sip.Space, ints *integrals.Sto
 		mx.SetStaticSelfEnergy(cfg.sig)
 	}
 
+	// Pre-flight device-memory guard, the SIP twin of solveDIPSector's. It matters more here
+	// than the DIP call site suggests: pickLanczos' own fits() check is skipped whenever a
+	// single backend is pinned (chooser.single), which is the normal production case
+	// (-backend cuda), so without this an oversized sector reached a raw cudaMalloc panic.
+	//
+	// Resident = the block-sparse operator (exact, honouring the matrix-free gates) + the
+	// Krylov basis. The basis term is the dominant one for SIP and the reason -matfree alone
+	// does not make a sector fit: full-reorth Solve keeps the whole n×subspace basis, so a
+	// missing -matfree shows up in the operator term and an over-large -blocks in the basis
+	// term, and the message below distinguishes them.
+	if cfg.solver != "dense" {
+		need := mx.OperatorResidentBytes() + uint64(n)*uint64(subspace)*8
+		if err := ch.checkDeviceFit(label, be, need); err != nil {
+			mx.Release()
+			return lanczos.Result{}, nil, err
+		}
+	}
+
 	var res lanczos.Result
 	switch cfg.solver {
 	case "dense":

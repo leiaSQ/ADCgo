@@ -56,6 +56,15 @@ type gpuBackend struct {
 	ptrA, ptrB, ptrC    unsafe.Pointer
 	ptrCap              int
 	hostA, hostB, hostC []unsafe.Pointer
+	// pinned backs hostA/B/C with one page-locked allocation when the backend can provide
+	// it (nil otherwise — hostA/B/C are then ordinary Go slices). Freed only on regrow.
+	pinned unsafe.Pointer
+
+	// Scratch for DipSatFillJII: the materialized jiiLKK blocks of one apply. Same
+	// grown-on-demand, reused-across-calls rationale as the pointer arrays above — this is
+	// refilled every mat-vec, so allocating per call would put cudaMalloc on the hot path.
+	jiiBuf unsafe.Pointer
+	jiiCap int
 
 	// solver is the dense-eigensolver handle (cuSOLVER / hipSOLVER), created lazily on
 	// the device thread the first time a matrix large enough to justify it appears.
@@ -80,9 +89,30 @@ func (b *gpuBackend) ensurePtrCap(n int) {
 		}
 	}
 	b.ptrA, b.ptrB, b.ptrC = devMalloc(n), devMalloc(n), devMalloc(n) // n*8 bytes each
-	b.hostA = make([]unsafe.Pointer, n)
-	b.hostB = make([]unsafe.Pointer, n)
-	b.hostC = make([]unsafe.Pointer, n)
+
+	// Host staging for the three pointer arrays, uploaded on EVERY batched GEMM (three
+	// devH2DPtrs per call). Page-lock them when the backend can: a pageable source makes the
+	// driver stage through an internal bounce buffer, and pinned memory is the precondition
+	// for ever issuing these asynchronously on a stream. One allocation backs all three, and
+	// the pointers written into it are device pointers — not Go pointers — so storing them in
+	// C memory does not violate the cgo pointer rules.
+	//
+	// devHostAlloc returns nil when pinned memory is unavailable (always, on hip; on cuda when
+	// the driver declines, since it is a limited system-wide resource). The fallback is the
+	// original Go-heap staging, so this is a performance path only, never a correctness one.
+	if b.pinned != nil {
+		devHostFree(b.pinned)
+		b.pinned = nil
+	}
+	if p := devHostAlloc(3 * n * ptrSize); p != nil {
+		b.pinned = p
+		all := unsafe.Slice((*unsafe.Pointer)(p), 3*n)
+		b.hostA, b.hostB, b.hostC = all[0:n:n], all[n:2*n:2*n], all[2*n:3*n:3*n]
+	} else {
+		b.hostA = make([]unsafe.Pointer, n)
+		b.hostB = make([]unsafe.Pointer, n)
+		b.hostC = make([]unsafe.Pointer, n)
+	}
 	b.ptrCap = n
 }
 
@@ -168,6 +198,22 @@ func (b *gpuBackend) Upload(hostv Vec) Vector {
 		}
 	})
 	return devVec{base: p, n: len(hostv)}
+}
+
+// Download2D satisfies backend.StridedDownloader: one cudaMemcpy2D for a strided rectangle
+// instead of `cols` separate Download round-trips. cudaMemcpyDefault resolves device→host from
+// the pointers under UVA, so this reuses the same shim the peer gather uses; the host end is
+// pageable, which is correct but not the fastest possible (see the pinned-memory work).
+func (b *gpuBackend) Download2D(v Vector, rows, cols, ld int) Vec {
+	dv := v.(devVec)
+	out := make([]float64, rows*cols)
+	if rows > 0 && cols > 0 {
+		b.do(func() {
+			devMemcpy2D(unsafe.Pointer(&out[0]), rows*elemSize, dv.ptr(), ld*elemSize,
+				rows*elemSize, cols)
+		})
+	}
+	return out
 }
 
 func (b *gpuBackend) Download(v Vector) Vec {
