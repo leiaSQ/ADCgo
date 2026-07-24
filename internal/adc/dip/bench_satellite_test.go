@@ -74,7 +74,7 @@ func benchSector(b *testing.B) (*Matrix, int, uint64) {
 
 // BenchmarkSatelliteApply times the matrix-free satellite apply at several panel widths. b=435
 // matches the sector width of the cluster measurement (uracil2W_dz main=435); b=64 matches
-// satChunkCols, the per-device gather chunk. Report is GFLOP/s via the 2·nnz·b model.
+// SatChunkCols, the per-device gather chunk. Report is GFLOP/s via the 2·nnz·b model.
 func BenchmarkSatelliteApply(bb *testing.B) {
 	for _, cols := range []int{1, 64, 435} {
 		bb.Run(widthName(cols), func(bb *testing.B) {
@@ -112,7 +112,7 @@ func widthName(cols int) string {
 	case 1:
 		return "b=1"
 	case 64:
-		return "b=64_satChunkCols"
+		return "b=64_SatChunkCols"
 	default:
 		return "b=435_clusterwidth"
 	}
@@ -133,7 +133,7 @@ func widthName(cols int) string {
 // below 154, the production-scale rewrite is justified even though the small-system apply benchmark
 // may show BLAS losing.
 func BenchmarkBlockApplyCrossover(bb *testing.B) {
-	const b = 64 // panel width; satChunkCols, the per-device gather chunk
+	const b = 64 // panel width; SatChunkCols, the per-device gather chunk
 	be := backend.Gonum{}
 
 	for _, dim := range []int{8, 11, 16, 32, 64, 77, 128, 154, 256} {

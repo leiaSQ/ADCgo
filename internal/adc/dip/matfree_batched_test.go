@@ -235,3 +235,72 @@ func TestJIIBatchedSymmetryOff(t *testing.T) {
 			spin, n, len(p.slots), len(p.batches), maxErr)
 	}
 }
+
+// TestComputeChunks pins the bounded-chunking partition that keeps the device fill from
+// materializing the whole satellite operator at once (the 424 GB OOM, job 14026481). The
+// invariants it guards: chunks tile the slot range contiguously with no gap or overlap, each
+// chunk's element total matches the blocks it covers, every chunk except a lone oversized block
+// stays within budget, and a block larger than the budget forms its own single-block chunk
+// (a block cannot be split). These are exactly the properties the chunk-local BufOff and the
+// pointer-offset fill depend on.
+func TestComputeChunks(t *testing.T) {
+	slot := func(rows, cols int) jiiSlot { return jiiSlot{rows: rows, cols: cols} }
+
+	cases := []struct {
+		name   string
+		slots  []jiiSlot
+		budget int
+	}{
+		{"empty", nil, 10},
+		{"single", []jiiSlot{slot(3, 3)}, 100},
+		{"one-oversized-block", []jiiSlot{slot(20, 20)}, 10}, // 400 > budget: its own chunk
+		{"exact-fit", []jiiSlot{slot(2, 2), slot(2, 2), slot(2, 2)}, 4},
+		{"splits", []jiiSlot{slot(3, 3), slot(3, 3), slot(3, 3), slot(3, 3)}, 20}, // 9 each
+		{"oversized-midstream", []jiiSlot{slot(2, 2), slot(10, 10), slot(2, 2)}, 8},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chunks := computeChunks(tc.slots, tc.budget)
+
+			if len(tc.slots) == 0 {
+				if chunks != nil {
+					t.Fatalf("empty slots: got %d chunks, want none", len(chunks))
+				}
+				return
+			}
+
+			// Contiguous tiling: first starts at 0, each continues the previous, last ends at len.
+			if chunks[0].lo != 0 {
+				t.Fatalf("first chunk starts at %d, want 0", chunks[0].lo)
+			}
+			for i := 1; i < len(chunks); i++ {
+				if chunks[i].lo != chunks[i-1].hi {
+					t.Fatalf("gap/overlap: chunk %d starts at %d, previous ended at %d",
+						i, chunks[i].lo, chunks[i-1].hi)
+				}
+			}
+			if last := chunks[len(chunks)-1].hi; last != len(tc.slots) {
+				t.Fatalf("last chunk ends at %d, want %d", last, len(tc.slots))
+			}
+
+			for i, ch := range chunks {
+				if ch.hi <= ch.lo {
+					t.Fatalf("chunk %d is empty: [%d,%d)", i, ch.lo, ch.hi)
+				}
+				sum := 0
+				for _, s := range tc.slots[ch.lo:ch.hi] {
+					sum += s.rows * s.cols
+				}
+				if sum != ch.elems {
+					t.Errorf("chunk %d elems %d, recomputed %d", i, ch.elems, sum)
+				}
+				// Within budget unless the chunk is a single block that alone exceeds it.
+				if ch.elems > tc.budget && ch.hi-ch.lo != 1 {
+					t.Errorf("chunk %d has %d elems over budget %d with %d blocks (only a lone "+
+						"oversized block may exceed budget)", i, ch.elems, tc.budget, ch.hi-ch.lo)
+				}
+			}
+		})
+	}
+}

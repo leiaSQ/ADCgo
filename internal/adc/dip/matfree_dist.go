@@ -283,19 +283,17 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 
 			for d := range nd {
 				ds := st[d]
-				mats := ds.dk.DipSatFillJII(ds.bufs.args)
-				if len(mats) == 0 {
-					continue
-				}
 				rd := bounds[d+1] - bounds[d]
 				// Input: the full-height local slab. Output: this device's partition, rebased so
-				// a block's global row offset addresses local storage.
+				// a block's global row offset addresses local storage. The satellite blocks total
+				// hundreds of GB, so the fill runs in bounded chunks (fillAndRun) rather than
+				// materializing the whole operator per column chunk — the 424 GB OOM (job 14026481).
 				inView := backend.BlockView{V: ds.slab, Rows: n, Cols: cw, Ld: n}
 				outLocal := backend.BlockView{
 					V:    pd.PartVector(out.V, d).Slice(c0*rd, cw*rd),
 					Rows: rd, Cols: cw, Ld: rd,
 				}
-				ds.plan.runBatchesOwned(ds.be, mats, inView, outLocal, ds.members, bounds[d])
+				ds.plan.fillAndRun(ds.dk, ds.bufs.args, ds.be, inView, outLocal, ds.members, bounds[d])
 			}
 		}
 		syncAll(pd) // fence outputs before the caller reads them

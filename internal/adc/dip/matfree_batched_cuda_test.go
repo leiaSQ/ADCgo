@@ -43,34 +43,49 @@ func TestJIIFillDeviceMatchesHost(t *testing.T) {
 			dk.FreeDev(dOsym)
 		}()
 
+		// Force many chunks even on this tiny system so the chunk-boundary logic (pointer
+		// offsetting, chunk-local BufOff, per-chunk buffer reuse) is exercised, not just the
+		// single-chunk path a 4 GiB budget takes here. budget=1 makes every block its own chunk.
+		defer func(b int) { JIIFillBudgetElems = b }(JIIFillBudgetElems)
+		JIIFillBudgetElems = 1
+
 		p := mx.buildJIIBatchPlan()
 		bufs := mx.buildJIIDeviceBufs(dk, p, s)
 		defer bufs.free()
 		bufs.args.ERI, bufs.args.Eps, bufs.args.OrbSym = dERI, dEps, dOsym
 
-		mats := dk.DipSatFillJII(bufs.args)
-		if len(mats) != len(p.slots) {
-			t.Fatalf("spin=%v sym=%d: fill returned %d handles, want %d", spin, sym, len(mats), len(p.slots))
+		if len(p.chunks) < 2 && len(p.slots) > 1 {
+			t.Fatalf("spin=%v sym=%d: expected multiple chunks at budget=1 (%d slots), got %d",
+				spin, sym, len(p.slots), len(p.chunks))
 		}
 
+		// Materialize chunk by chunk, comparing each chunk's handles to the host block builder.
 		var maxErr, scale float64
-		for i, sl := range p.slots {
-			want, ok := ref.buildSlot(sl)
-			if !ok {
-				t.Fatalf("spin=%v sym=%d: slot %d has no host block", spin, sym, i)
+		for _, ch := range p.chunks {
+			bufs.args.SlotLo, bufs.args.SlotHi, bufs.args.ChunkElems = ch.lo, ch.hi, ch.elems
+			mats := dk.DipSatFillJII(bufs.args)
+			if len(mats) != ch.hi-ch.lo {
+				t.Fatalf("spin=%v sym=%d: chunk [%d,%d) returned %d handles, want %d",
+					spin, sym, ch.lo, ch.hi, len(mats), ch.hi-ch.lo)
 			}
-			r, c := mats[i].Dims()
-			if r != want.Rows || c != want.Cols {
-				t.Fatalf("spin=%v sym=%d: slot %d dims %dx%d, host %dx%d",
-					spin, sym, i, r, c, want.Rows, want.Cols)
-			}
-			got := dk.DownloadMat(mats[i])
-			for k := range want.Data {
-				if d := math.Abs(got[k] - want.Data[k]); d > maxErr {
-					maxErr = d
+			for k, sl := range p.slots[ch.lo:ch.hi] {
+				want, ok := ref.buildSlot(sl)
+				if !ok {
+					t.Fatalf("spin=%v sym=%d: slot %d has no host block", spin, sym, ch.lo+k)
 				}
-				if a := math.Abs(want.Data[k]); a > scale {
-					scale = a
+				r, c := mats[k].Dims()
+				if r != want.Rows || c != want.Cols {
+					t.Fatalf("spin=%v sym=%d: slot %d dims %dx%d, host %dx%d",
+						spin, sym, ch.lo+k, r, c, want.Rows, want.Cols)
+				}
+				got := dk.DownloadMat(mats[k])
+				for j := range want.Data {
+					if d := math.Abs(got[j] - want.Data[j]); d > maxErr {
+						maxErr = d
+					}
+					if a := math.Abs(want.Data[j]); a > scale {
+						scale = a
+					}
 				}
 			}
 		}
@@ -101,6 +116,11 @@ func TestSatBatchedPerDeviceParity(t *testing.T) {
 		t.Skipf("no cuda devices: %v", err)
 	}
 	rng := rand.New(rand.NewSource(505))
+
+	// budget=1 forces one block per fill chunk, so the whole applier exercises the chunk loop and
+	// buffer reuse on this small system, not just the single-chunk path a 4 GiB default would take.
+	defer func(b int) { JIIFillBudgetElems = b }(JIIFillBudgetElems)
+	JIIFillBudgetElems = 1
 
 	h2oSectors(t, func(spin Spin, sym int, sp *Space, ints *integrals.Store, eps []float64, host backend.Backend) {
 		n, main := sp.Size(), sp.MainBlockSize()
@@ -174,6 +194,10 @@ func TestJIIMatFreeBatchedDeviceParity(t *testing.T) {
 		t.Skip("cuda backend does not expose DeviceKernels")
 	}
 	rng := rand.New(rand.NewSource(303))
+
+	// budget=1 forces multi-chunk fills through the applier on this small system.
+	defer func(b int) { JIIFillBudgetElems = b }(JIIFillBudgetElems)
+	JIIFillBudgetElems = 1
 
 	h2oSectors(t, func(spin Spin, sym int, sp *Space, ints *integrals.Store, eps []float64, host backend.Backend) {
 		n := sp.Size()

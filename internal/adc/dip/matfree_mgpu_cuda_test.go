@@ -82,8 +82,8 @@ func TestSatelliteMatFreePerDeviceParity(t *testing.T) {
 
 		// Deflation is real for this backend (panels are sized to the max block width but an
 		// apply commonly uses fewer columns), and the chunk loop must handle a final short
-		// chunk, so exercise a width that is not a multiple of satChunkCols.
-		for _, b := range []int{3, satChunkCols + 1} {
+		// chunk, so exercise a width that is not a multiple of SatChunkCols.
+		for _, b := range []int{3, SatChunkCols + 1} {
 			panel := make([]float64, n*b)
 			for i := range panel {
 				panel[i] = rng.NormFloat64()

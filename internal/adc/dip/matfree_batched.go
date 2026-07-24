@@ -76,16 +76,52 @@ func (mx *Matrix) buildSlot(s jiiSlot) (backend.Mat, bool) {
 	}
 }
 
+// JIIFillBudgetElems bounds the device scratch the contraction fill materializes at once, in
+// float64 elements (default 4 GiB). The satellite blocks total hundreds of GB for a large sector
+// — job 14026481 tried to materialize 424 GB in one DipSatFillJII and OOM-panicked on a 141 GB
+// H200 — so the device fill runs in slot chunks, each ≤ this budget, reusing one buffer.
+//
+// Chunking adds no recompute (each block is still filled once per fill pass) — only more kernel
+// launches — so a conservative budget is nearly free. A block larger than the budget still forms
+// its own single-block chunk (a block cannot be split), but individual blocks are far below it.
+// A var so a test can force many chunks on a small system.
+var JIIFillBudgetElems = 1 << 29 // 4 GiB of float64
+
+// jiiChunk is a contiguous slot range [lo,hi) whose blocks total elems doubles (≤ the budget,
+// except a lone oversized block). The device fill materializes one chunk at a time.
+type jiiChunk struct{ lo, hi, elems int }
+
 // jiiBatchPlan is the reusable plan plus the per-apply scratch the batched calls need.
 type jiiBatchPlan struct {
 	slots   []jiiSlot
 	batches []backend.Batch
+	chunks  []jiiChunk // slot ranges the device fill materializes one at a time
 
 	// Scratch, sized to the widest batch and reused across applies (allocating per apply would
 	// trade the GEMM win for allocator churn on the hot path).
 	sa []backend.DeviceMat
 	sb []backend.BlockView
 	sc []backend.BlockView
+}
+
+// computeChunks partitions slots into contiguous ranges each totalling ≤ budget elements (a lone
+// block exceeding budget forms its own chunk — a block cannot be split). The ranges drive both the
+// chunk-local BufOff (buildJIIDeviceBufs) and the fill/GEMM loop, so they must agree by construction.
+func computeChunks(slots []jiiSlot, budget int) []jiiChunk {
+	if len(slots) == 0 {
+		return nil
+	}
+	var chunks []jiiChunk
+	lo, acc := 0, 0
+	for i, s := range slots {
+		e := s.rows * s.cols
+		if i > lo && acc+e > budget { // close the current chunk before this block overflows it
+			chunks = append(chunks, jiiChunk{lo, i, acc})
+			lo, acc = i, 0
+		}
+		acc += e
+	}
+	return append(chunks, jiiChunk{lo, len(slots), acc})
 }
 
 // buildJIIBatchPlan enumerates every nonzero jiiLKK block via the cheap gate (no integrals, no
@@ -143,7 +179,11 @@ func (mx *Matrix) buildJIIBatchPlan() *jiiBatchPlan {
 		}
 	}
 
-	p := &jiiBatchPlan{slots: slots, batches: backend.PlanBatches(blocks)}
+	p := &jiiBatchPlan{
+		slots:   slots,
+		batches: backend.PlanBatches(blocks),
+		chunks:  computeChunks(slots, JIIFillBudgetElems),
+	}
 	widest := 0
 	for _, bt := range p.batches {
 		if len(bt.Blocks) > widest {
@@ -242,8 +282,17 @@ func (mx *Matrix) buildJIIDeviceBufs(dk backend.DeviceKernels, p *jiiBatchPlan, 
 		return int32(c.Occ[2])
 	}
 
+	// bufOff is CHUNK-LOCAL: it resets to 0 at each chunk boundary, so within a chunk the offsets
+	// (and DipSatFillJII's scratch) start at 0. This bounds the buffer AND keeps bufOff in int32 —
+	// a global prefix sum reaches ~5e10 elements for a large sector and would wrap. `total` and
+	// `maxElems` stay whole-plan (grid sizing / informational).
 	total, maxElems := 0, 0
+	local, ci := 0, 0
 	for i, sl := range p.slots {
+		if i == p.chunks[ci].hi { // start of the next chunk
+			ci++
+			local = 0
+		}
 		rowThree := sl.kind != kindJII    // ijkMLL/ijkLMN have 3-occupied rows
 		colThree := sl.kind == kindIJKLMN // only ijkLMN has a 3-occupied column
 		kind[i] = int32(sl.kind)
@@ -255,9 +304,10 @@ func (mx *Matrix) buildJIIDeviceBufs(dk backend.DeviceKernels, p *jiiBatchPlan, 
 		// decoding (r,c), so these stay the plain per-group virtual counts.
 		rowVOff[i], rowNv[i] = putVirs(sl.rowCfg)
 		colVOff[i], colNv[i] = putVirs(sl.colCfg)
-		bufOff[i] = int32(total)
+		bufOff[i] = int32(local)
 		rows[i], cols[i] = sl.rows, sl.cols
 		e := sl.rows * sl.cols
+		local += e
 		total += e
 		maxElems = max(maxElems, e)
 	}
@@ -316,28 +366,30 @@ func (mx *Matrix) newJIIMatFreeBatchedDevice(dk backend.DeviceKernels, s *satDev
 	bufs.args.ERI, bufs.args.Eps, bufs.args.OrbSym = eri, eps, osym
 
 	apply := func(in, out backend.BlockView) {
-		mats := dk.DipSatFillJII(bufs.args)
-		if len(mats) == 0 {
-			return
-		}
-		p.runBatches(mx.be, mats, in, out)
+		p.fillAndRun(dk, bufs.args, mx.be, in, out, nil, 0)
 	}
 	return matFreePart{apply: apply, release: bufs.free}, p
 }
 
-// runBatchesOwned is runBatches restricted to the slots this device owns, with output offsets
-// rebased into its local partition.
+// runBatchesOwnedRange runs the -mgpu per-device batches for the slot chunk [lo,hi): only slots in the
+// range are issued, and `mats` is the chunk-local handle slice DipSatFillJII returned for it, so a
+// global slot si indexes mats[si-lo]. Splitting a batch across chunks is exact — its members have
+// pairwise-disjoint outputs and accumulate (beta=1), so each is issued once, in whichever chunk
+// owns it, order-independent.
 //
 // in is a FULL-HEIGHT slab (global row indexing, Ld = n) because a block's column band can live on
 // any partition; out is this device's local band, so its global write offset has outRowOff
 // subtracted. owned[bi] lists which slots of batch bi belong here — precomputed once, since the
 // plan and the partition bounds are both apply-invariant.
-func (p *jiiBatchPlan) runBatchesOwned(be backend.Backend, mats []backend.DeviceMat, in, out backend.BlockView, owned [][]int, outRowOff int) {
+func (p *jiiBatchPlan) runBatchesOwnedRange(be backend.Backend, mats []backend.DeviceMat, in, out backend.BlockView, owned [][]int, outRowOff, lo, hi int) {
 	for bi, bt := range p.batches {
 		n := 0
 		for _, si := range owned[bi] {
+			if si < lo || si >= hi {
+				continue
+			}
 			s := p.slots[si]
-			p.sa[n] = mats[si]
+			p.sa[n] = mats[si-lo]
 			if bt.Trans {
 				p.sb[n] = in.RowRange(s.rowOff, s.rows)            // global: full-height slab
 				p.sc[n] = out.RowRange(s.colOff-outRowOff, s.cols) // local: this partition
@@ -355,13 +407,23 @@ func (p *jiiBatchPlan) runBatchesOwned(be backend.Backend, mats []backend.Device
 
 // runBatches issues the planned batched GEMMs against already-filled block handles. Shared by the
 // host and device appliers so both realize the plan identically — only how `mats` gets filled
-// differs between them.
+// differs between them. The host path fills a full-length `mats` in one pass, so it runs the whole
+// [0,len) range; the device path calls runBatchesRange per chunk.
 func (p *jiiBatchPlan) runBatches(be backend.Backend, mats []backend.DeviceMat, in, out backend.BlockView) {
+	p.runBatchesRange(be, mats, in, out, 0, len(p.slots))
+}
+
+// runBatchesRange is runBatches restricted to the slot chunk [lo,hi); `mats` is chunk-local
+// (mats[si-lo]). See runBatchesOwnedRange for why splitting a batch across chunks is exact.
+func (p *jiiBatchPlan) runBatchesRange(be backend.Backend, mats []backend.DeviceMat, in, out backend.BlockView, lo, hi int) {
 	for _, bt := range p.batches {
 		n := 0
 		for _, si := range bt.Blocks {
+			if si < lo || si >= hi {
+				continue
+			}
 			s := p.slots[si]
-			p.sa[n] = mats[si]
+			p.sa[n] = mats[si-lo]
 			if bt.Trans {
 				p.sb[n] = in.RowRange(s.rowOff, s.rows)
 				p.sc[n] = out.RowRange(s.colOff, s.cols)
@@ -373,6 +435,25 @@ func (p *jiiBatchPlan) runBatches(be backend.Backend, mats []backend.DeviceMat, 
 		}
 		if n > 0 {
 			be.GemmMatBatched(bt.Trans, 1, p.sa[:n], p.sb[:n], 1, p.sc[:n])
+		}
+	}
+}
+
+// fillAndRun materializes the plan on `dk` in bounded chunks, running each chunk's batched GEMMs
+// before reusing the buffer. args carries the uploaded, apply-invariant SoA; this sets only the
+// per-chunk range/size fields. When owned is nil the whole plan is run (single-GPU); otherwise
+// only the slots this device owns, rebased by outRowOff (the -mgpu per-device path).
+func (p *jiiBatchPlan) fillAndRun(dk backend.DeviceKernels, args backend.DipFillJIIArgs, be backend.Backend, in, out backend.BlockView, owned [][]int, outRowOff int) {
+	for _, ch := range p.chunks {
+		args.SlotLo, args.SlotHi, args.ChunkElems = ch.lo, ch.hi, ch.elems
+		mats := dk.DipSatFillJII(args)
+		if len(mats) == 0 {
+			continue
+		}
+		if owned == nil {
+			p.runBatchesRange(be, mats, in, out, ch.lo, ch.hi)
+		} else {
+			p.runBatchesOwnedRange(be, mats, in, out, owned, outRowOff, ch.lo, ch.hi)
 		}
 	}
 }

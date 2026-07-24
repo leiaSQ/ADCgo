@@ -376,10 +376,23 @@ type DeviceKernels interface {
 // RowVOff/ColVOff); ERI/Eps/OrbSym are the same device tensors DipSatApply uses.
 //
 // Rows/Cols mirror RowNv/ColNv on the host so the returned DeviceMat handles can be shaped
-// without a device round-trip. TotalElems sizes the scratch; MaxElems only sizes the grid.
+// without a device round-trip.
+//
+// One call materializes the slot half-open range [SlotLo, SlotHi) — a "chunk" — into a scratch
+// buffer of ChunkElems doubles, and returns SlotHi-SlotLo handles (handle k is global slot
+// SlotLo+k). The caller drives the whole plan by looping chunks and reusing the buffer, so the
+// resident scratch is bounded by the chunk budget instead of the full materialized operator,
+// which for a large sector is hundreds of GB (job 14026481 OOM'd at 424 GB before this).
+// BufOff is therefore CHUNK-LOCAL — it resets to 0 at each chunk boundary — which also keeps it
+// inside int32 (the global prefix sum reaches ~5e10 elements and would wrap).
+//
+// TotalElems is the whole-plan element count (informational); MaxElems (largest single block)
+// sizes the grid; ChunkElems sizes the scratch allocation for THIS call.
 type DipFillJIIArgs struct {
 	NSlot, Spin, Norb, Parts int
 	TotalElems, MaxElems     int
+	SlotLo, SlotHi           int   // half-open slot range materialized by this call
+	ChunkElems               int   // scratch size for this chunk (Σ rows·cols over [SlotLo,SlotHi))
 	Rows, Cols               []int // per-slot FULL block dims (parts already folded in)
 
 	// Kind selects the element function and how a flat (r,c) decodes into (spin part, virtual):

@@ -119,32 +119,41 @@ func (b *gpuBackend) Wert2Apply(a Wert2Args) {
 // pair per call would put allocator churn on the hot path. Handles are invalidated by the next
 // call, which is why the caller consumes them immediately via GemmMatBatched.
 func (b *gpuBackend) DipSatFillJII(a DipFillJIIArgs) []DeviceMat {
-	if a.NSlot == 0 {
+	lo, hi := a.SlotLo, a.SlotHi
+	n := hi - lo
+	if n <= 0 {
 		return nil
 	}
+	// The kernel indexes every per-slot array by its y-block, so passing the arrays offset by lo
+	// and launching hi-lo y-blocks materializes exactly the global range [lo,hi) — no kernel-side
+	// range parameter needed. Virs/ERI/Eps/OrbSym are shared (indexed by content, not slot) and
+	// are NOT offset. BufOff is chunk-local, so its offsets and this call's scratch both start at 0.
+	off32 := func(p unsafe.Pointer) *C.int { return (*C.int)(unsafe.Add(p, lo*4)) } // int32 arrays
 	b.do(func() {
-		if b.jiiCap < a.TotalElems {
+		if b.jiiCap < a.ChunkElems {
 			if b.jiiBuf != nil {
 				devFree(b.jiiBuf)
 			}
-			b.jiiBuf = devMalloc(a.TotalElems)
-			b.jiiCap = a.TotalElems
+			b.jiiBuf = devMalloc(a.ChunkElems)
+			b.jiiCap = a.ChunkElems
 		}
-		C.adc2_dip_fill_sat(C.int(a.NSlot), C.int(a.Spin), C.int(a.Norb), C.int(a.Parts),
-			C.int(a.MaxElems), (*C.int)(a.Kind),
-			(*C.int)(a.RowO0), (*C.int)(a.RowO1), (*C.int)(a.RowO2),
-			(*C.int)(a.ColO0), (*C.int)(a.ColO1), (*C.int)(a.ColO2),
-			(*C.int)(a.RowVOff), (*C.int)(a.RowNv), (*C.int)(a.ColVOff), (*C.int)(a.ColNv),
-			(*C.int)(a.BufOff), (*C.int)(a.Virs),
+		C.adc2_dip_fill_sat(C.int(n), C.int(a.Spin), C.int(a.Norb), C.int(a.Parts),
+			C.int(a.MaxElems), off32(a.Kind),
+			off32(a.RowO0), off32(a.RowO1), off32(a.RowO2),
+			off32(a.ColO0), off32(a.ColO1), off32(a.ColO2),
+			off32(a.RowVOff), off32(a.RowNv), off32(a.ColVOff), off32(a.ColNv),
+			off32(a.BufOff), (*C.int)(a.Virs),
 			(*C.double)(a.ERI), (*C.double)(a.Eps), (*C.int)(a.OrbSym),
 			(*C.double)(b.jiiBuf))
 	})
 
-	// Shape the handles from the host-side dims; offsets are the same prefix sum the kernel used.
-	out := make([]DeviceMat, a.NSlot)
+	// Handles for [lo,hi): handle k is global slot lo+k, placed at the same chunk-local prefix
+	// the kernel wrote to (BufOff is that same prefix, reset to 0 at the chunk boundary).
+	out := make([]DeviceMat, n)
 	off := 0
-	for i := range a.NSlot {
-		out[i] = devMat{p: unsafe.Add(b.jiiBuf, off*elemSize), rows: a.Rows[i], cols: a.Cols[i]}
+	for k := range n {
+		i := lo + k
+		out[k] = devMat{p: unsafe.Add(b.jiiBuf, off*elemSize), rows: a.Rows[i], cols: a.Cols[i]}
 		off += a.Rows[i] * a.Cols[i]
 	}
 	return out
