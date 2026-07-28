@@ -76,9 +76,14 @@ export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-32}"
 echo "host=$(hostname)  MOL=$MOL  fcidump=$fcidump  blocks=$BLOCKS lowmem-block=$LOWMEM_BLOCK backend=$BACKEND mgpu=$MGPU"
 nvidia-smi -L 2>/dev/null || true
 echo "#begin<adc>"
+# -matfree on: apply the 3h1p↔3h1p satellite region on the fly instead of materializing it.
+# Without it the whole block-sparse operator is assembled (hundreds of GB — uracil1W 532 GB,
+# uracil2W 1.5 TB), which OOMs on the host during assembly (job 13999807: RSS 503 GB vs 480 GB)
+# or per-GPU during upload (job 13999820: cudaMalloc NULL on a full 141 GB card). Matrix-free
+# collapses the per-GPU footprint to panels + main/coupling + ERI + a bounded fill chunk.
 "$ADCGO" -fcidump "$fcidump" -mo "$mo" \
     -dip -order 2 -solver lanczos-lowmem -lowmem-block "$LOWMEM_BLOCK" -mgpu "$MGPU" \
-    -spin both -blocks "$BLOCKS" -backend "$BACKEND" -sym all \
+    -spin both -blocks "$BLOCKS" -backend "$BACKEND" -sym all -matfree on \
     -out "$WS/${MOL}.dip.json"
 echo "#end<adc>"
 echo "dip -> $WS/${MOL}.dip.json"

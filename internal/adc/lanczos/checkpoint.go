@@ -79,11 +79,16 @@ func floatBytes(f []float64) []byte {
 // writeCheckpoint serializes s to path atomically (tmp + fsync + rename), keeping the prior
 // file as ".bak".
 //
-// basisLen is the declared basis element count and writeBasis streams those elements to the
-// file. Passing nil for writeBasis writes s.Basis directly (the in-memory form); saveKrylov
-// instead streams the basis off the backend in column chunks so the host never materializes it
-// — see there for why that matters.
-func writeCheckpoint(path string, s *ckptState, basisLen int, writeBasis func(io.Writer) error) error {
+// basisLen/tLen are the declared basis and T element counts; writeBasis/writeT stream those
+// elements to the file. Passing nil for either writes s.Basis / s.T directly (the in-memory
+// form used by the round-trip test); saveKrylov instead streams BOTH off their backing buffers —
+// the basis off the backend in column chunks, and T row by row from the maxdim-wide projection —
+// so the host never materializes either. T matters as much as the basis: it is Dim×Dim and Dim
+// grows with the block count, so a fresh Dim² copy per checkpoint (up to ~9 GB at the production system's
+// maxdim≈34k) is exactly the kind of churn Go's scavenger stacks into RSS until the cgroup
+// OOM-kills the run — the same failure the basis chunking already fixed, on the sibling buffer it
+// left behind.
+func writeCheckpoint(path string, s *ckptState, basisLen int, writeBasis func(io.Writer) error, tLen int, writeT func(io.Writer) error) error {
 	tmp := path + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -103,7 +108,7 @@ func writeCheckpoint(path string, s *ckptState, basisLen int, writeBasis func(io
 		ckptVersion,
 		int64(s.N), int64(s.Main), int64(s.Maxdim), int64(s.MaxBlocks),
 		int64(s.Dim), int64(s.BlkStart), int64(s.BlkSize), int64(s.Iter),
-		int64(basisLen), int64(len(s.T)),
+		int64(basisLen), int64(tLen),
 	}
 	for _, v := range hdr {
 		if err := binary.Write(w, binary.LittleEndian, v); err != nil {
@@ -117,7 +122,11 @@ func writeCheckpoint(path string, s *ckptState, basisLen int, writeBasis func(io
 	} else if _, err := w.Write(floatBytes(s.Basis)); err != nil {
 		return fail(err)
 	}
-	if _, err := w.Write(floatBytes(s.T)); err != nil {
+	if writeT != nil {
+		if err := writeT(w); err != nil {
+			return fail(err)
+		}
+	} else if _, err := w.Write(floatBytes(s.T)); err != nil {
 		return fail(err)
 	}
 	if err := w.Flush(); err != nil {
@@ -219,10 +228,6 @@ const ckptBasisChunkCols = 256
 // at one chunk regardless of dim; the on-disk format is unchanged, so old checkpoints still load.
 func saveKrylov(be backend.Backend, path string, basis backend.BlockView, t backend.Mat,
 	n, main, maxdim, maxBlocks, dim, blkStart, blkSize, iter int) error {
-	tHost := make([]float64, dim*dim)
-	for i := 0; i < dim; i++ {
-		copy(tHost[i*dim:(i+1)*dim], t.Data[i*maxdim:i*maxdim+dim])
-	}
 	writeBasis := func(w io.Writer) error {
 		for c0 := 0; c0 < dim; c0 += ckptBasisChunkCols {
 			cw := min(ckptBasisChunkCols, dim-c0)
@@ -233,9 +238,20 @@ func saveKrylov(be backend.Backend, path string, basis backend.BlockView, t back
 		}
 		return nil
 	}
+	// Stream T's leading Dim×Dim block row by row straight out of the maxdim-wide projection —
+	// each row is a contiguous slice of t.Data, written as-is (row-major on disk). No Dim² copy:
+	// that copy grew with the block count and its per-checkpoint churn was the residual OOM the
+	// basis chunking left behind. floatBytes only aliases the row; w (bufio) copies it out.
+	writeT := func(w io.Writer) error {
+		for i := 0; i < dim; i++ {
+			if _, err := w.Write(floatBytes(t.Data[i*maxdim : i*maxdim+dim])); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	return writeCheckpoint(path, &ckptState{
 		N: n, Main: main, Maxdim: maxdim, MaxBlocks: maxBlocks,
 		Dim: dim, BlkStart: blkStart, BlkSize: blkSize, Iter: iter,
-		T: tHost,
-	}, n*dim, writeBasis)
+	}, n*dim, writeBasis, dim*dim, writeT)
 }

@@ -26,7 +26,7 @@ func TestCheckpointRoundTrip(t *testing.T) {
 	}
 	p := filepath.Join(t.TempDir(), "rt.ckpt")
 	// nil writeBasis = the in-memory form, writing s.Basis directly.
-	if err := writeCheckpoint(p, s, len(s.Basis), nil); err != nil {
+	if err := writeCheckpoint(p, s, len(s.Basis), nil, len(s.T), nil); err != nil {
 		t.Fatalf("writeCheckpoint: %v", err)
 	}
 	got, err := readCheckpoint(p)
@@ -165,7 +165,7 @@ func TestSaveKrylovStreamMatchesInMemory(t *testing.T) {
 		Dim: dim, BlkStart: blkStart, BlkSize: blkSize, Iter: iter,
 		Basis: host[:n*dim], T: tHost,
 	}
-	if err := writeCheckpoint(ref, s, len(s.Basis), nil); err != nil {
+	if err := writeCheckpoint(ref, s, len(s.Basis), nil, len(s.T), nil); err != nil {
 		t.Fatalf("writeCheckpoint(ref): %v", err)
 	}
 

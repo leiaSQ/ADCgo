@@ -61,6 +61,7 @@ func installStopSignal() *atomic.Bool {
 }
 
 func main() {
+	applyCgroupMemLimit() // bound RSS under the SLURM --mem cap (see memlimit.go)
 	stopSig := installStopSignal()
 
 	path := flag.String("fcidump", "", "path to an FCIDUMP file (MO integrals)")
