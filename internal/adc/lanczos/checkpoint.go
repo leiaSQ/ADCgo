@@ -228,10 +228,30 @@ const ckptBasisChunkCols = 256
 // at one chunk regardless of dim; the on-disk format is unchanged, so old checkpoints still load.
 func saveKrylov(be backend.Backend, path string, basis backend.BlockView, t backend.Mat,
 	n, main, maxdim, maxBlocks, dim, blkStart, blkSize, iter int) error {
+	// One reusable staging buffer for every chunk of every checkpoint, via BufferedDownloader.
+	// be.Download would return a FRESH n*cw slice per chunk, so the bytes allocated per checkpoint
+	// would scale with dim and the run's total allocation with dim² — ~1 TB over a long production SIP
+	// solve, which Go's scavenger cannot return fast enough and the cgroup OOM-kills (jobs
+	// 14040959 / 14075367, both at 733 GB). Pinned by TestCheckpointAllocGrowth.
+	//
+	// Backends without the capability keep the allocating path: correctness is identical, only the
+	// allocation behaviour differs.
+	bd, buffered := be.(backend.BufferedDownloader)
+	var stage []float64
+	if buffered {
+		stage = make([]float64, n*min(ckptBasisChunkCols, dim))
+	}
 	writeBasis := func(w io.Writer) error {
 		for c0 := 0; c0 < dim; c0 += ckptBasisChunkCols {
 			cw := min(ckptBasisChunkCols, dim-c0)
-			chunk := be.Download(basis.ColRange(c0, c0+cw).V) // length n*cw
+			col := basis.ColRange(c0, c0+cw).V
+			var chunk []float64
+			if buffered {
+				chunk = stage[:n*cw]
+				bd.DownloadInto(chunk, col)
+			} else {
+				chunk = be.Download(col) // length n*cw
+			}
 			if _, err := w.Write(floatBytes(chunk)); err != nil {
 				return err
 			}

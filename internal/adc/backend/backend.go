@@ -12,6 +12,7 @@
 package backend
 
 import (
+	"fmt"
 	"unsafe"
 
 	"gonum.org/v1/gonum/blas"
@@ -236,6 +237,24 @@ type Backend interface {
 	// read. Used for the dense validation path and to diagonalize the (small)
 	// projected matrix inside Lanczos — always small, hence host-side.
 	SymEig(a Mat) (evals []float64, evecs Mat)
+}
+
+// BufferedDownloader is an optional capability: copy a resident vector into a caller-owned host
+// slice instead of returning a freshly allocated one.
+//
+// It exists for the checkpoint writer, which streams the Krylov basis off the backend in
+// fixed-width column chunks. With plain Download every chunk is a fresh multi-hundred-MB slice, so
+// the bytes allocated per checkpoint scale with the basis width and the run's total allocation
+// scales with dim² — ~1 TB for a long production SIP solve. Go returns large freed spans to the OS
+// only lazily, so that churn accumulates as RSS until the cgroup OOM-kills the job (the 733 GB
+// kill, jobs 14040959 / 14075367). Reusing one buffer removes the churn at its source rather than
+// relying on the scavenger keeping up.
+//
+// Backends that do not implement it keep working via Download; the difference is allocation
+// behaviour, never results.
+type BufferedDownloader interface {
+	// DownloadInto copies v's elements into dst, which must have len(dst) >= v.Len().
+	DownloadInto(dst Vec, v Vector)
 }
 
 // StridedDownloader is an optional capability: copy a strided sub-block of a resident panel
@@ -492,6 +511,16 @@ func (Gonum) Download2D(v Vector, rows, cols, ld int) Vec {
 		copy(out[c*rows:(c+1)*rows], s[c*ld:c*ld+rows])
 	}
 	return out
+}
+
+// DownloadInto satisfies BufferedDownloader (see its doc): the copy Download would make, into a
+// caller-owned buffer.
+func (Gonum) DownloadInto(dst Vec, v Vector) {
+	s := host(v)
+	if len(dst) < len(s) {
+		panic(fmt.Sprintf("backend: DownloadInto dst too small (%d < %d)", len(dst), len(s)))
+	}
+	copy(dst[:len(s)], s)
 }
 
 func (Gonum) Download(v Vector) Vec {

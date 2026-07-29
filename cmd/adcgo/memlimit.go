@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -36,12 +38,78 @@ func applyCgroupMemLimit() {
 		"to keep RSS under the SLURM --mem limit\n", float64(soft)/(1<<30), float64(limit)/(1<<30))
 }
 
-// cgroupMemLimitBytes reads the process's cgroup memory cap, trying cgroup v2 then v1. It returns
-// (0,false) when no cgroup applies or the cap is unlimited ("max", or the v1 sentinel).
+// cgroupMemLimitBytes reports the memory cap that actually applies to THIS process.
+//
+// It must resolve the process's own cgroup rather than read the hierarchy root: on a SLURM node
+// the root is always "unlimited" and the real cap lives on a nested job cgroup (`--mem`), while
+// intermediate ancestors may carry their own caps. Reading only the root is why the earlier
+// version of this guard silently no-op'd through the production SIP OOM — verified on a Helix login
+// node, where the root and the leaf both read the v1 "unlimited" sentinel while the *ancestor*
+// user slice carried a real 20 GiB cap.
+//
+// The effective limit is the MINIMUM finite cap over the process's cgroup and all its ancestors,
+// which is what the walk below computes.
 func cgroupMemLimitBytes() (uint64, bool) {
-	v2, _ := os.ReadFile("/sys/fs/cgroup/memory.max")
-	v1, _ := os.ReadFile("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-	return parseCgroupLimit(string(v2), string(v1))
+	self, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return 0, false
+	}
+	return cgroupLimitFrom("/sys/fs/cgroup", string(self))
+}
+
+// cgroupLimitFrom resolves the effective cap under filesystem root `root` given the contents of
+// /proc/self/cgroup. Split out (with root injected) so it is testable against a fixture tree.
+//
+// /proc/self/cgroup lines are "hierarchy:controllers:path". The unified (v2) entry has an empty
+// controller field ("0::/some/path"); v1 entries name their controllers ("9:memory:/some/path").
+func cgroupLimitFrom(root, selfCgroup string) (uint64, bool) {
+	var v2Path, v1Path string
+	for _, line := range strings.Split(strings.TrimSpace(selfCgroup), "\n") {
+		f := strings.SplitN(strings.TrimSpace(line), ":", 3)
+		if len(f) != 3 {
+			continue
+		}
+		switch {
+		case f[1] == "":
+			v2Path = f[2]
+		case slices.Contains(strings.Split(f[1], ","), "memory"):
+			v1Path = f[2]
+		}
+	}
+
+	best, found := uint64(0), false
+	consider := func(raw string, v2 bool) {
+		var v uint64
+		var ok bool
+		if v2 {
+			v, ok = parseCgroupLimit(raw, "")
+		} else {
+			v, ok = parseCgroupLimit("", raw)
+		}
+		if ok && (!found || v < best) {
+			best, found = v, true
+		}
+	}
+	// Walk each hierarchy from the process's own cgroup up to the root, taking the minimum
+	// finite cap. A cap may sit on any ancestor (SLURM puts the job's --mem partway up).
+	walk := func(dir, path, file string, v2 bool) {
+		for p := path; ; p = filepath.Dir(p) {
+			b, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(p), file))
+			if err == nil {
+				consider(string(b), v2)
+			}
+			if p == "/" || p == "." || p == "" {
+				return
+			}
+		}
+	}
+	if v2Path != "" {
+		walk(root, v2Path, "memory.max", true)
+	}
+	if v1Path != "" {
+		walk(filepath.Join(root, "memory"), v1Path, "memory.limit_in_bytes", false)
+	}
+	return best, found
 }
 
 // parseCgroupLimit turns the raw contents of the v2 (memory.max) and v1

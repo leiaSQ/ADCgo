@@ -216,6 +216,19 @@ func (b *gpuBackend) Download2D(v Vector, rows, cols, ld int) Vec {
 	return out
 }
 
+// DownloadInto satisfies backend.BufferedDownloader (see its doc): the same device-to-host copy
+// Download performs, but into a caller-owned buffer, so a streaming consumer (the checkpoint
+// writer) can reuse one slice instead of allocating per chunk.
+func (b *gpuBackend) DownloadInto(dst Vec, v Vector) {
+	dv := v.(devVec)
+	if len(dst) < dv.n {
+		panic(fmt.Sprintf("backend: DownloadInto dst too small (%d < %d)", len(dst), dv.n))
+	}
+	if dv.n > 0 {
+		b.do(func() { devD2H(dst[:dv.n], dv.ptr()) })
+	}
+}
+
 func (b *gpuBackend) Download(v Vector) Vec {
 	dv := v.(devVec)
 	out := make([]float64, dv.n)
