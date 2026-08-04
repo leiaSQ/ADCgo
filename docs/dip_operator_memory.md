@@ -163,10 +163,36 @@ diverge as expected (short-recurrence ghost sensitivity, not a matrix-free error
   (`TestSatelliteMatFreeDistributedEqualsDense`) and end-to-end (`-mgpu 2 -matfree on`: main
   lines match the dense solve).
 
-**Remaining (Phase C follow-up):** the `-mgpu` satellite currently recomputes on the host
-(gather-apply-scatter); a per-partition *on-device* apply — each GPU recomputing only its own
-output band with the CUDA kernel — is the performance step for the real 8×H200 production run.
-The memory ceiling (the point of this note) is already removed.
+**Phase D (per-device apply, implemented — hardware validation pending).** The Phase-C remainder
+— the `-mgpu` satellite recomputing on the *host* via gather-apply-scatter — is addressed by
+`dip/matfree_dist.go newSatelliteMatFreePerDevice`: each GPU recomputes only its own output row
+band on-device. Per apply it loops column chunks of `satChunkCols`, and for each chunk every
+device gathers a full-height `n×w` input slab from all partitions with `PeerCopy2D` over
+NVLink (candidate columns are global, so the slab must be full height), then launches
+`dip_sat_apply` restricted to its band via the new `RowLo/RowHi/OutRowOff` arguments, writing
+straight into its local output columns. No host round-trip and no scatter. Reaching the
+sub-backends needed a new `backend.PartitionedDevices` capability — `PanelScatterAdd` exposes
+only `AddPanel`, and `distBackend` keeps `subs`/`bound` unexported. Selection requires device
+kernels on every partition **and** `AllPeered()`; otherwise the host path (still correct) stands.
+Chunking repeats the element evaluation `ceil(b/w)` times, but the column loop dominates
+(~`b` ops applied per element vs ~30 to evaluate it), so at `w=64` the overhead is ~15%.
+
+**Measured production budget** (job 14010811, `cmd/sizeprobe`; the matrix-free walk is cheap because
+`OperatorResidentBytes` skips `satelliteResidentBytes` entirely when matrix-free):
+
+| sector  |          n | main | panels   | **matrix-free operator** (main+coupling) | ERI/device | mgpu 8    |
+|---------|-----------:|-----:|---------:|-----------------------------------------:|-----------:|----------:|
+| singlet | 10,014,483 | 1711 | 510.7 GB | **12.57 GB**                              | 15.0 GB    | 85.2 GB   |
+| triplet | 14,766,249 | 1653 | 727.4 GB | **18.29 GB**                              | 15.0 GB    | 115.3 GB  |
+
+So the residual dense main+coupling term this note only ever asserted was small is **12.6 / 18.3 GB
+in total**, i.e. 1.6–2.3 GB per device at `-mgpu 8` — the assertion holds per device, though the
+total is not a rounding error. Two consequences for scheduling: **`-mgpu 8` is the only
+configuration that fits the triplet** (6 GPUs → 146.4 GB/GPU, over the 141 GB card; 4 → 208.5),
+and the singlet would fit 6. The `w=64` slab costs 4.8 GB (singlet) / 7.0 GB (triplet); with
+~26 GB of headroom left on the triplet at `-mgpu 8` there is room to raise `w` to 128 (halving
+the recompute overhead to ~8%) once the path has a real run behind it — the numbers above exclude
+cuBLAS/cuSOLVER workspace and allocator fragmentation, so the headroom is not all spendable.
 
 ## Pointers
 
@@ -182,3 +208,6 @@ The memory ceiling (the point of this note) is already removed.
   add one there as part of this work.
 - Existing matrix-free precedent: `-matfree` / `-maxmem` for CVS-ADC(4).
 - The basis-memory companion problem: [`dip_lowmem_lanczos.md`](dip_lowmem_lanczos.md).
+- The σ-build *speed* question this note's matrix-free fix leaves open — whether to move from
+  per-scalar recompute to tensor contractions (and where cuTENSOR fits):
+  [`sigma_build_contractions.md`](sigma_build_contractions.md).
