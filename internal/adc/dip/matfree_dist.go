@@ -1,6 +1,8 @@
 package dip
 
 import (
+	"fmt"
+	"math"
 	"sync"
 	"unsafe"
 
@@ -44,6 +46,25 @@ import (
 // than a hand-copied mirror. Read when an applier is CONSTRUCTED (it sizes the slab allocation),
 // so set it before building a Matrix; changing it mid-solve does nothing useful.
 var SatChunkCols = 64
+
+// checkSatChunkFits guards the one 32-bit index in the satellite kernel. dip_sat_apply addresses
+// its FULL-HEIGHT input as xin[C + jc*ldIn] with every operand a C `int`, where ldIn is the whole
+// sector height n and jc < w. The largest element offset it forms is therefore w·n − 1, which must
+// stay inside int32 — a wrapped index reads out of bounds, silently on some allocation layouts and
+// as a cudaErrorLaunchFailure on others, and neither is caught at launch (adc2_dip_sat_apply
+// returns only cudaGetLastError(), which does not see execution faults).
+//
+// The default w=64 is comfortable — the production system's n=10,014,483 sector sits at 6.4e8 of 2.1e9 — but the
+// ceiling for that sector is w ≤ MaxInt32/n = 214, and both SatChunkCols' own doc comment above
+// and the -satchunk flag invite raising w to 128 "and beyond". 256 would silently corrupt it. Fail
+// at construction instead, where the message can name the limit, rather than days into a run.
+func checkSatChunkFits(w, n int) {
+	if int64(w)*int64(n) > math.MaxInt32 {
+		panic(fmt.Sprintf("dip: -satchunk %d with n=%d overflows the satellite kernel's 32-bit input "+
+			"index (w·n = %d > %d); use -satchunk %d or less for this sector",
+			w, n, int64(w)*int64(n), int64(math.MaxInt32), math.MaxInt32/n))
+	}
+}
 
 // syncAll drains every partition's device stream concurrently. A peer read does not synchronize
 // the source stream, so the gather must be fenced on both sides: after the producers have written
@@ -140,6 +161,7 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 	// Latch the chunk width once: it sizes the slab allocated just below, so the apply loop
 	// must not read a value someone changed afterwards.
 	w := SatChunkCols
+	checkSatChunkFits(w, n) // this applier is the one that launches dip_sat_apply
 
 	// Per-device: the uploaded plan, and the staging slab for one column chunk.
 	bufs := make([]*satDeviceBufs, nd)

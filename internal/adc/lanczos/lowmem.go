@@ -33,7 +33,9 @@
 package lanczos
 
 import (
+	"fmt"
 	"math"
+	"os"
 	"time"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/backend"
@@ -69,6 +71,21 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 	sat, gateOK := op.(SatelliteOperator)
 	modeB := b == main && gateOK
 
+	// Checkpointing covers Mode B only. Mode A additionally retains hostQ — the WHOLE basis on the
+	// host, for its full reorthogonalization — and serializing that is exactly what the low-memory
+	// driver exists to avoid; the resumable-state argument in lowmem_checkpoint.go does not hold
+	// for it. Refuse loudly rather than accept the flag and silently never write a file: a run that
+	// believes it is checkpointing and is not is strictly worse than one that knows it is not.
+	cp := opts.Checkpoint
+	if cp != nil && cp.Path != "" && !modeB {
+		why := fmt.Sprintf("block width %d != main %d (Mode A)", b, main)
+		if b == main && !gateOK {
+			why = "the operator does not implement SatelliteOperator, so the Mode B gate is off"
+		}
+		panic("lanczos: SolveLowMem checkpointing requires Mode B, but " + why +
+			"; run with -lowmem-block 0 or drop -checkpoint")
+	}
+
 	// Subspace bound: MaxBlocks blocks of at most b columns, capped at MaxDim/Size.
 	maxdim := min(opts.MaxDim, opts.MaxBlocks*b, n)
 	maxdim = max(maxdim, b)
@@ -89,16 +106,6 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 	defer be.Free(pbuf)
 	pc := backend.BlockView{V: pcBuf, Rows: n, Cols: 2 * b, Ld: n}
 
-	// Start block: main-space Cartesian units e_0..e_{b-1} (same seed as Solve; for Mode B
-	// b = main so the start block spans the whole main space).
-	start := make([]float64, n*b)
-	for c := range b {
-		start[c*n+c] = 1
-	}
-	up := be.Upload(start)
-	be.Copy(pc.ColRange(0, b).V, up)
-	be.Free(up)
-
 	// Mode A retains the main-space slice of every basis vector on the host (main × dim),
 	// the cheap ingredient the dense back-transform Qmain·s needs.
 	var qmain []float64 // column-major main×dim, grown block by block
@@ -112,7 +119,6 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 			qmain = append(qmain, be.Download(panel.Col(c).Slice(0, main))...)
 		}
 	}
-	appendQmain(pc, b)
 
 	// Mode A additionally retains the full basis on the host and reorthogonalizes each new
 	// block against all of it (streaming one block back to the device at a time). Only three
@@ -128,17 +134,65 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 		}
 		hostQ = append(hostQ, append([]float64(nil), be.Download(view.V)...))
 	}
-	appendHostQ(pc.ColRange(0, b))
+	var blocks []lmBlock
+	rPrev, rCur, dim, iter0 := 0, b, b, 0
 
-	blocks := []lmBlock{{off: 0, size: b, beta: backend.NewMat(0, 0)}}
-	rPrev, rCur := 0, b
-	dim := b
+	// Resume from a checkpoint if one is present and matches this problem; otherwise seed the
+	// recurrence. A resumed run restores the [prev|cur] window, the accumulated α/β and the block
+	// scalars, then re-enters the loop at the saved index and redoes that one iteration
+	// (lowmem_checkpoint.go explains why that is the consistent re-entry point).
+	lmCkpt := cp != nil && cp.Path != "" && modeB
+	resumed := false
+	if lmCkpt {
+		if st := loadLowMem(be, cp.Path, pc, n, main, b, maxdim, opts.MaxBlocks, modeB, opts.DeflTol); st != nil {
+			blocks = st.Blocks
+			rPrev, rCur, dim, iter0 = st.RPrev, st.RCur, st.Dim, st.Iter
+			tm = st.Timing // so -profile totals span the whole daisychain, not just this generation
+			resumed = true
+		}
+	}
+	if !resumed {
+		// Start block: main-space Cartesian units e_0..e_{b-1} (same seed as Solve; for Mode B
+		// b = main so the start block spans the whole main space).
+		start := make([]float64, n*b)
+		for c := range b {
+			start[c*n+c] = 1
+		}
+		up := be.Upload(start)
+		be.Copy(pc.ColRange(0, b).V, up)
+		be.Free(up)
+		blocks = []lmBlock{{off: 0, size: b, beta: backend.NewMat(0, 0)}}
+		appendQmain(pc, b)
+		appendHostQ(pc.ColRange(0, b))
+	}
 
 	// betaExtra is the β to the (unbuilt) block after the last accepted one, used only for
 	// the Ritz residual (the reference's trailing block); populated when the loop stops.
 	var betaExtra backend.Mat
 
-	for iter := 0; ; iter++ {
+	for iter := iter0; ; iter++ {
+		// Checkpoint hook. The state here — the compacted [prev|cur] window, the accumulated α/β
+		// and the block scalars — fully re-does iteration `iter`: α for the current block is not
+		// written until below, and pc is not shifted until the very end, so this is the one point
+		// in the loop where the panel and (rPrev, rCur) describe each other. Skip iter0 itself: it
+		// was just loaded. Predicate copied from Solve (lanczos.go:424) so the two cannot drift.
+		if lmCkpt {
+			stop := cp.stopRequested()
+			if due := cp.Every > 0 && iter != iter0 && iter%cp.Every == 0; stop || due {
+				if err := saveLowMem(be, cp.Path, pc, blocks, n, main, b, maxdim, opts.MaxBlocks,
+					modeB, opts.DeflTol, dim, rPrev, rCur, iter, tm); err != nil {
+					// Never swallow this the way Solve does (`_ = saveKrylov`, lanczos.go:426):
+					// a silently failing write leaves a multi-day run with no restart point,
+					// which is the exact failure this checkpointing exists to prevent.
+					fmt.Fprintf(os.Stderr, "adcgo: lowmem checkpoint at block %d FAILED: %v "+
+						"(no restart point from here)\n", iter, err)
+				}
+				if stop {
+					return Result{Interrupted: true, Timing: tm}
+				}
+			}
+		}
+
 		cur := pc.ColRange(rPrev, rPrev+rCur) // current block within pc (prev occupies [0,rPrev))
 		w := backend.BlockView{V: workBuf, Rows: n, Cols: rCur, Ld: n}
 
@@ -205,6 +259,10 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 		blocks = append(blocks, lmBlock{off: dim, size: rank, beta: r})
 		rPrev, rCur = rCur, rank
 		dim += rank
+
+		if opts.Progress != nil {
+			opts.Progress(iter, dim, rank, tm)
+		}
 	}
 
 	// Assemble the projected matrix T from the block α/β and diagonalize.
@@ -217,6 +275,12 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 	res := packLowMem(theta, topVecs, botVecs, sDense, qmain, blocks, betaExtra, dim, main, modeB)
 	tm.Back = time.Since(tBack)
 	res.Timing = tm
+
+	// The solve completed; drop any checkpoint so a later rerun of the same job starts fresh
+	// rather than resuming a finished computation (mirrors lanczos.go's removeCheckpoint).
+	if lmCkpt {
+		removeLowMemCheckpoint(cp.Path)
+	}
 
 	// Drop Lanczos ghosts: roots with essentially zero main-space weight (spur_thresh=1e-9).
 	return filterSpurious(res)

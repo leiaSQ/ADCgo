@@ -79,10 +79,23 @@ type Options struct {
 	ConvThr  float64 // Davidson: residual 2-norm threshold in a.u. (0 → 1e-3, theADCcode's convthr)
 	MaxIters int     // Davidson: cap on iterations before giving up (0 → 200)
 
-	// Checkpoint enables save/resume of the block-Krylov build across processes (see
-	// checkpoint.go). nil (the default) leaves Solve bit-for-bit unchanged. Only Solve
-	// honors it; SolveDense and SolveDavidson ignore it.
+	// Checkpoint enables save/resume of the Krylov build across processes. nil (the default)
+	// leaves the drivers bit-for-bit unchanged. Solve honors it via checkpoint.go, and
+	// SolveLowMem via lowmem_checkpoint.go — the latter only in Mode B, since Mode A retains
+	// the whole basis on the host and is not what the low-memory format describes (see
+	// LowMemCheckpointable). SolveDense and SolveDavidson ignore it.
 	Checkpoint *Checkpoint
+
+	// Progress, when non-nil, is called once per accepted block with the 0-based block index,
+	// the subspace dimension reached, the block's surviving column count and the timings so
+	// far. Only SolveLowMem calls it.
+	//
+	// It exists because a Mode B block at production scale costs hours and the driver otherwise
+	// emits nothing: production DIP job 14040960 ran 1 d 15 h and produced no output at all, and
+	// the only reason we know it never finished two blocks is that its panic frame landed on
+	// lowmem.go:151 — the `else` arm of the `iter >= 2` gate. Without this there is no way to
+	// tell whether a checkpoint interval is ever reached. nil keeps the package free of I/O.
+	Progress func(iter, dim, blockSize int, tm Timing)
 
 	// LowMemBlock selects the block width for the limited-memory driver (SolveLowMem);
 	// other drivers ignore it. It is the memory knob: the driver keeps only three n×block

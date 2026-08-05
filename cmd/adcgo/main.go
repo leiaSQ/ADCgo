@@ -93,7 +93,7 @@ func main() {
 	sigmaMaxIt := flag.Int("sigma-maxit", 0, "Σ(∞) resolvent iteration cap (0 = 200; theADCcode's own default is 30)")
 	out := flag.String("out", "", "write JSON to this file (default stdout)")
 	profile := flag.Bool("profile", false, "print per-sector solver phase timings to stderr")
-	checkpoint := flag.String("checkpoint", "", "-solver lanczos only: base path for block-Krylov checkpoints, so a solve can resume in a later process after a walltime kill. Each sector appends a suffix (SIP: .i<irrep>). A SIGUSR1 (SLURM --signal=B:USR1@<grace>) makes the run checkpoint and exit 64 (\"resume needed\"); exit 0 means done. Empty = no checkpointing")
+	checkpoint := flag.String("checkpoint", "", "base path for Krylov checkpoints, so a solve can resume in a later process after a walltime kill or a crash. Supported by -solver lanczos (SIP and DIP) and by -solver lanczos-lowmem with -lowmem-block 0 (DIP Mode B only — Mode A retains the whole basis on the host and is not resumable). Each sector appends a suffix: SIP .i<irrep>, DIP .s<spin>.i<irrep>. A SIGUSR1 (SLURM --signal=B:USR1@<grace>) makes the run checkpoint and exit 64 (\"resume needed\"); exit 0 means done. Empty = no checkpointing")
 	checkpointEvery := flag.Int("checkpoint-every", 25, "-checkpoint only: also save every N blocks for crash resilience (<=0 = save only on the stop signal)")
 
 	doTDM := flag.Bool("tdm", false, "emit RASSI-like transition dipole moments instead of the solver document: ion→ion emission (element 1), Dyson photoionization (element 2), and — for -order 4 — core→valence X-ray emission; needs -sip -mo (with dipole integrals)")
@@ -230,7 +230,16 @@ func main() {
 		}
 		cfg.matFree = mfMode
 		cfg.matFreeBudget = int64(*maxMemGB * (1 << 30))
+		cfg.ckpt = *checkpoint
+		cfg.ckptEvery = *checkpointEvery
+		if cfg.ckpt != "" {
+			cfg.stop = stopSig
+		}
 		if err := runDIP(d, cfg); err != nil {
+			if errors.Is(err, errInterrupted) {
+				fmt.Fprintln(os.Stderr, "adcgo: checkpoint written; resume needed")
+				os.Exit(exitResumeNeeded)
+			}
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
 			os.Exit(1)
 		}
@@ -318,6 +327,45 @@ type dipConfig struct {
 	spec                                       specConfig
 	matFree                                    sip.MatFreeMode // dense (default) vs matrix-free 3h1p↔3h1p satellite region
 	matFreeBudget                              int64           // -matfree=auto per-block dense-size threshold (bytes)
+	ckpt                                       string          // -checkpoint base path (lanczos / lanczos-lowmem Mode B; "" = off)
+	ckptEvery                                  int             // -checkpoint-every: blocks between crash-resilience saves
+	stop                                       *atomic.Bool    // set by a stop signal; polled by the checkpointing solver loop
+}
+
+// dipCkptPath keys a DIP checkpoint by BOTH spin and irrep.
+//
+// SIP keys by irrep alone (sip_tdm.go), which cannot work here: DIP sectors are spin × irrep, so
+// the singlet and triplet of the same irrep would share one file — and in the non-mgpu path they
+// run concurrently, so two goroutines would write it. Their sector sizes differ, so the guard
+// would reject one of them at best and mis-resume at worst.
+func dipCkptPath(base string, spin dip.Spin, sym int) string {
+	return fmt.Sprintf("%s.s%d.i%d", base, int(spin), sym)
+}
+
+// dipLanczosOpts builds one DIP sector's solver options, including its checkpoint and progress
+// reporting. Both solve paths route through it so the two cannot drift — solveDIPSector and
+// solveDIPSectorMGPU previously each constructed Options independently.
+func dipLanczosOpts(cfg dipConfig, spin dip.Spin, targetSym int) lanczos.Options {
+	o := lanczos.Options{MaxBlocks: cfg.blocks, LowMemBlock: cfg.lowmemBlock}
+	if cfg.ckpt != "" && (cfg.solver == "lanczos" || cfg.solver == "lanczos-lowmem") {
+		o.Checkpoint = &lanczos.Checkpoint{
+			Path:  dipCkptPath(cfg.ckpt, spin, targetSym),
+			Every: cfg.ckptEvery,
+			Stop:  cfg.stop,
+		}
+	}
+	// A Mode B block at production scale costs hours and the driver is otherwise silent: the production system
+	// job 14040960 ran 1 d 15 h and emitted nothing, and only its panic frame (lowmem.go's
+	// pre-gate ApplyBlock arm) revealed it had not finished two blocks. Without this there is no
+	// way to know whether a checkpoint interval is ever reached.
+	if cfg.profile || cfg.ckpt != "" {
+		o.Progress = func(iter, dim, blockSize int, tm lanczos.Timing) {
+			fmt.Fprintf(os.Stderr, "progress dip spin=%d irrep=%d block=%d dim=%d size=%d apply=%s orth=%s\n",
+				spin, targetSym+1, iter, dim, blockSize,
+				tm.Apply.Round(time.Second), tm.Orth.Round(time.Second))
+		}
+	}
+	return o
 }
 
 // reportTiming prints one solver's phase breakdown to stderr. The percentages are
@@ -364,7 +412,7 @@ func validateSolver(solver string) error {
 // GPU, via a per-worker single-backend chooser. cfg.solver is validated by the caller.
 func solveDIPSector(ch *chooser, cfg dipConfig, sp *dip.Space, ints *integrals.Store, eps []float64, spin dip.Spin, targetSym int, moData *mo.Data, opts analyze.Options) (analyze.Sector, error) {
 	label := fmt.Sprintf("dip spin=%d irrep=%d", spin, targetSym+1)
-	lopts := lanczos.Options{MaxBlocks: cfg.blocks, LowMemBlock: cfg.lowmemBlock}
+	lopts := dipLanczosOpts(cfg, spin, targetSym)
 	davOpts := davidsonOpts(cfg.nroots, cfg.maxdavsp, cfg.maxdavit, cfg.convthr, false)
 	n, b := sp.Size(), sp.MainBlockSize()
 	subspace := lanczos.SubspaceDim(n, b, lopts)
@@ -426,6 +474,12 @@ func solveDIPSector(ch *chooser, cfg dipConfig, sp *dip.Space, ints *integrals.S
 	// Reclaim the sector's resident operator before the next one is assembled;
 	// on a device this is up to 0.5 GB, and the memory check depends on it.
 	mx.Release()
+	if res.Interrupted {
+		// A stop signal checkpointed and bailed out mid-build; propagate so main exits with the
+		// "resume needed" code instead of analyzing an unpopulated Result into an empty sector
+		// that would then be emitted as if it had converged.
+		return analyze.Sector{}, errInterrupted
+	}
 	return analyzeDIPSector(label, cfg, sp, res, moData, opts), nil
 }
 
@@ -488,8 +542,13 @@ func solveDIPSectorMGPU(subs []backend.Backend, cfg dipConfig, sp *dip.Space, in
 		mx.Release()
 		return analyze.Sector{}, err
 	}
-	res := lanczos.SolveLowMem(mx, be, lanczos.Options{MaxBlocks: cfg.blocks, LowMemBlock: cfg.lowmemBlock})
+	res := lanczos.SolveLowMem(mx, be, dipLanczosOpts(cfg, spin, targetSym))
 	mx.Release()
+	if res.Interrupted {
+		// A stop signal checkpointed and bailed out mid-build; propagate so main exits with the
+		// "resume needed" code instead of analyzing an unpopulated Result into an empty sector.
+		return analyze.Sector{}, errInterrupted
+	}
 	return analyzeDIPSector(label, cfg, sp, res, moData, opts), nil
 }
 
@@ -520,6 +579,14 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 	}
 	if err := validateSolver(cfg.solver); err != nil {
 		return err
+	}
+	// Reject an unresumable checkpoint request up front, with a message, rather than let it reach
+	// SolveLowMem's panic backstop days into a run. Mode A keeps the whole basis on the host, which
+	// is the object the short-recurrence checkpoint format exists to avoid writing.
+	if cfg.ckpt != "" && cfg.solver == "lanczos-lowmem" && cfg.lowmemBlock != 0 {
+		return fmt.Errorf("-checkpoint with -solver lanczos-lowmem requires -lowmem-block 0 (Mode B); "+
+			"Mode A retains the full basis on the host and is not resumable (got -lowmem-block %d)",
+			cfg.lowmemBlock)
 	}
 	nocc := mp.NOcc(d)
 	eps := mp.OrbitalEnergies(d, nocc)

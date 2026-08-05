@@ -79,30 +79,46 @@ go test -tags cuda -c -o backend.test ./internal/adc/backend || { echo "build ba
 echo "#end<go test -c>"
 
 rc_total=0
-run() {   # run <label> <binary> <-run regexp>
-    local label="$1" bin="$2" pat="$3"
+log_all="${SLURM_SUBMIT_DIR:-$root}/dip-mgpu-sanitize-${SLURM_JOB_ID:-local}.log"
+: > "$log_all"
+run() {   # run <label> <pkgdir> <binary> <-run regexp>
+    local label="$1" pkgdir="$2" bin="$3" pat="$4"
     echo
     echo "################ $label ################"
+    # MUST run from the package directory. The tests open fixtures by a path relative to their
+    # own package ("../../../testdata/h2o.fcidump"), which is where `go test` chdirs to but a
+    # standalone test binary does not — run from the repo root, every DIP test aborts on
+    # "no such file or directory" before it launches a single kernel, and the sanitizer then
+    # reports a truthful but worthless "0 errors" (job 14134501).
+    #
     # --tool memcheck catches OOB / misaligned global, shared and local accesses.
     # --launch-timeout 0: the Go runtime can leave a kernel queued behind a long host phase.
     # --report-api-errors no: cudaGetLastError() polling makes benign sticky-error noise here.
-    "$SAN" --tool memcheck --launch-timeout 0 --report-api-errors no \
-           --print-limit 20 \
-           "./$bin" -test.run "$pat" -test.v -test.timeout 60m
-    local rc=$?
+    ( cd "$root/$pkgdir" && \
+      "$SAN" --tool memcheck --launch-timeout 0 --report-api-errors no \
+             --print-limit 20 \
+             "$root/$bin" -test.run "$pat" -test.v -test.timeout 60m ) 2>&1 | tee -a "$log_all"
+    local rc=${PIPESTATUS[0]}
     echo "---- $label exit=$rc ----"
     [ "$rc" -ne 0 ] && rc_total=1
 }
 
 # The mgpu satellite path first: it is what the production DIP mgpu run was running.
-run "dip mgpu satellite (per-device bands + NVLink gather)" dip.test 'MatFreePerDevice|MGPU|Mgpu|Dist'
+run "dip mgpu satellite (per-device bands + NVLink gather)" internal/adc/dip     dip.test     'MatFreePerDevice|MGPU|Mgpu|Dist'
 # The batched fill/gemm path and the single-device satellite apply, same kernels, simpler driver.
-run "dip matfree batched + device"                          dip.test 'MatFree|Batched|Satellite'
+run "dip matfree batched + device"                          internal/adc/dip     dip.test     'MatFree|Batched|Satellite'
 # Distributed backend plumbing: peer copies, row-band slicing, batched GEMM regrouping.
-run "backend distributed + gpu"                             backend.test 'Dist|Peer|Gemm|Repro|MultiDevice'
+run "backend distributed + gpu"                             internal/adc/backend backend.test 'Dist|Peer|Gemm|Repro|MultiDevice'
 
 echo
-if [ "$rc_total" -eq 0 ]; then
+# A green run means nothing unless the key test actually EXECUTED. Both failure modes seen so far
+# (missing fixture; <4 GPUs -> t.Skipf) leave the sanitizer reporting "0 errors" over a process that
+# never launched a DIP kernel, so assert the parity test reached PASS before believing the result.
+if ! grep -q -- '--- PASS: TestSatelliteMatFreePerDeviceParity' "$log_all"; then
+    echo "RESULT: INCONCLUSIVE — TestSatelliteMatFreePerDeviceParity did not reach PASS, so the"
+    echo "        mgpu kernels were never sanitized. Check for a skip (needs >= 4 devices) or a"
+    echo "        fixture error above; a '0 errors' summary here means nothing."
+elif [ "$rc_total" -eq 0 ]; then
     echo "RESULT: no sanitizer findings and no test failures."
     echo "        The 719 is then NOT an out-of-bounds reachable at test scale — next suspects are"
     echo "        a production-scale-only index path, or a hardware/Xid fault on o09c01 (719 looks the"
