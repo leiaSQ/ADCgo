@@ -106,6 +106,9 @@ func main() {
 	initAtom := flag.String("init-atom", "O", "initial core-ionized site for DIP decay channels (overridden by the interactive prompt)")
 	initOrbital := flag.String("init-orbital", "", "optional initial-orbital label recorded in the spectrum meta")
 	stRatio := flag.Float64("st-ratio", 3.0, "singlet:triplet ratio recorded in the spectrum meta for the plotting layer")
+	molecule := flag.String("molecule", "", "molecule label recorded in the spectrum meta (used in the plot title)")
+	basisLabel := flag.String("basis", "", "basis-set label recorded in the spectrum meta")
+	pointGroup := flag.String("point-group", "", "point-group label recorded in the spectrum meta, e.g. C2v")
 	minWeight := flag.Float64("min-weight", 0, "drop decay channels with weight <= this")
 	minFraction := flag.Float64("min-fraction", 0, "drop decay channels below this fraction of a state's 2h population (0..1)")
 	includeZero := flag.Bool("include-zero", false, "emit the full canonical channel set per state, even at zero weight")
@@ -141,6 +144,7 @@ func main() {
 			}
 			cfg := specConfig{
 				enabled: true, initAtom: *initAtom, initOrbital: *initOrbital, stRatio: *stRatio,
+				molecule: *molecule, basis: *basisLabel, pointGroup: *pointGroup,
 				groups: groups.sites, interactive: groups.interactive,
 				classify: spectrum.Options{MinWeight: *minWeight, MinFraction: *minFraction, IncludeZero: *includeZero},
 			}
@@ -206,6 +210,9 @@ func main() {
 		initAtom:    *initAtom,
 		initOrbital: *initOrbital,
 		stRatio:     *stRatio,
+		molecule:    *molecule,
+		basis:       *basisLabel,
+		pointGroup:  *pointGroup,
 		groups:      groups.sites,
 		interactive: groups.interactive,
 		classify: spectrum.Options{
@@ -954,7 +961,11 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 		if cfg.spec.bare {
 			return emitJSON(spectrum.BuildBareSIP(doc.Sectors, spectrum.BareOptions{}), cfg.out)
 		}
-		spec, err := spectrum.BuildSIP(doc.Sectors, d.OrbSym, spectrum.SIPOptions{})
+		spec, err := spectrum.BuildSIP(doc.Sectors, d.OrbSym, spectrum.SIPOptions{
+			Molecule:   cfg.spec.molecule,
+			Basis:      cfg.spec.basis,
+			PointGroup: cfg.spec.pointGroup,
+		})
 		if err != nil {
 			return err
 		}

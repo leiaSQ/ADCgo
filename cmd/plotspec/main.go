@@ -69,6 +69,7 @@ type specLine struct {
 	Intensity float64 `json:"intensity"`
 	Channel   string  `json:"channel"`
 	Spin      int     `json:"spin"`
+	StateRef  string  `json:"state_ref"`
 }
 
 // spectrum mirrors the subset of the JSON schema this script needs.
@@ -103,6 +104,9 @@ func run() error {
 		inPath      = flag.String("in", "spec.json", "input spectrum JSON (from ADCanalysis)")
 		expPath     = flag.String("exp", "", "optional experimental/reference spectrum JSON (same schema); overlaid as dotted lines")
 		expScale    = flag.Float64("exp-scale", 0, "scale factor for the experimental overlay; 0 = auto (match its tallest peak to the theory's)")
+		expLabel    = flag.String("exp-label", "exp", "legend tag for the -exp overlay, appended in brackets to each channel name (e.g. \"theADCcode\" when the overlay is a reference calculation rather than a measurement)")
+		total       = flag.String("total", "", "collapse every channel of -in into a single series with this name (the total spectrum, decay-channel decomposition dropped)")
+		expTotal    = flag.String("exp-total", "", "collapse every channel of -exp into a single series with this name; the name is then used verbatim in the legend, without the -exp-label tag")
 		outPath     = flag.String("out", "spectrum.png", "output image (.png/.svg/.pdf by extension)")
 		fwhm        = flag.Float64("fwhm", 1, "Gaussian FWHM for broadening, in eV")
 		points      = flag.Int("points", 1000, "number of points on the energy grid")
@@ -182,6 +186,14 @@ func run() error {
 		if len(exp.Lines) == 0 {
 			return fmt.Errorf("%s contains no lines", *expPath)
 		}
+	}
+
+	// -total/-exp-total: one series per spectrum instead of one per channel.
+	if *total != "" {
+		collapseChannels(spec, *total)
+	}
+	if *expTotal != "" && exp != nil {
+		collapseChannels(exp, *expTotal)
 	}
 
 	// sigma from FWHM: FWHM = 2*sqrt(2 ln2) * sigma.
@@ -357,6 +369,13 @@ func run() error {
 		}
 	}
 
+	// Legend tag for the overlay's channels: "(exp)" by default, or whatever the
+	// overlay actually is (-exp-label theADCcode for a reference calculation).
+	expTag := ""
+	if *expLabel != "" && *expTotal == "" {
+		expTag = " (" + *expLabel + ")"
+	}
+
 	// Stable colour per channel: theory channels take palette slots in order;
 	// any experimental-only channel gets the next free slot. Matching channels
 	// (e.g. Auger@O in both) thus share a colour — dotted exp over solid theory.
@@ -451,7 +470,7 @@ func run() error {
 				stem.sticks = append(stem.sticks, stem3{x: pt.X, y: pt.Y, color: col, dashes: dash})
 			}
 			if len(expSticks[ch]) > 0 {
-				p.Legend.Add(ch+" (exp)", stemThumb{color: col, width: vg.Points(2), dashes: dash})
+				p.Legend.Add(ch+expTag, stemThumb{color: col, width: vg.Points(2), dashes: dash})
 			}
 		}
 		p.Add(stem)
@@ -484,7 +503,7 @@ func run() error {
 			line.Dashes = []vg.Length{vg.Points(2), vg.Points(2)}
 			p.Add(line)
 			if !drawSticks {
-				p.Legend.Add(ch+" (exp)", line)
+				p.Legend.Add(ch+expTag, line)
 			}
 		}
 	}
@@ -825,15 +844,13 @@ func runPanel(p panelParams) error {
 	// Panel (b): DIP sticks with the decay-channel colouring. Its legend is drawn
 	// once as a shared key in the gap above (c), so this panel adds none itself.
 	bOrder := channelOrder(*dipSpec)
-	// Channel→colour map shared by (b) and (c): the channel's slot in the full DIP
-	// order fixes its colour, so a channel keeps the same hue in both panels even
-	// when (c) draws only a -fin-channels subset.
-	dipColorIdx := map[string]int{}
-	for i, ch := range bOrder {
-		dipColorIdx[ch] = i
-	}
+	// Channel→colour map shared by (b), (c) and the key: each decay family gets its
+	// canonical hue (Auger=orange, ICD=blue, ETMD=green) and a family's subchannels
+	// are distinct shades of it, so a channel keeps the same colour across panels
+	// even when (c) draws only a -fin-channels subset.
+	dipColors := dipChannelColors(bOrder)
 	pb, err := buildStickPanel(dipSpec.Lines, bOrder, abGrid,
-		ees.SigmaFromFWHM(fwhmDIP), p.spinWeight, dipRatio, p.overlay, p.stickHeight, p.absolute, 0, false, nil)
+		ees.SigmaFromFWHM(fwhmDIP), p.spinWeight, dipRatio, p.overlay, p.stickHeight, p.absolute, 0, false, dipColors)
 	if err != nil {
 		return err
 	}
@@ -859,7 +876,7 @@ func runPanel(p panelParams) error {
 		if err != nil {
 			return err
 		}
-		cline.Color = palette(dipColorIdx[ch])
+		cline.Color = dipColors[ch]
 		cline.Width = vg.Points(1.5)
 		pc.Add(cline)
 	}
@@ -892,7 +909,7 @@ func runPanel(p panelParams) error {
 		Min: vg.Point{X: rect.Min.X, Y: cTop},
 		Max: vg.Point{X: rect.Max.X, Y: cTop + gap},
 	}}
-	drawChannelKey(keyCanvas, bOrder, func(ch string) color.Color { return palette(dipColorIdx[ch]) })
+	drawChannelKey(keyCanvas, bOrder, func(ch string) color.Color { return dipColors[ch] })
 
 	// Bottom region: panel (c), narrower and horizontally inset.
 	cCanvas := draw.Canvas{Canvas: dc.Canvas, Rectangle: vg.Rectangle{
@@ -990,10 +1007,12 @@ func buildStickPanel(lines []specLine, order []string, grid []float64, sigma flo
 	return p, nil
 }
 
-// drawChannelKey draws a single horizontal legend, shared by panels (b) and (c),
-// centred in canvas c: one colour swatch plus channel label per entry, laid out
-// left-to-right. colorFor maps each channel to the hue both panels use, so the one
-// key in the gap between them describes both.
+// drawChannelKey draws the legend shared by panels (b) and (c), centred in canvas
+// c: one colour swatch plus channel label per entry. Entries are packed
+// left-to-right and wrap onto as many centred rows as the canvas width needs, so
+// a many-channel key (e.g. the five decay channels of a two-neighbour system)
+// stays inside a narrow figure instead of running off the edges. colorFor maps
+// each channel to the hue both panels use, so the one key describes both.
 func drawChannelKey(c draw.Canvas, order []string, colorFor func(string) color.Color) {
 	if len(order) == 0 {
 		return
@@ -1005,22 +1024,52 @@ func drawChannelKey(c draw.Canvas, order []string, colorFor func(string) color.C
 		tgap  vg.Length = 4  // swatch→label spacing
 		egap  vg.Length = 16 // entry→entry spacing
 	)
-	// Total row width, so the key can be centred horizontally.
-	var total vg.Length
-	for i, ch := range order {
-		total += thumb + tgap + sty.Width(ch)
-		if i != 0 {
-			total += egap
-		}
-	}
-	y := (c.Min.Y + c.Max.Y) / 2
-	x := c.Min.X + (c.Max.X-c.Min.X-total)/2
+	entryW := func(ch string) vg.Length { return thumb + tgap + sty.Width(ch) }
+
+	// Greedily pack entries into rows no wider than the canvas (leaving an egap
+	// margin each side). A single entry wider than the canvas gets its own row.
+	avail := (c.Max.X - c.Min.X) - 2*egap
+	var rows [][]string
+	var row []string
+	var rowW vg.Length
 	for _, ch := range order {
-		ls := draw.LineStyle{Color: colorFor(ch), Width: vg.Points(2)}
-		c.StrokeLine2(ls, x, y, x+thumb, y)
-		x += thumb + tgap
-		c.FillText(sty, vg.Point{X: x, Y: y}, ch)
-		x += sty.Width(ch) + egap
+		w := entryW(ch)
+		add := w
+		if len(row) > 0 {
+			add += egap
+		}
+		if len(row) > 0 && rowW+add > avail {
+			rows = append(rows, row)
+			row, rowW = nil, 0
+			add = w
+		}
+		row = append(row, ch)
+		rowW += add
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+
+	// Stack the rows, vertically centred in the key canvas.
+	lh := sty.Height("Ag") + vg.Points(2) // line height with a little leading
+	top := (c.Min.Y+c.Max.Y)/2 + lh*vg.Length(len(rows)-1)/2
+	for r, rw := range rows {
+		var total vg.Length
+		for i, ch := range rw {
+			total += entryW(ch)
+			if i != 0 {
+				total += egap
+			}
+		}
+		y := top - lh*vg.Length(r)
+		x := c.Min.X + (c.Max.X-c.Min.X-total)/2
+		for _, ch := range rw {
+			ls := draw.LineStyle{Color: colorFor(ch), Width: vg.Points(2)}
+			c.StrokeLine2(ls, x, y, x+thumb, y)
+			x += thumb + tgap
+			c.FillText(sty, vg.Point{X: x, Y: y}, ch)
+			x += sty.Width(ch) + egap
+		}
 	}
 }
 
@@ -1629,6 +1678,33 @@ func maxCurve(curves map[string][]float64) float64 {
 
 // channelOrder returns the channels to plot: meta.channels first (canonical
 // order), then any extra channel names found only in the lines, sorted.
+// collapseChannels folds every channel of a spectrum into one series called
+// name: a state's channel-resolved intensities sum to its total two-hole weight,
+// so the result is the bare DIP/SIP spectrum with the decay-channel decomposition
+// dropped. That is what a code-against-code overlay wants -- the decomposition
+// would otherwise repeat the same comparison once per channel, in colours that
+// the -exp overlay has to share (and so hide behind).
+func collapseChannels(s *spectrum, name string) {
+	idx := map[string]int{}
+	var out []specLine
+	for _, l := range s.Lines {
+		key := l.StateRef
+		if key == "" {
+			key = fmt.Sprintf("%g/%d", l.Energy, l.Spin)
+		}
+		if i, ok := idx[key]; ok {
+			out[i].Intensity += l.Intensity
+			continue
+		}
+		idx[key] = len(out)
+		l.Channel = name
+		out = append(out, l)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Energy < out[j].Energy })
+	s.Lines = out
+	s.Channels = []string{name}
+}
+
 func channelOrder(spec spectrum) []string {
 	seen := map[string]bool{}
 	var order []string
@@ -1850,6 +1926,82 @@ func palette(i int) color.Color {
 		return activePalette[i]
 	}
 	return genColor(i - len(activePalette))
+}
+
+// channelFamily maps a decay-channel label to its family, so every Auger / ICD /
+// ETMD subchannel shares one family hue. An unrecognised label is its own family.
+func channelFamily(ch string) string {
+	switch {
+	case strings.HasPrefix(ch, "Auger"):
+		return "Auger"
+	case strings.HasPrefix(ch, "ICD"):
+		return "ICD"
+	case strings.HasPrefix(ch, "ETMD"):
+		return "ETMD"
+	default:
+		return ch
+	}
+}
+
+// dipChannelColors assigns each DIP decay channel a colour: the family hue
+// (Auger=orange, ICD=blue, ETMD=green — the first three palette slots) with a
+// family's subchannels rendered as distinct shades of that hue, so e.g. ICD to
+// two neighbours are two blues. A single-member family (the one-neighbour case)
+// gets the exact family colour, keeping the 2-body Auger/ICD/ETMD scheme intact.
+// Unrecognised families take further palette slots past green.
+func dipChannelColors(order []string) map[string]color.Color {
+	famBase := map[string]int{"Auger": 0, "ICD": 1, "ETMD": 2}
+	var famOrder []string
+	members := map[string][]string{}
+	for _, ch := range order {
+		fam := channelFamily(ch)
+		if _, ok := members[fam]; !ok {
+			famOrder = append(famOrder, fam)
+		}
+		members[fam] = append(members[fam], ch)
+	}
+	next := len(famBase)
+	out := make(map[string]color.Color, len(order))
+	for _, fam := range famOrder {
+		base, ok := famBase[fam]
+		if !ok {
+			base = next
+			next++
+		}
+		bc := palette(base)
+		mem := members[fam]
+		for k, ch := range mem {
+			out[ch] = shadeColor(bc, k, len(mem))
+		}
+	}
+	return out
+}
+
+// shadeColor returns the k-th of n tints of base: the same hue spread across a
+// band of lightness (darker → lighter). n<=1 returns base unchanged.
+func shadeColor(base color.Color, k, n int) color.Color {
+	if n <= 1 {
+		return base
+	}
+	const span = 0.34 // max darken/lighten fraction at the band ends
+	off := -span + 2*span*float64(k)/float64(n-1)
+	r, g, b, a := base.RGBA() // 16-bit, premultiplied-alpha-free for opaque swatches
+	adj := func(v uint32) uint8 {
+		f := float64(v >> 8)
+		if off >= 0 {
+			f += (255 - f) * off // lighten toward white
+		} else {
+			f *= 1 + off // darken toward black
+		}
+		switch {
+		case f < 0:
+			f = 0
+		case f > 255:
+			f = 255
+		}
+		return uint8(f + 0.5)
+	}
+	return color.RGBA{R: adj(r), G: adj(g), B: adj(b), A: uint8(a >> 8)}
 }
 
 // genColor synthesises distinct colours for index n = 0, 1, 2, … by walking the

@@ -19,6 +19,9 @@ type specConfig struct {
 	initAtom    string
 	initOrbital string
 	stRatio     float64
+	molecule    string // meta labels: plot title / provenance only
+	basis       string
+	pointGroup  string
 	groups      []spectrum.Site // explicit -group sites (before completeSites)
 	interactive bool            // a bare -group requested the interactive dialogue
 	classify    spectrum.Options
@@ -104,6 +107,9 @@ func buildDIPSpectrum(secs []analyze.Sector, md *mo.Data, cfg specConfig) (*spec
 		InitialOrbital:      cfg.initOrbital,
 		Classify:            cfg.classify,
 		SingletTripletRatio: cfg.stRatio,
+		Molecule:            cfg.molecule,
+		Basis:               cfg.basis,
+		PointGroup:          cfg.pointGroup,
 	})
 	if err != nil {
 		return nil, err
