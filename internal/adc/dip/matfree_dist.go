@@ -3,7 +3,9 @@ package dip
 import (
 	"fmt"
 	"math"
+	"os"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/backend"
@@ -46,6 +48,26 @@ import (
 // than a hand-copied mirror. Read when an applier is CONSTRUCTED (it sizes the slab allocation),
 // so set it before building a Matrix; changing it mid-solve does nothing useful.
 var SatChunkCols = 64
+
+// SatTrace makes the -mgpu satellite appliers print a per-COLUMN-CHUNK timing breakdown to stderr.
+//
+// It exists because a whole-band production mat-vec costs 40 h (job 14158038 measured block 0 at
+// apply=40h15m18s), and lanczos.Timing buckets all of that into a single "apply" number that only
+// appears once the block finishes. The apply is a loop of ceil(b/SatChunkCols) column chunks —
+// 27 of them at the production system's b=1711 — so tracing per chunk turns a 40 h measurement into a ~90 min
+// one, and splits it into the parts that can actually be acted on: the NVLink gather, the two
+// fences around it, the operator fill, and the batched GEMM.
+//
+// Off by default: it writes a line per chunk per device.
+var SatTrace = false
+
+// satTracef prints one trace line when SatTrace is on. Kept here so the appliers stay readable and
+// the package has exactly one place that writes to stderr.
+func satTracef(format string, a ...any) {
+	if SatTrace {
+		fmt.Fprintf(os.Stderr, "sattrace "+format+"\n", a...)
+	}
+}
 
 // checkSatChunkFits guards the one 32-bit index in the satellite kernel. dip_sat_apply addresses
 // its FULL-HEIGHT input as xin[C + jc*ldIn] with every operand a C `int`, where ldIn is the whole
@@ -189,6 +211,9 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 			// Fence the gather before any kernel reads a slab.
 			syncAll(pd)
 
+			// Concurrent for the same reason, and with the same disjointness argument, as the
+			// batched applier: one blocking round-trip per device otherwise leaves the rest idle.
+			var wg sync.WaitGroup
 			for d := range nd {
 				if rowHi[d] <= rowLo[d] {
 					continue // partition owns no satellite rows
@@ -199,8 +224,11 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 					V:    pd.PartVector(out.V, d).Slice(c0*rd, cw*rd),
 					Rows: rd, Cols: cw, Ld: rd,
 				}
-				bufs[d].dk.DipSatApply(bufs[d].args(s, inView, outView, rowLo[d], rowHi[d], bounds[d]))
+				args := bufs[d].args(s, inView, outView, rowLo[d], rowHi[d], bounds[d])
+				dk := bufs[d].dk
+				wg.Go(func() { dk.DipSatApply(args) })
 			}
+			wg.Wait()
 		}
 		// Fence the outputs before the caller consumes them.
 		syncAll(pd)
@@ -260,12 +288,18 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 	}
 	st := make([]*devState, nd)
 
+	// One plan for the whole pool. It depends only on the Space and the virtual-symmetry groups,
+	// so building it per device produced N byte-identical copies — ~10.5 GB of []jiiSlot each at
+	// the production system's 82 M slots, ~84 GB of host RAM across 8 devices. Each device gets a clone that
+	// shares the planning data and owns its own issue scratch (jiiBatchPlan.clone).
+	basePlan := mx.buildJIIBatchPlan()
+
 	for d := range nd {
 		dk, ok := pd.PartKernels(d)
 		if !ok {
 			panic("dip: batched per-device satellite selected without device kernels")
 		}
-		plan := mx.buildJIIBatchPlan()
+		plan := basePlan.clone()
 		bufs := mx.buildJIIDeviceBufs(dk, plan, s)
 		eri, eps, osym := dk.DeviceERI(s.eri), dk.UploadFloats(s.eps), dk.UploadInts(s.osym)
 		bufs.args.ERI, bufs.args.Eps, bufs.args.OrbSym = eri, eps, osym
@@ -293,15 +327,41 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 	}
 
 	apply := func(in, out backend.BlockView) {
+		nchunkCols := (in.Cols + w - 1) / w
 		for c0 := 0; c0 < in.Cols; c0 += w {
 			cw := min(w, in.Cols-c0)
+			tChunk := time.Now()
 
+			t0 := time.Now()
 			syncAll(pd) // producers may still be mid-write; a peer read does not drain them
+			tSync1 := time.Since(t0)
 
 			// Gather the full-height slab on every device (identical to the per-scalar path).
+			t0 = time.Now()
 			gatherSlabs(pd, func(d int) backend.Vector { return st[d].slab }, in, bounds, n, c0, cw)
+			tGather := time.Since(t0)
 
+			t0 = time.Now()
 			syncAll(pd) // fence the gather before any kernel reads a slab
+			tSync2 := time.Since(t0)
+
+			// Run the devices CONCURRENTLY, as gatherSlabs and syncAll above already do. Every
+			// call into a sub-backend blocks on a round-trip through that device's owning
+			// goroutine, so a serial loop here idles seven GPUs while one works: job 14211868
+			// measured the summed per-device GEMM time equal to this chunk's wall time, i.e. no
+			// overlap at all.
+			//
+			// Safe because the per-device state is disjoint by construction — each devState owns
+			// its backend, kernels, device buffers, slab, and (since the plan is shared read-only)
+			// its own issue scratch via jiiBatchPlan.clone. Output bands are disjoint too:
+			// PartitionBounds is group-aligned, so a block's output lies wholly inside one
+			// partition. Concurrency changes WHEN a row is summed, never in what order, so this is
+			// bit-exact.
+			fills := make([]time.Duration, nd)
+			gemms := make([]time.Duration, nd)
+			nfills := make([]int, nd)
+			stats := make([]satStats, nd)
+			var wg sync.WaitGroup
 
 			for d := range nd {
 				ds := st[d]
@@ -315,8 +375,37 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 					V:    pd.PartVector(out.V, d).Slice(c0*rd, cw*rd),
 					Rows: rd, Cols: cw, Ld: rd,
 				}
-				ds.plan.fillAndRun(ds.dk, ds.bufs.args, ds.be, inView, outLocal, ds.members, bounds[d])
+				wg.Go(func() {
+					fills[d], gemms[d], nfills[d], stats[d] = ds.plan.fillAndRun(
+						ds.dk, ds.bufs.args, ds.be, inView, outLocal, ds.members, bounds[d])
+				})
 			}
+			wg.Wait()
+
+			var tFill, tGemm time.Duration
+			var nFill int
+			var agg satStats
+			for d := range nd {
+				tFill += fills[d]
+				tGemm += gemms[d]
+				nFill += nfills[d]
+				agg.calls += stats[d].calls
+				agg.members += stats[d].members
+			}
+			perCall := 0.0
+			if agg.calls > 0 {
+				perCall = float64(agg.members) / float64(agg.calls)
+			}
+			// gemm/fill/fillchunks/calls are SUMMED over the devices, which now run concurrently:
+			// a summed time well above `wall` is the proof that they overlap (before the parallel
+			// loop landed, summed gemm equalled wall exactly). members/call is the batching health
+			// check — ~1 means chunking has shredded the plan's batches.
+			satTracef("batched colchunk %d/%d cw=%d wall=%s | sync1=%s gather=%s sync2=%s fill=%s gemm=%s "+
+				"| gemmcalls=%d members=%d members/call=%.1f (fillchunks=%d, summed over %d devices)",
+				c0/w+1, nchunkCols, cw, time.Since(tChunk).Round(time.Millisecond),
+				tSync1.Round(time.Millisecond), tGather.Round(time.Millisecond), tSync2.Round(time.Millisecond),
+				tFill.Round(time.Millisecond), tGemm.Round(time.Millisecond),
+				agg.calls, agg.members, perCall, nFill, nd)
 		}
 		syncAll(pd) // fence outputs before the caller reads them
 	}

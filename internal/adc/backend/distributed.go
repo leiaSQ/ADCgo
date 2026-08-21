@@ -37,6 +37,11 @@ type distBackend struct {
 	n     int
 	main  int
 	bound []int
+	// stage holds one reusable host buffer per device for DownloadInto, allocated in
+	// NewDistributed so no caller ever writes the outer slice. Entry d is owned by whoever is
+	// downloading device d's band: concurrent DownloadInto calls for DIFFERENT devices are safe,
+	// two calls for the same device are not.
+	stage [][]float64
 }
 
 // NewDistributed builds a row-partitioned backend over subs (one per device), splitting n
@@ -60,7 +65,11 @@ func NewDistributed(subs []Backend, n, main int, bounds []int) (Backend, error) 
 		return nil, fmt.Errorf("distributed backend: shape invariant n>2·main² violated (n=%d, main=%d)", n, main)
 	}
 	enablePeers(subs)
-	return &distBackend{subs: subs, n: n, main: main, bound: append([]int(nil), bounds...)}, nil
+	return &distBackend{
+		subs: subs, n: n, main: main,
+		bound: append([]int(nil), bounds...),
+		stage: make([][]float64, len(subs)),
+	}, nil
 }
 
 // enablePeers grants every peer-capable sub-backend NVLink read access to all the others,
@@ -240,6 +249,53 @@ func (b *distBackend) Download(v Vector) Vec {
 		}
 	}
 	return out
+}
+
+// DownloadInto satisfies BufferedDownloader for the row-partitioned backend: the same global
+// column-major panel Download materializes, but scattered into a caller-owned buffer.
+//
+// It MUST exist, and not merely as an optimization. distBackend embeds Gonum, so without this
+// override the embedded Gonum.DownloadInto satisfies the interface — and then does v.(hostVec) on
+// a distVec and panics. That is exactly how the production DIP probe (job 14158038) lost 40 h of work
+// at its first checkpoint: the `be.(BufferedDownloader)` assertion in saveLowMem succeeded through
+// the embedding, so the intended "fall back to the allocating Download path" never happened.
+//
+// Reusing the per-device staging buffers is the original motivation: be.Download returns a fresh
+// slice per call, and a per-block checkpoint of the production system's panel is 274 GB, so the allocating path
+// churns large spans in exactly the pattern that OOM-killed the SIP runs at 733 GB.
+func (b *distBackend) DownloadInto(dst Vec, v Vector) {
+	dv := v.(distVec)
+	if dv.repl {
+		if bd, ok := b.subs[0].(BufferedDownloader); ok {
+			bd.DownloadInto(dst, dv.part[0])
+			return
+		}
+		copy(dst, b.subs[0].Download(dv.part[0]))
+		return
+	}
+	cols := dv.gcols
+	if need := b.n * cols; len(dst) < need {
+		panic(fmt.Sprintf("backend: DownloadInto dst too small (%d < %d)", len(dst), need))
+	}
+	for d := range b.ndev() {
+		if dv.part[d] == nil {
+			continue
+		}
+		rd := b.rowsOn(d)
+		var sub []float64
+		if bd, ok := b.subs[d].(BufferedDownloader); ok {
+			if len(b.stage[d]) < rd*cols {
+				b.stage[d] = make([]float64, rd*cols)
+			}
+			sub = b.stage[d][:rd*cols]
+			bd.DownloadInto(sub, dv.part[d])
+		} else {
+			sub = b.subs[d].Download(dv.part[d])
+		}
+		for c := range cols {
+			copy(dst[c*b.n+b.bound[d]:c*b.n+b.bound[d]+rd], sub[c*rd:(c+1)*rd])
+		}
+	}
 }
 
 func (b *distBackend) Zero(v Vector) {

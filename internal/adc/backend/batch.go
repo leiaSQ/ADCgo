@@ -16,6 +16,8 @@ package backend
 // write to the same offset — batches are formed per shape, taking at most one block per
 // distinct write offset. For formic acid this collapses 55,097 calls into 1,002.
 
+import "slices"
+
 // Block is one resident operator block placed with its top-left corner at
 // (RowOff, ColOff). A Diag block lies on the block diagonal and is applied once; an
 // off-diagonal block is applied twice (once as A, once as Aᵀ) to realize the symmetric
@@ -29,6 +31,10 @@ type Block struct {
 // Batch is a set of same-shaped blocks that may be applied in one batched GEMM.
 // Trans selects Aᵀ (the transposed half of the symmetric operator). Every block in the
 // batch writes to a distinct output offset, so their accumulations cannot race.
+//
+// Blocks is sorted ascending. Callers that materialize the operator in contiguous block
+// ranges (the device fill path) rely on that to select a batch's members for a range by
+// binary search instead of scanning; see PlanBatches for why the order is free to choose.
 type Batch struct {
 	Trans  bool
 	Blocks []int // indices into the Block slice PlanBatches was given
@@ -95,6 +101,20 @@ func PlanBatches(blocks []Block) []Batch {
 					members = append(members, idxs[j])
 				}
 			}
+			// Members are collected in ascending WRITE-OFFSET order, which for the transposed
+			// half is unrelated to block index. Sort them ascending by block index instead, so
+			// callers that issue a batch restricted to a contiguous block range can find their
+			// members by binary search rather than scanning every member of every batch. That
+			// scan is O(ranges × members) and was the dominant cost of the production DIP apply
+			// (job 14211868).
+			//
+			// Reordering is arithmetically free, which is the whole reason it is allowed here:
+			// every block in a batch writes to a DISTINCT output offset (the invariant this
+			// function exists to establish, asserted by TestJIIBatchPlanMatchesGateWalk), and
+			// same-bucket blocks share a shape, so their output ranges are disjoint. Each member
+			// computes C_i += A_i·B_i into storage no other member touches, so the order they
+			// appear in the batch cannot change a single bit.
+			slices.Sort(members)
 			out = append(out, Batch{Trans: k.trans, Blocks: members})
 		}
 	}

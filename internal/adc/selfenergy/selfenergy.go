@@ -78,6 +78,24 @@ type Sigma struct {
 // At returns Σ_ij.
 func (s *Sigma) At(i, j int) float64 { return s.d[i*s.n+j] }
 
+// N reports the orbital-space dimension Σ was built for.
+func (s *Sigma) N() int { return s.n }
+
+// Data exposes Σ's row-major n×n storage so a caller can persist it. The slice aliases the
+// Sigma; callers must not mutate it. Σ(∞) costs days to build (78 h for the production system) and is only
+// n² floats — 351 KB at norb=212 — so caching it across processes is overwhelmingly worthwhile,
+// which is what this and FromMatrix exist for.
+func (s *Sigma) Data() []float64 { return s.d }
+
+// FromMatrix rebuilds a Sigma from a previously persisted row-major n×n payload. It takes
+// ownership of d.
+func FromMatrix(n int, d []float64) (*Sigma, error) {
+	if n < 0 || len(d) != n*n {
+		return nil, fmt.Errorf("selfenergy: Σ payload is %d elements, want n²=%d for n=%d", len(d), n*n, n)
+	}
+	return &Sigma{n: n, d: d}, nil
+}
+
 func (s *Sigma) set(i, j int, v float64) { s.d[i*s.n+j] = v }
 
 // Func adapts Σ to the sip.Matrix.SetStaticSelfEnergy signature. Out-of-range indices give 0

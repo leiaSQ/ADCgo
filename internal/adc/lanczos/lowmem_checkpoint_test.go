@@ -314,3 +314,48 @@ func TestLowMemCheckpointRejectsModeA(t *testing.T) {
 		MaxBlocks: 4, LowMemBlock: main - 1, Checkpoint: &Checkpoint{Path: p},
 	})
 }
+
+// TestLowMemCheckpointDistributedPanel exercises save/restore over the ROW-PARTITIONED backend,
+// which is what -mgpu actually runs and what every other test in this file misses: they all pass
+// backend.Gonum{} directly, so they only ever build a hostVec.
+//
+// That gap is not hypothetical. The production DIP probe (job 14158038) completed a 40 h block and
+// then panicked in its first checkpoint with "interface conversion: backend.Vector is
+// backend.distVec, not backend.hostVec" — distBackend embeds Gonum, so saveLowMem's
+// be.(BufferedDownloader) assertion succeeded through the embedded method and handed a distVec to
+// code that only handles host vectors. 40 h of compute lost to a path no test covered.
+func TestLowMemCheckpointDistributedPanel(t *testing.T) {
+	const n, b, main = 12, 2, 2 // n > 2·main²
+	subs := []backend.Backend{backend.Gonum{}, backend.Gonum{}, backend.Gonum{}}
+	be, err := backend.NewDistributed(subs, n, main, []int{0, 3, 7, n}) // uneven bands on purpose
+	if err != nil {
+		t.Fatalf("NewDistributed: %v", err)
+	}
+
+	s := sampleLowMemState(n, b)
+	s.Main, s.Maxdim, s.MaxBlocks = main, 8*b, 8
+
+	src := be.Upload(s.Panel)
+	defer be.Free(src)
+	pc := backend.BlockView{V: src, Rows: n, Cols: 2 * b, Ld: n}
+
+	p := filepath.Join(t.TempDir(), "dist.ckpt")
+	if err := saveLowMem(be, p, pc, s.Blocks, n, main, b, s.Maxdim, s.MaxBlocks,
+		true, s.DeflTol, s.Dim, s.RPrev, s.RCur, s.Iter, s.Timing); err != nil {
+		t.Fatalf("saveLowMem over distBackend: %v", err)
+	}
+
+	dst := be.Alloc(n * 2 * b)
+	defer be.Free(dst)
+	dstView := backend.BlockView{V: dst, Rows: n, Cols: 2 * b, Ld: n}
+	st := loadLowMem(be, p, dstView, n, main, b, s.Maxdim, s.MaxBlocks, true, s.DeflTol)
+	if st == nil {
+		t.Fatal("loadLowMem rejected a checkpoint it had just written")
+	}
+	if st.Iter != s.Iter || st.Dim != s.Dim || st.RPrev != s.RPrev || st.RCur != s.RCur {
+		t.Errorf("scalars differ: got iter=%d dim=%d rPrev=%d rCur=%d", st.Iter, st.Dim, st.RPrev, st.RCur)
+	}
+	if got := be.Download(dst); !reflect.DeepEqual(got, s.Panel) {
+		t.Errorf("restored distributed panel differs from the saved one")
+	}
+}
