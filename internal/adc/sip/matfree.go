@@ -106,6 +106,27 @@ func (mx *Matrix) newWert2MatFree() matFreePart {
 		byHole[rows[r].Occ[1]] = append(byHole[rows[r].Occ[1]], int32(r))
 	}
 
+	// W and the per-worker accumulators are latched HERE, not derived per apply.
+	//
+	// Determinism. The forward leg is the one real reduction in this tree: each worker
+	// accumulates a private full-width 2h1p partial and they are summed afterwards, so W fixes
+	// how the columns are grouped, and floating-point addition is not associative. Go 1.25+
+	// re-reads GOMAXPROCS from the cgroup CPU limit while the process runs, so deriving W per
+	// apply let the operator silently change its rounding mid-solve — Lanczos would carry on a
+	// short recurrence whose alpha/beta came from a numerically different M, and the
+	// orthogonality bound that suppresses ghost and duplicated roots no longer holds.
+	//
+	// Churn. partials is W*n2*b float64 — GB-scale at CVS ADC(4) widths, since it is GOMAXPROCS
+	// copies of the whole 2h1p output panel — and allocating it per mat-vec made every Lanczos
+	// iteration hand that back to the allocator. It is sized once and re-zeroed instead.
+	//
+	// Still open: a W latched here is stable within a process but not across machines, so a
+	// -checkpoint continuation on a node with a different core count resumes with a different
+	// grouping. Closing that needs a W independent of the hardware, which costs either a cap on
+	// parallelism or a second wert2elem4 pass. Not decided here.
+	W := parallel.ChunkWorkers(len(cols))
+	var partials []float64 // per-worker forward (2h1p) accumulators, reused across applies
+
 	apply := func(in, out backend.BlockView) {
 		xin := hd.HostSlice(in.V)
 		yout := hd.HostSlice(out.V)
@@ -116,8 +137,15 @@ func (mx *Matrix) newWert2MatFree() matFreePart {
 			return
 		}
 
-		W := parallel.ChunkWorkers(n3)
-		partials := make([]float64, W*n2*b) // per-worker forward (2h1p) accumulators
+		// b is the Krylov block width and may shrink on the last block, so size to the request
+		// and keep the larger buffer. ApplyBlock drives one Matrix serially (it reuses op.sa/sb/sc
+		// scratch), so this buffer needs no locking.
+		if need := W * n2 * b; cap(partials) < need {
+			partials = make([]float64, need)
+		} else {
+			partials = partials[:need]
+			clear(partials)
+		}
 
 		parallel.Chunks(n3, W, func(w, c0, c1 int) {
 			y2 := partials[w*n2*b : (w+1)*n2*b]

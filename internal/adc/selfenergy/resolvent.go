@@ -1,5 +1,7 @@
 package selfenergy
 
+import "github.com/leiaSQ/ADCgo/internal/adc/parallel"
+
 // resolvent.go — the all-order density behind Σ(∞). Ported from
 // ../ADC/self_energy/constanti/constanti/inversion.f (INVERT / INVPRD / INVQKL).
 //
@@ -60,46 +62,68 @@ func (e *engine) solveResolvent(sp *satSpace, m *satMatrix, u []float64, opts Op
 	y := make([][]float64, nc)
 	akrit, maxIt := opts.akrit(), opts.maxIt()
 
-	for np := lo; np < hi; np++ {
-		epsP := e.eps[orbs[np]]
-
-		// rhs = U(·,p); x⁰ = rhs.
-		rhs := make([]float64, n)
-		for i := range n {
-			rhs[i] = u[i*nc+np]
-		}
-		x := append([]float64(nil), rhs...)
-		acc := make([]float64, n)
-
-		// Jacobi/Neumann: x ← U + Σ_{J≠I} (K+C)_IJ · x_J /(ε_p − (K+C)_JJ).
-		// The diagonal never enters the mat-vec; each stored triplet feeds both of its rows,
-		// which is how the reference realises the symmetric off-diagonal from one triangle.
-		for range maxIt {
-			clear(acc)
-			for _, t := range m.off {
-				acc[t.i] += t.v * x[t.j] / (epsP - m.diag[t.j])
-				acc[t.j] += t.v * x[t.i] / (epsP - m.diag[t.i])
-			}
-			var delta float64
-			for i := range n {
-				acc[i] += rhs[i]
-				d := x[i] - acc[i]
-				delta += d * d
-			}
-			copy(x, acc)
-			if delta < akrit {
-				break
-			}
-		}
-
-		// y = x/(ε_p − (K+C)_II), applied once at the end (inversion.f:83-86).
-		yi := make([]float64, n)
-		for i := range n {
-			yi[i] = x[i] / (epsP - m.diag[i])
-		}
-		y[np] = yi
-	}
+	// One independent Jacobi solve per orbital: each owns its slot in y and shares only
+	// read-only state (m.off, m.diag, u, eps). This is the dominant Σ(∞) cost — every orbital
+	// makes up to maxIt sweeps over the WHOLE triplet list, so the work is (hi-lo)·maxIt·len(off)
+	// — and it ran on one core while the rest of the node idled.
+	//
+	// HeavyRows, not Rows: the item count is an irrep's orbital count (tens) while one item is
+	// millions of flops, so Rows' "below 2·GOMAXPROCS, run serially" fallback would have left a
+	// 128-core node running 40 orbitals on one core. Work-stealing rather than a static split
+	// because the iteration breaks early once an orbital converges, so the cost per orbital is
+	// uneven and unknown in advance.
+	//
+	// Bit-identical: no arithmetic is shared or reordered between orbitals, and each writes a
+	// fixed slot, so the result does not depend on the schedule.
+	parallel.HeavyRows(hi-lo, func(k int) {
+		e.resolventColumn(sp, m, u, lo+k, nc, n, akrit, maxIt, orbs, y)
+	})
 	return y
+}
+
+// resolventColumn runs INVERT/INVPRD for one solved-for orbital np, writing y[np]. Split out of
+// solveResolvent so the per-orbital scratch (rhs, x, acc) is unmistakably per-call: shared
+// scratch here would be a race, and a silent one — the Jacobi iteration would still converge,
+// just to the wrong vector.
+func (e *engine) resolventColumn(sp *satSpace, m *satMatrix, u []float64, np, nc, n int,
+	akrit float64, maxIt int, orbs []int, y [][]float64) {
+	epsP := e.eps[orbs[np]]
+
+	// rhs = U(·,p); x⁰ = rhs.
+	rhs := make([]float64, n)
+	for i := range n {
+		rhs[i] = u[i*nc+np]
+	}
+	x := append([]float64(nil), rhs...)
+	acc := make([]float64, n)
+
+	// Jacobi/Neumann: x ← U + Σ_{J≠I} (K+C)_IJ · x_J /(ε_p − (K+C)_JJ).
+	// The diagonal never enters the mat-vec; each stored triplet feeds both of its rows,
+	// which is how the reference realises the symmetric off-diagonal from one triangle.
+	for range maxIt {
+		clear(acc)
+		for _, t := range m.off {
+			acc[t.i] += t.v * x[t.j] / (epsP - m.diag[t.j])
+			acc[t.j] += t.v * x[t.i] / (epsP - m.diag[t.i])
+		}
+		var delta float64
+		for i := range n {
+			acc[i] += rhs[i]
+			d := x[i] - acc[i]
+			delta += d * d
+		}
+		copy(x, acc)
+		if delta < akrit {
+			break
+		}
+	}
+
+	// y = x/(ε_p − (K+C)_II), applied once at the end (inversion.f:83-86).
+	yi := make([]float64, n)
+	for i := range n {
+		yi[i] = x[i] / (epsP - m.diag[i])
+	}
+	y[np] = yi
 }
 
 // blockData is one solved satellite block: its couplings and its resolvent amplitudes.

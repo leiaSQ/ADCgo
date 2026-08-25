@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
 	"unsafe"
@@ -88,21 +89,67 @@ func checkSatChunkFits(w, n int) {
 	}
 }
 
+// goDevices runs body(d) for every partition concurrently and blocks until all have stopped.
+//
+// It exists for the panics. Every call into a sub-backend blocks on a round-trip through that
+// device's owning goroutine, and gpuBackend.do re-raises a device fault (a failed cudaMalloc in
+// a fill, a nonzero cudaGetLastError from a launch) as a panic on whichever goroutine called it.
+// Raised on a bare wg.Go goroutine that panic has no path back to solveDIPSectorMGPU — it aborts
+// the process, so a fault 30 h into a production mat-vec dies with a goroutine dump and, unless the
+// block happened to have reached cp.Every, no checkpoint. The serial applier's equivalent fault
+// unwound through apply -> ApplyBlock -> SolveLowMem, where the errInterrupted / checkpoint
+// handling lives. Recovering per device and re-raising on the CALLER's goroutine restores that.
+//
+// Every device is allowed to stop before anything is re-raised: a sibling still writing to a
+// slab that a unwinding goroutine is about to free would be a use-after-free. The lowest device
+// index wins so a reproducible fault reports reproducibly; the others are logged, not lost.
+func goDevices(nd int, body func(d int)) {
+	panics := make([]any, nd)
+	stacks := make([][]byte, nd)
+	var wg sync.WaitGroup
+	for d := range nd {
+		wg.Go(func() {
+			defer func() {
+				if r := recover(); r != nil {
+					panics[d], stacks[d] = r, debug.Stack()
+				}
+			}()
+			body(d)
+		})
+	}
+	wg.Wait()
+
+	first := -1
+	for d := range nd {
+		if panics[d] == nil {
+			continue
+		}
+		if first < 0 {
+			first = d
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "dip: partition %d also failed: %v\n%s\n", d, panics[d], stacks[d])
+	}
+	if first >= 0 {
+		// Re-raise the original value, not a wrapper: any type-based handling upstream still
+		// sees what the device backend raised. The partition and its worker stack — which the
+		// re-panic's own stack no longer shows — go to stderr first.
+		fmt.Fprintf(os.Stderr, "dip: partition %d failed:\n%s\n", first, stacks[first])
+		panic(panics[first])
+	}
+}
+
 // syncAll drains every partition's device stream concurrently. A peer read does not synchronize
 // the source stream, so the gather must be fenced on both sides: after the producers have written
 // the input, and after the kernels have written their output bands. The syncs are issued in
 // parallel because each is a blocking round-trip through that device's owning goroutine —
 // serialized over 8 devices, twice per apply, that is pure added latency.
 func syncAll(pd backend.PartitionedDevices) {
-	var wg sync.WaitGroup
-	for d := range pd.NumParts() {
-		pc, ok := pd.PartBackend(d).(backend.PeerCopier)
-		if !ok {
-			continue
+	goDevices(pd.NumParts(), func(d int) {
+		if pc, ok := pd.PartBackend(d).(backend.PeerCopier); ok {
+			pc.Sync()
 		}
-		wg.Go(pc.Sync)
-	}
-	wg.Wait()
+	})
 }
 
 // gatherSlabs stages, on every partition, the full-height n×cw input slab for panel columns
@@ -116,36 +163,48 @@ func syncAll(pd backend.PartitionedDevices) {
 // (~1,664 per mat-vec at nd=8 over the production system's 26 chunks) on a fabric built to overlap them. The
 // inner src loop stays serial: those copies DO all funnel through the one destination thread.
 //
+// active[d] false marks a partition that consumes no slab — one whose satellite row band is
+// empty, or which owns no block in any batch. Staging for it is pure waste: nd-1 peer transfers
+// of the full n x cw slab per column chunk (~7.6 GB per chunk at the production system's n and w=64, over 27
+// chunks per mat-vec) into a buffer nothing ever reads. The kernel loops already skip these
+// partitions; the gather has to be told. nil means every partition is active.
+//
 // Copies only — no arithmetic is reordered, so the gathered slab is bit-identical to the serial
 // version regardless of completion order.
 func gatherSlabs(pd backend.PartitionedDevices, slabOf func(int) backend.Vector,
-	in backend.BlockView, bounds []int, n, c0, cw int) {
+	in backend.BlockView, bounds []int, n, c0, cw int, active []bool) {
 	nd := pd.NumParts()
-	var wg sync.WaitGroup
+	// Assert on this goroutine, not inside a worker: this applier is only selected when every
+	// partition is a peered PeerCopier, so a failure here is a selection bug and should not
+	// surface as a panic from a device goroutine.
+	dsts := make([]backend.PeerCopier, nd)
+	slabs := make([]backend.Vector, nd)
 	for d := range nd {
-		// Assert on this goroutine, not inside the worker: this applier is only selected when
-		// every partition is a peered PeerCopier, so a failure here is a selection bug and
-		// should not surface as a panic on an anonymous goroutine.
-		dst := pd.PartBackend(d).(backend.PeerCopier)
-		slab := slabOf(d)
-		wg.Go(func() {
-			for src := range nd {
-				rows := bounds[src+1] - bounds[src]
-				if rows == 0 {
-					continue
-				}
-				// Panel vectors are resolved fresh per call — the Mode-B ring buffer moves the
-				// input's column offset between iterations, so a cached pointer would read the
-				// wrong half of the ring.
-				dst.PeerCopy2D(
-					slab.Slice(bounds[src], n*cw-bounds[src]),
-					pd.PartVector(in.V, src).Slice(c0*rows, cw*rows),
-					pd.PartBackend(src),
-					rows, cw, n, rows)
-			}
-		})
+		if active != nil && !active[d] {
+			continue
+		}
+		dsts[d] = pd.PartBackend(d).(backend.PeerCopier)
+		slabs[d] = slabOf(d)
 	}
-	wg.Wait()
+	goDevices(nd, func(d int) {
+		if dsts[d] == nil {
+			return // stages nothing
+		}
+		for src := range nd {
+			rows := bounds[src+1] - bounds[src]
+			if rows == 0 {
+				continue
+			}
+			// Panel vectors are resolved fresh per call — the Mode-B ring buffer moves the
+			// input's column offset between iterations, so a cached pointer would read the
+			// wrong half of the ring.
+			dsts[d].PeerCopy2D(
+				slabs[d].Slice(bounds[src], n*cw-bounds[src]),
+				pd.PartVector(in.V, src).Slice(c0*rows, cw*rows),
+				pd.PartBackend(src),
+				rows, cw, n, rows)
+		}
+	})
 }
 
 // satRowBands derives each partition's 3h1p row band from the SAME bounds the panels were
@@ -185,10 +244,21 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 	w := SatChunkCols
 	checkSatChunkFits(w, n) // this applier is the one that launches dip_sat_apply
 
+	// A partition lying wholly inside the main block owns no satellite row (satRowBands returns
+	// an empty band) and never launches. It needs neither the uploaded SoA nor a slab: both are
+	// device memory written every chunk and read never.
+	active := make([]bool, nd)
+	for d := range nd {
+		active[d] = rowHi[d] > rowLo[d]
+	}
+
 	// Per-device: the uploaded plan, and the staging slab for one column chunk.
 	bufs := make([]*satDeviceBufs, nd)
 	slab := make([]backend.Vector, nd)
 	for d := range nd {
+		if !active[d] {
+			continue
+		}
 		dk, ok := pd.PartKernels(d)
 		if !ok {
 			panic("dip: per-device satellite apply selected without device kernels on every partition")
@@ -206,17 +276,16 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 			syncAll(pd)
 
 			// Gather: every device assembles the full-height slab for columns [c0, c0+cw).
-			gatherSlabs(pd, func(d int) backend.Vector { return slab[d] }, in, bounds, n, c0, cw)
+			gatherSlabs(pd, func(d int) backend.Vector { return slab[d] }, in, bounds, n, c0, cw, active)
 
 			// Fence the gather before any kernel reads a slab.
 			syncAll(pd)
 
 			// Concurrent for the same reason, and with the same disjointness argument, as the
 			// batched applier: one blocking round-trip per device otherwise leaves the rest idle.
-			var wg sync.WaitGroup
-			for d := range nd {
-				if rowHi[d] <= rowLo[d] {
-					continue // partition owns no satellite rows
+			goDevices(nd, func(d int) {
+				if !active[d] {
+					return // partition owns no satellite rows
 				}
 				rd := bounds[d+1] - bounds[d]
 				inView := backend.BlockView{V: slab[d], Rows: n, Cols: cw, Ld: n}
@@ -225,10 +294,8 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 					Rows: rd, Cols: cw, Ld: rd,
 				}
 				args := bufs[d].args(s, inView, outView, rowLo[d], rowHi[d], bounds[d])
-				dk := bufs[d].dk
-				wg.Go(func() { dk.DipSatApply(args) })
-			}
-			wg.Wait()
+				bufs[d].dk.DipSatApply(args)
+			})
 		}
 		// Fence the outputs before the caller consumes them.
 		syncAll(pd)
@@ -236,6 +303,9 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 
 	release := func() {
 		for d := range nd {
+			if !active[d] {
+				continue // nothing was allocated for it
+			}
 			bufs[d].free()
 			pd.PartBackend(d).Free(slab[d])
 		}
@@ -294,7 +364,34 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 	// shares the planning data and owns its own issue scratch (jiiBatchPlan.clone).
 	basePlan := mx.buildJIIBatchPlan()
 
+	// Split the batches by owner up front. The plan is apply-invariant, so the ownership split
+	// is too — and settling it before the device loop is what lets a partition that owns no
+	// block in any batch be skipped entirely: no plan clone, no ERI/eps/osym upload, no slab,
+	// and no share of the gather. Such a partition never issued a GEMM in the first place.
+	active := make([]bool, nd)
+	memberOf := make([][][]int, nd)
 	for d := range nd {
+		members := make([][]int, len(basePlan.batches))
+		for bi, bt := range basePlan.batches {
+			for _, si := range bt.Blocks {
+				sl := basePlan.slots[si]
+				off := sl.rowOff
+				if bt.Trans {
+					off = sl.colOff
+				}
+				if ownerOf(bounds, off) == d {
+					members[bi] = append(members[bi], si)
+					active[d] = true
+				}
+			}
+		}
+		memberOf[d] = members
+	}
+
+	for d := range nd {
+		if !active[d] {
+			continue
+		}
 		dk, ok := pd.PartKernels(d)
 		if !ok {
 			panic("dip: batched per-device satellite selected without device kernels")
@@ -304,21 +401,7 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 		eri, eps, osym := dk.DeviceERI(s.eri), dk.UploadFloats(s.eps), dk.UploadInts(s.osym)
 		bufs.args.ERI, bufs.args.Eps, bufs.args.OrbSym = eri, eps, osym
 
-		// Precompute this device's share of every batch — the plan is apply-invariant, so the
-		// ownership split is too.
-		members := make([][]int, len(plan.batches))
-		for bi, bt := range plan.batches {
-			for _, si := range bt.Blocks {
-				sl := plan.slots[si]
-				off := sl.rowOff
-				if bt.Trans {
-					off = sl.colOff
-				}
-				if ownerOf(bounds, off) == d {
-					members[bi] = append(members[bi], si)
-				}
-			}
-		}
+		members := memberOf[d]
 		st[d] = &devState{
 			be: pd.PartBackend(d), dk: dk, bufs: bufs, plan: plan, members: members,
 			slab: pd.PartBackend(d).Alloc(n * w),
@@ -338,7 +421,7 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 
 			// Gather the full-height slab on every device (identical to the per-scalar path).
 			t0 = time.Now()
-			gatherSlabs(pd, func(d int) backend.Vector { return st[d].slab }, in, bounds, n, c0, cw)
+			gatherSlabs(pd, func(d int) backend.Vector { return st[d].slab }, in, bounds, n, c0, cw, active)
 			tGather := time.Since(t0)
 
 			t0 = time.Now()
@@ -361,10 +444,11 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 			gemms := make([]time.Duration, nd)
 			nfills := make([]int, nd)
 			stats := make([]satStats, nd)
-			var wg sync.WaitGroup
-
-			for d := range nd {
+			goDevices(nd, func(d int) {
 				ds := st[d]
+				if ds == nil {
+					return // owns no block in any batch
+				}
 				rd := bounds[d+1] - bounds[d]
 				// Input: the full-height local slab. Output: this device's partition, rebased so
 				// a block's global row offset addresses local storage. The satellite blocks total
@@ -375,12 +459,9 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 					V:    pd.PartVector(out.V, d).Slice(c0*rd, cw*rd),
 					Rows: rd, Cols: cw, Ld: rd,
 				}
-				wg.Go(func() {
-					fills[d], gemms[d], nfills[d], stats[d] = ds.plan.fillAndRun(
-						ds.dk, ds.bufs.args, ds.be, inView, outLocal, ds.members, bounds[d])
-				})
-			}
-			wg.Wait()
+				fills[d], gemms[d], nfills[d], stats[d] = ds.plan.fillAndRun(
+					ds.dk, ds.bufs.args, ds.be, inView, outLocal, ds.members, bounds[d])
+			})
 
 			var tFill, tGemm time.Duration
 			var nFill int
@@ -412,6 +493,9 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 
 	release := func() {
 		for d := range nd {
+			if st[d] == nil {
+				continue // skipped at construction: owns no block in any batch
+			}
 			st[d].bufs.free()
 			st[d].dk.FreeDev(st[d].eri)
 			st[d].dk.FreeDev(st[d].eps)

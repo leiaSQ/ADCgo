@@ -52,6 +52,19 @@ func DeviceCount(name string) int {
 	return 0
 }
 
+// MultiDevice reports whether the named backend binds physical devices — a GPU backend
+// registered through RegisterMulti — as opposed to a host backend that may be instantiated
+// any number of times. Callers that would otherwise clone a backend to reach a requested
+// partition count need the distinction: cloning a host backend is free and correct, while
+// cloning a device backend hands back the same physical device again (New binds device 0).
+func MultiDevice(name string) bool {
+	if name == "" {
+		name = "gonum"
+	}
+	_, ok := multiCtors[name]
+	return ok
+}
+
 // NewAll returns one backend instance per visible device for a multi-device backend,
 // or a single instance for a host backend. maxDevices > 0 caps the count (0 = all
 // visible); it never returns more than DeviceCount(name). The caller owns every

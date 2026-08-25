@@ -38,9 +38,12 @@ type distBackend struct {
 	main  int
 	bound []int
 	// stage holds one reusable host buffer per device for DownloadInto, allocated in
-	// NewDistributed so no caller ever writes the outer slice. Entry d is owned by whoever is
-	// downloading device d's band: concurrent DownloadInto calls for DIFFERENT devices are safe,
-	// two calls for the same device are not.
+	// NewDistributed so no caller ever writes the outer slice. DownloadInto has no device
+	// parameter — one call sweeps EVERY device and may re-make any stage[d] that is too small —
+	// so distinct calls cannot be partitioned by device and are never safe to run concurrently
+	// on one distBackend. (Within a single call the per-device workers each touch only their own
+	// entry, which is what makes that loop concurrent.) The only caller is the single-threaded
+	// checkpoint writer; a second concurrent one would need its own staging, not a finer lock.
 	stage [][]float64
 }
 
@@ -277,25 +280,34 @@ func (b *distBackend) DownloadInto(dst Vec, v Vector) {
 	if need := b.n * cols; len(dst) < need {
 		panic(fmt.Sprintf("backend: DownloadInto dst too small (%d < %d)", len(dst), need))
 	}
+	// One device per goroutine. Each worker touches only its own stage[d] and writes only the
+	// [bound[d], bound[d+1]) row band of every column of dst, and the bands are disjoint by
+	// construction — so the workers share nothing. The download itself is a blocking round-trip
+	// through that device's owning goroutine, so serially this cost ndev sequential transfers of
+	// the whole basis every time the checkpoint writer ran.
+	var wg sync.WaitGroup
 	for d := range b.ndev() {
 		if dv.part[d] == nil {
 			continue
 		}
-		rd := b.rowsOn(d)
-		var sub []float64
-		if bd, ok := b.subs[d].(BufferedDownloader); ok {
-			if len(b.stage[d]) < rd*cols {
-				b.stage[d] = make([]float64, rd*cols)
+		wg.Go(func() {
+			rd := b.rowsOn(d)
+			var sub []float64
+			if bd, ok := b.subs[d].(BufferedDownloader); ok {
+				if len(b.stage[d]) < rd*cols {
+					b.stage[d] = make([]float64, rd*cols)
+				}
+				sub = b.stage[d][:rd*cols]
+				bd.DownloadInto(sub, dv.part[d])
+			} else {
+				sub = b.subs[d].Download(dv.part[d])
 			}
-			sub = b.stage[d][:rd*cols]
-			bd.DownloadInto(sub, dv.part[d])
-		} else {
-			sub = b.subs[d].Download(dv.part[d])
-		}
-		for c := range cols {
-			copy(dst[c*b.n+b.bound[d]:c*b.n+b.bound[d]+rd], sub[c*rd:(c+1)*rd])
-		}
+			for c := range cols {
+				copy(dst[c*b.n+b.bound[d]:c*b.n+b.bound[d]+rd], sub[c*rd:(c+1)*rd])
+			}
+		})
 	}
+	wg.Wait()
 }
 
 func (b *distBackend) Zero(v Vector) {
@@ -371,14 +383,40 @@ func (b *distBackend) Gemm(transA, transB bool, alpha float64, a, bb BlockView, 
 		// Each device computes its partial straight into its own copy of the small output,
 		// honouring c.Ld (the buffer's leading dimension may exceed c.Rows — e.g. the CGS2
 		// projection buffer — so a contiguous write would corrupt the strided layout).
-		for d := range b.ndev() {
-			cLocal := BlockView{V: cdv.part[d], Rows: c.Rows, Cols: c.Cols, Ld: c.Ld}
-			b.subs[d].Gemm(true, transB, alpha, b.panelLocal(a, d), b.panelLocal(bb, d), 0, cLocal)
+		//
+		// Issued concurrently, for the same reason the transfers below are and with a stronger
+		// disjointness argument: device d reads only its own row band (panelLocal) and writes
+		// only its own copy of the small output. This is the EXPENSIVE half of the reduce —
+		// rowsOn(d)×main×main of arithmetic against the main²-sized transfers — so leaving it
+		// serial idled ndev-1 devices through the whole contraction on a path the solver takes
+		// several times per Lanczos iteration (alpha, Gram, every CGS2 projection). That is the
+		// "summed per-device GEMM time equals wall time, i.e. no overlap at all" pathology job
+		// 14211868 measured and dip/matfree_dist.go already fixed for the mat-vec.
+		//
+		// Bit-exact: the per-device partials are independent arithmetic on disjoint operands, so
+		// only their issue order changes. The reduction that consumes them stays serial and in
+		// ascending device order below.
+		nd := b.ndev()
+		views := make([]BlockView, nd)
+		aLocal := make([]BlockView, nd)
+		bLocal := make([]BlockView, nd)
+		for d := range nd {
+			// Resolve on this goroutine: panelLocal panics on a mis-shaped operand, which is a
+			// caller bug and should not surface from an anonymous goroutine.
+			views[d] = BlockView{V: cdv.part[d], Rows: c.Rows, Cols: c.Cols, Ld: c.Ld}
+			aLocal[d], bLocal[d] = b.panelLocal(a, d), b.panelLocal(bb, d)
 		}
+		var wgGemm sync.WaitGroup
+		for d := range nd {
+			wgGemm.Go(func() {
+				b.subs[d].Gemm(true, transB, alpha, aLocal[d], bLocal[d], 0, views[d])
+			})
+		}
+		wgGemm.Wait()
 		// All-reduce: sum the per-device buffers and replicate the total back to every device.
 		// Gaps outside the c.Rows×c.Cols result region are never read by the consumer, so
 		// summing whole buffers is safe.
-		// Both halves of the all-reduce are issued concurrently: every Download/Upload is a
+		// Both halves of the all-reduce are issued concurrently too: every Download/Upload is a
 		// blocking round-trip through that device's owning goroutine, and the devices are
 		// independent, so serially this cost 2·ndev synchronous transfers on a path the solver
 		// takes several times per Lanczos iteration (alpha, Gram, every CGS2 projection) — not
@@ -389,7 +427,6 @@ func (b *distBackend) Gemm(transA, transB bool, alpha float64, a, bb BlockView, 
 		// summing as the partials happened to land would make results depend on transfer timing.
 		// Only the transfers overlap. Download returns a fresh host copy on every backend, so
 		// the partials do not alias device storage.
-		nd := b.ndev()
 		parts := make([][]float64, nd)
 		var wgDown sync.WaitGroup
 		for d := range nd {
@@ -416,9 +453,26 @@ func (b *distBackend) Gemm(transA, transB bool, alpha float64, a, bb BlockView, 
 		wgUp.Wait()
 		return
 	}
-	for d := range b.ndev() {
-		b.subs[d].Gemm(false, transB, alpha, b.panelLocal(a, d), b.smallLocal(bb, d), beta, b.panelLocal(c, d))
+	// The local panel update: device d reads its own row band of a, its own copy of the
+	// replicated small factor, and writes its own row band of c — wholly independent, no
+	// communication. Concurrent for the same reason as the reduce above; each sub-Gemm is a
+	// blocking round-trip through one device's owning goroutine, so a serial loop is ndev
+	// sequential GEMMs where the hardware can run them at once. Operands resolved here rather
+	// than in the workers so a mis-shaped one panics on the caller's goroutine.
+	nd := b.ndev()
+	aLocal := make([]BlockView, nd)
+	bLocal := make([]BlockView, nd)
+	cLocal := make([]BlockView, nd)
+	for d := range nd {
+		aLocal[d], bLocal[d], cLocal[d] = b.panelLocal(a, d), b.smallLocal(bb, d), b.panelLocal(c, d)
 	}
+	var wg sync.WaitGroup
+	for d := range nd {
+		wg.Go(func() {
+			b.subs[d].Gemm(false, transB, alpha, aLocal[d], bLocal[d], beta, cLocal[d])
+		})
+	}
+	wg.Wait()
 }
 
 // AddPanel adds the full n×cols column-major host panel into dst (a row-partitioned panel),

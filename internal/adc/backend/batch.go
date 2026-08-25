@@ -92,7 +92,7 @@ func PlanBatches(blocks []Block) []Batch {
 		for off := range byOff {
 			offs = append(offs, off)
 		}
-		sortInts(offs)
+		slices.Sort(offs)
 
 		for j := range depth {
 			var members []int
@@ -119,18 +119,4 @@ func PlanBatches(blocks []Block) []Batch {
 		}
 	}
 	return out
-}
-
-// sortInts is a small insertion sort; the offset lists are short (hundreds) and this
-// avoids pulling in sort for one call.
-func sortInts(a []int) {
-	for i := 1; i < len(a); i++ {
-		v := a[i]
-		j := i - 1
-		for j >= 0 && a[j] > v {
-			a[j+1] = a[j]
-			j--
-		}
-		a[j+1] = v
-	}
 }

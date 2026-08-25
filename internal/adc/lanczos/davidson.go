@@ -211,34 +211,46 @@ func SolveDavidson(op PreconOperator, be backend.Backend, opts Options) Result {
 		nunc := len(unc)
 		cor := make([]float64, n*nunc) // n×nunc, column-major
 		// Parallel over correction columns: column c writes only cor[c*n:(c+1)*n], so the work
-		// items are disjoint (parallel.Rows' contract). Bit-identical to the serial form — every
+		// items are disjoint (parallel.Chunks' contract). Bit-identical to the serial form — every
 		// element uses the same expression and nrm2 still accumulates in ascending j within a
 		// column; only the order across independent columns changes.
+		//
+		// Chunks, NOT Rows: nunc <= nw = nroots + max(4, nroots/4), i.e. a few dozen at the
+		// -nroots values production runs use (20 by default, 64 at the largest), while
+		// parallel.Rows falls back to a serial walk below 2*GOMAXPROCS rows — 64 to 128 on the
+		// 32/64-core nodes scripts/production_dip*.sbatch request. Under Rows this loop therefore
+		// never once ran in parallel: it did n (10-15M) divides plus a normalization sweep per
+		// column on a single core, every Davidson iteration. Chunks has no such threshold — it
+		// spawns min(GOMAXPROCS, nunc) workers — and its static partition keeps each column
+		// wholly inside one worker, so the per-column ascending-j accumulation above is
+		// untouched.
 		//
 		// Note this runs mid-solve, unlike parallel's assemble-phase framing. That is safe here
 		// because the device is idle at this point: the residual has just been downloaded and the
 		// correction is not uploaded until below, so there is no concurrent BLAS to oversubscribe.
-		parallel.Rows(nunc, func(c int) {
-			k := unc[c]
-			col := cor[c*n : (c+1)*n]
-			var nrm2 float64
-			for j := range n {
-				a1 := theta[k] - dHost[j]
-				if math.Abs(a1) < 1e-3 {
-					col[j] = 1.0 // proximity guard (theADCcode davidson.F:361-374)
-				} else {
-					col[j] = rHost[k*n+j] / a1
-				}
-				nrm2 += col[j] * col[j]
-			}
-			// Normalize the correction to unit length. Its magnitude tracks the (shrinking)
-			// residual, so without this the rank-revealing orthogonalization would deflate a
-			// still-needed direction once ‖t‖ falls below DeflTol — stalling the subspace on
-			// the wrong roots well before ConvThr. The direction is what matters.
-			if nrm2 > 0 {
-				s := 1 / math.Sqrt(nrm2)
+		parallel.Chunks(nunc, parallel.ChunkWorkers(nunc), func(_, c0, c1 int) {
+			for c := c0; c < c1; c++ {
+				k := unc[c]
+				col := cor[c*n : (c+1)*n]
+				var nrm2 float64
 				for j := range n {
-					col[j] *= s
+					a1 := theta[k] - dHost[j]
+					if math.Abs(a1) < 1e-3 {
+						col[j] = 1.0 // proximity guard (theADCcode davidson.F:361-374)
+					} else {
+						col[j] = rHost[k*n+j] / a1
+					}
+					nrm2 += col[j] * col[j]
+				}
+				// Normalize the correction to unit length. Its magnitude tracks the (shrinking)
+				// residual, so without this the rank-revealing orthogonalization would deflate a
+				// still-needed direction once ‖t‖ falls below DeflTol — stalling the subspace on
+				// the wrong roots well before ConvThr. The direction is what matters.
+				if nrm2 > 0 {
+					s := 1 / math.Sqrt(nrm2)
+					for j := range n {
+						col[j] *= s
+					}
 				}
 			}
 		})

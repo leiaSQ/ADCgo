@@ -157,7 +157,7 @@ func (mx *Matrix) satelliteResidentBytes() uint64 {
 	sp := mx.sp
 	njii, nijk := len(sp.JII), len(sp.IJK)
 	sums := make([]uint64, njii+nijk)
-	parallel.Rows(njii+nijk, func(t int) {
+	parallel.HeavyRows(njii+nijk, func(t int) {
 		var e uint64
 		if t < njii {
 			gr := t

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/backend"
@@ -63,12 +64,18 @@ func newChooser(cfgName string, verbose bool, maxGPUs int) (*chooser, error) {
 		// circuits pickLanczos/pickDense — no probe, no calibration). When more than one
 		// device is visible, pool holds them all for concurrent per-sector dispatch.
 		c := &chooser{cands: []candidate{{name: cfgName, be: bes[0]}}, verbose: verbose}
-		if len(bes) > 1 {
+		// Pool every device-bound instance, a lone GPU included. pool doubles as the
+		// authoritative list of bindable devices for -mgpu (mgpuSubs), which must not clone
+		// device 0 to reach the requested partition count; leaving a one-device pool empty is
+		// what made -mgpu N on a single-GPU node bind N partitions to the same card. Concurrent
+		// per-sector dispatch is gated on len(pool) >= 2 at its call sites, so pooling one
+		// device changes nothing there. Host backends stay unpooled: cloning them is correct.
+		if backend.MultiDevice(cfgName) {
 			c.pool = bes
-			if verbose {
-				fmt.Fprintf(os.Stderr, "dispatch %s: %d devices, sectors run concurrently (one per GPU)\n",
-					cfgName, len(bes))
-			}
+		}
+		if verbose && len(bes) > 1 {
+			fmt.Fprintf(os.Stderr, "dispatch %s: %d devices, sectors run concurrently (one per GPU)\n",
+				cfgName, len(bes))
 		}
 		return c, nil
 	}
@@ -288,22 +295,38 @@ func (c *chooser) workerChoosers() []*chooser {
 // device at a time, and blocks until all complete. job runs on a worker's own single-
 // device chooser and must write its result into caller-owned storage indexed by item
 // (workers touch disjoint indices, so no locking is needed there). Output ordering is
-// the caller's responsibility; runConcurrent imposes none. Returns the first error.
+// the caller's responsibility; runConcurrent imposes none.
+//
+// Fail-fast, matching the serial sweep it replaces (`for i := range items { if err :=
+// solve(...); err != nil { return err } }`): the errors that reach here are run-
+// invalidating — checkDeviceFit refusing a sector, a backend failing to allocate — not
+// per-item results worth collecting. Once any item fails no further item is STARTED, so
+// a sector rejected in seconds no longer costs the walltime of every sector behind it.
+// Items already running are left to finish: a solve owns device memory and a checkpoint
+// file, and there is no safe way to interrupt one from here. Returns the failed item of
+// lowest index, so the error is reproducible rather than a race between workers.
 func (c *chooser) runConcurrent(nItems int, job func(w *chooser, item int) error) error {
 	workers := c.workerChoosers()
 	jobs := make(chan int)
 	errs := make([]error, nItems)
+	var failed atomic.Bool
 	var wg sync.WaitGroup
 	for _, w := range workers {
-		wg.Add(1)
-		go func(w *chooser) {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range jobs {
-				errs[i] = job(w, i)
+				if failed.Load() {
+					continue // drain without running: the sweep is already over
+				}
+				if errs[i] = job(w, i); errs[i] != nil {
+					failed.Store(true)
+				}
 			}
-		}(w)
+		})
 	}
 	for i := 0; i < nItems; i++ {
+		if failed.Load() {
+			break
+		}
 		jobs <- i
 	}
 	close(jobs)

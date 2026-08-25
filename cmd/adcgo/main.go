@@ -564,13 +564,28 @@ func solveDIPSectorMGPU(subs []backend.Backend, cfg dipConfig, sp *dip.Space, in
 }
 
 // mgpuSubs returns the sub-backends the multi-GPU path row-partitions a sector across. It
-// reuses the chooser's already-built device pool when present (-backend cuda|hip on a
-// multi-GPU node), capped at cfg.mgpu; otherwise it builds cfg.mgpu independent instances
-// of the chosen backend (e.g. gonum, the host validation / CPU path).
+// reuses the chooser's already-built device pool (-backend cuda|hip), capped at cfg.mgpu;
+// otherwise it builds cfg.mgpu independent instances of the chosen backend (e.g. gonum, the
+// host validation / CPU path, where an instance is a stateless value and cloning is exactly
+// what simulating partitions means).
+//
+// The pool is the authoritative device list, so cfg.mgpu is capped by it rather than taken
+// on trust: cloning a GPU backend does not reach a second card, it binds device 0 again
+// (backend.New -> ctor(0)), which would put every partition's resident operator on one card
+// with none of the parallelism. Cloning is therefore refused outright for a device backend.
 func mgpuSubs(ch *chooser, cfg dipConfig) ([]backend.Backend, error) {
 	if len(ch.pool) >= 1 {
 		g := min(cfg.mgpu, len(ch.pool))
+		if g < cfg.mgpu {
+			fmt.Fprintf(os.Stderr, "mgpu: -mgpu %d requested but %d device(s) visible; "+
+				"partitioning across %d\n", cfg.mgpu, len(ch.pool), g)
+		}
 		return ch.pool[:g], nil
+	}
+	if backend.MultiDevice(cfg.backend) {
+		return nil, fmt.Errorf("-mgpu %d: backend %q binds physical devices but none are pooled; "+
+			"pass -backend %s explicitly (not -backend auto) so every visible device is bound",
+			cfg.mgpu, cfg.backend, cfg.backend)
 	}
 	subs := make([]backend.Backend, cfg.mgpu)
 	for i := range subs {

@@ -1,8 +1,11 @@
 package parallel
 
 import (
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestRowsCoversEachOnce verifies every row runs exactly once (run with -race to
@@ -50,6 +53,46 @@ func TestChunksCoversContiguously(t *testing.T) {
 		for i := range n {
 			if hits[i] != 1 {
 				t.Errorf("n=%d: index %d ran %d times, want 1", n, i, hits[i])
+			}
+		}
+	}
+}
+
+// TestHeavyRowsParallelizesSmallCounts pins the property HeavyRows exists for: a row count below
+// Rows' 2*GOMAXPROCS fallback threshold must still run on more than one goroutine. Rows is
+// checked alongside it to document that it deliberately does NOT.
+func TestHeavyRowsParallelizesSmallCounts(t *testing.T) {
+	if runtime.GOMAXPROCS(0) < 2 {
+		t.Skip("needs more than one core to distinguish the two")
+	}
+	const rows = 3 // far below 2*GOMAXPROCS on any test machine
+
+	var heavyMax int64
+	var heavyLive atomic.Int64
+	var mu sync.Mutex
+	HeavyRows(rows, func(r int) {
+		n := heavyLive.Add(1)
+		mu.Lock()
+		if n > heavyMax {
+			heavyMax = n
+		}
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond) // hold the slot so overlap is observable
+		heavyLive.Add(-1)
+	})
+	if heavyMax < 2 {
+		t.Errorf("HeavyRows ran %d rows with max concurrency %d, want >= 2", rows, heavyMax)
+	}
+}
+
+// TestHeavyRowsCoversEveryRow guards the work-stealing loop: every row runs exactly once.
+func TestHeavyRowsCoversEveryRow(t *testing.T) {
+	for _, rows := range []int{0, 1, 2, 7, 1000} {
+		counts := make([]int32, rows)
+		HeavyRows(rows, func(r int) { atomic.AddInt32(&counts[r], 1) })
+		for r, c := range counts {
+			if c != 1 {
+				t.Fatalf("rows=%d: row %d ran %d times, want 1", rows, r, c)
 			}
 		}
 	}

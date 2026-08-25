@@ -4,6 +4,8 @@
 // reference code disagree, the code (singlet.cpp/triplet.cpp) is authoritative.
 package dip
 
+import "slices"
+
 // Spin selects the spin adaptation of the 3h1p satellite space. The values match
 // the reference's spin() convention (0 = singlet, 2 = triplet).
 type Spin int
@@ -84,7 +86,7 @@ func (s *Space) PartitionBounds(g int) []int {
 		}
 	}
 	cand = uniq
-	sortInts(cand)
+	slices.Sort(cand)
 
 	bounds := []int{0}
 	for k := 1; k < g; k++ {
@@ -112,14 +114,6 @@ func abs(x int) int {
 		return -x
 	}
 	return x
-}
-
-func sortInts(a []int) {
-	for i := 1; i < len(a); i++ {
-		for j := i; j > 0 && a[j-1] > a[j]; j-- {
-			a[j-1], a[j] = a[j], a[j-1]
-		}
-	}
 }
 
 // Size is the full matrix dimension.

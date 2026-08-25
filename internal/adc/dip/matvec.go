@@ -190,7 +190,7 @@ func (mx *Matrix) satelliteTasks() []func(emit blockEmit) {
 // produced, so host memory holds only the blocks in flight, not the whole operator.
 func (mx *Matrix) runTaskParts(tasks []func(emit blockEmit)) []placement {
 	results := make([][]placement, len(tasks))
-	parallel.Rows(len(tasks), func(t int) {
+	parallel.HeavyRows(len(tasks), func(t int) {
 		tasks[t](func(m backend.Mat, r0, c0 int, diag bool) {
 			results[t] = append(results[t], placement{A: mx.be.UploadMat(m), RowOff: r0, ColOff: c0, Diag: diag})
 		})
@@ -206,7 +206,7 @@ func (mx *Matrix) runTaskParts(tasks []func(emit blockEmit)) []placement {
 // size (Σ rows·cols·8) without uploading.
 func (mx *Matrix) sumTaskBytes(tasks []func(emit blockEmit)) uint64 {
 	sums := make([]uint64, len(tasks))
-	parallel.Rows(len(tasks), func(t int) {
+	parallel.HeavyRows(len(tasks), func(t int) {
 		var elems uint64
 		tasks[t](func(m backend.Mat, r0, c0 int, diag bool) {
 			elems += uint64(m.Rows) * uint64(m.Cols)

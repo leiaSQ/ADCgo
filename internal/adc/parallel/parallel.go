@@ -22,6 +22,11 @@ import (
 // be safe for concurrent calls on distinct r — it must only write output cells
 // owned by row r (or otherwise-disjoint storage). For small row counts it runs
 // serially to avoid goroutine overhead.
+//
+// That fallback assumes a CHEAP body: it trades away parallelism whenever there are
+// fewer than 2*GOMAXPROCS rows, which on a 128-core node means anything under 256.
+// When one body call is expensive — a block build, a device upload, an iterative
+// solve — the trade is inverted and HeavyRows is the one to use.
 func Rows(rows int, body func(r int)) {
 	workers := runtime.GOMAXPROCS(0)
 	if workers <= 1 || rows < 2*workers {
@@ -30,6 +35,35 @@ func Rows(rows int, body func(r int)) {
 		}
 		return
 	}
+	stealRows(rows, workers, body)
+}
+
+// HeavyRows is Rows without the small-count serial fallback: it parallelizes whenever
+// there is more than one row and more than one core, capping the workers at rows.
+//
+// Use it when a single body call is costly enough that goroutine overhead cannot matter.
+// Rows' heuristic reads "few items means the overhead dominates", which is exactly wrong
+// for the coarse work in this tree: an irrep's orbital count, a sector's group count and a
+// satellite block list are all in the tens-to-low-hundreds, while one item is millions of
+// flops or a device round-trip. Under Rows a 128-core node ran those on one core.
+//
+// Same contract as Rows — body must own row r's output — and the same determinism argument:
+// the work is stolen in arbitrary order, so the schedule must not affect the result.
+func HeavyRows(rows int, body func(r int)) {
+	workers := min(runtime.GOMAXPROCS(0), rows)
+	if workers <= 1 {
+		for r := range rows {
+			body(r)
+		}
+		return
+	}
+	stealRows(rows, workers, body)
+}
+
+// stealRows runs body over [0,rows) on `workers` goroutines that pull the next index off a
+// shared counter, so an uneven cost per row balances itself rather than stranding one worker
+// on the expensive tail.
+func stealRows(rows, workers int, body func(r int)) {
 	var next atomic.Int64
 	var wg sync.WaitGroup
 	for range workers {
