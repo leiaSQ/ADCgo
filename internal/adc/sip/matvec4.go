@@ -1,6 +1,8 @@
 package sip
 
 import (
+	"fmt"
+
 	"github.com/leiaSQ/ADCgo/internal/adc/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
@@ -59,29 +61,46 @@ func (mx *Matrix) mainBlock4() backend.Mat {
 }
 
 // coupling2_4 is the 1h × 2h1p coupling −(kopp1+kopp2).
+//
+// Parallel over COLUMNS, for the reason spelled out on the order-3 sip.coupling(): the row
+// axis is the 1h main block, which is below parallel.Rows' serial-fallback threshold of
+// 2·GOMAXPROCS and so would silently build the whole block on one core. It is worse here than
+// at order 3 — a CVS sector's main block is just the core holes, often 1 or 2 rows.
+//
+// Worker w owns the contiguous column range [lo,hi) and writes only cells (r,c) with c in that
+// range, so the work items are disjoint (parallel.Chunks' contract) and the fill is
+// bit-identical to the serial one.
 func (mx *Matrix) coupling2_4() backend.Mat {
 	sp := mx.sp
-	ncol := sp.Begin3h2p - sp.BeginSat
-	C := backend.NewMat(sp.BeginSat, ncol)
-	parallel.Rows(sp.BeginSat, func(r int) {
-		p := sp.Configs[r].Occ[0]
-		for c := range ncol {
-			cfg := sp.Configs[sp.BeginSat+c]
-			C.Set(r, c, -(mx.el.kopp1(p, cfg) + mx.el.kopp2(p, cfg) + mx.el.kopp3(p, cfg)))
+	main := sp.BeginSat
+	ncol := sp.Begin3h2p - main
+	C := backend.NewMat(main, ncol)
+	parallel.Chunks(ncol, parallel.ChunkWorkers(ncol), func(_, lo, hi int) {
+		for c := lo; c < hi; c++ {
+			cfg := sp.Configs[main+c]
+			for r := range main {
+				p := sp.Configs[r].Occ[0]
+				C.Set(r, c, -(mx.el.kopp1(p, cfg) + mx.el.kopp2(p, cfg) + mx.el.kopp3(p, cfg)))
+			}
 		}
 	})
 	return C
 }
 
 // coupling3_4 is the 1h × 3h2p coupling −kopp4.
+//
+// Parallel over COLUMNS, same reasoning and same disjointness argument as coupling2_4 above.
 func (mx *Matrix) coupling3_4() backend.Mat {
 	sp := mx.sp
+	main := sp.BeginSat
 	ncol := len(sp.Sat3)
-	C := backend.NewMat(sp.BeginSat, ncol)
-	parallel.Rows(sp.BeginSat, func(r int) {
-		p := sp.Configs[r].Occ[0]
-		for c := range ncol {
-			C.Set(r, c, -mx.el.kopp4(p, sp.Sat3[c]))
+	C := backend.NewMat(main, ncol)
+	parallel.Chunks(ncol, parallel.ChunkWorkers(ncol), func(_, lo, hi int) {
+		for c := lo; c < hi; c++ {
+			cfg := sp.Sat3[c]
+			for r := range main {
+				C.Set(r, c, -mx.el.kopp4(sp.Configs[r].Occ[0], cfg))
+			}
 		}
 	})
 	return C
@@ -175,38 +194,55 @@ func (mx *Matrix) assemble4() *assembledOp {
 	var parts []placement
 	var diags []diagPart
 	var mfree []matFreePart
+	defer mx.assembleDone(mx.assembleStart("order 4", main, n2, n3))
 	add := func(m backend.Mat, r0, c0 int, diag bool) {
 		parts = append(parts, placement{A: mx.be.UploadMat(m), RowOff: r0, ColOff: c0, Diag: diag})
 	}
 	if main > 0 {
-		add(mx.mainBlock4(), 0, 0, true)
+		mx.assembleStep(fmt.Sprintf("1h/1h main block (%d×%d)", main, main), func() {
+			add(mx.mainBlock4(), 0, 0, true)
+		})
 		if n2 > 0 {
-			add(mx.coupling2_4(), 0, main, false)
+			mx.assembleStep(fmt.Sprintf("1h/2h1p coupling (%d×%d)", main, n2), func() {
+				add(mx.coupling2_4(), 0, main, false)
+			})
 		}
 		if n3 > 0 {
-			add(mx.coupling3_4(), 0, sp.Begin3h2p, false)
+			mx.assembleStep(fmt.Sprintf("1h/3h2p coupling (%d×%d)", main, n3), func() {
+				add(mx.coupling3_4(), 0, sp.Begin3h2p, false)
+			})
 		}
 	}
 	if n2 > 0 {
 		// The 2h1p×2h1p satellite block: dense by default; matrix-free only when its
 		// n2²·8 residency exceeds the budget (it is far smaller than the coupling block).
 		if mx.matFreeC22(int64(n2) * int64(n2) * 8) {
-			mfree = append(mfree, mx.newC22MatFree())
+			mx.assembleStep(fmt.Sprintf("2h1p/2h1p satellite, matrix-free (%d×%d)", n2, n2), func() {
+				mfree = append(mfree, mx.newC22MatFree())
+			})
 		} else {
-			add(mx.satBlock2_4(), main, main, true)
+			mx.assembleStep(fmt.Sprintf("2h1p/2h1p satellite, dense (%d×%d)", n2, n2), func() {
+				add(mx.satBlock2_4(), main, main, true)
+			})
 		}
 	}
 	if n3 > 0 {
 		// The 3h2p/3h2p block is diagonal (WERT3 deferred): keep it as a resident vector
 		// instead of a dense n3×n3 upload, which would be terabytes for a large sector.
-		diags = append(diags, diagPart{off: sp.Begin3h2p, d: mx.be.Upload(mx.sat3Diag())})
+		mx.assembleStep(fmt.Sprintf("3h2p diagonal (%d)", n3), func() {
+			diags = append(diags, diagPart{off: sp.Begin3h2p, d: mx.be.Upload(mx.sat3Diag())})
+		})
 		if n2 > 0 {
 			// The 2h1p×3h2p WERT2 coupling is the memory ceiling (n2·n3·8 bytes). Apply
 			// it matrix-free when requested/oversized, else assemble it densely.
 			if mx.matFreeWert2(int64(n2) * int64(n3) * 8) {
-				mfree = append(mfree, mx.newWert2MatFree())
+				mx.assembleStep(fmt.Sprintf("2h1p/3h2p WERT2 coupling, matrix-free (%d×%d)", n2, n3), func() {
+					mfree = append(mfree, mx.newWert2MatFree())
+				})
 			} else {
-				add(mx.coupling24_4(), main, sp.Begin3h2p, false)
+				mx.assembleStep(fmt.Sprintf("2h1p/3h2p WERT2 coupling, dense (%d×%d)", n2, n3), func() {
+					add(mx.coupling24_4(), main, sp.Begin3h2p, false)
+				})
 			}
 		}
 	}

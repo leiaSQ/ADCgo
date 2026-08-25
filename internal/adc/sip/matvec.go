@@ -1,6 +1,10 @@
 package sip
 
 import (
+	"fmt"
+	"os"
+	"time"
+
 	"github.com/leiaSQ/ADCgo/internal/adc/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
 	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
@@ -97,18 +101,34 @@ func (mx *Matrix) mainBlock() backend.Mat {
 
 // coupling builds the dense 1h×2h1p coupling block (c12).
 //
-// Parallel over rows: row r writes only row r of C, so the work items are trivially disjoint
-// (parallel.Rows' contract). Bit-identical to the serial fill — each cell is still computed
-// exactly once by the same expression; only the order in which independent cells are filled
-// changes. Same treatment matvec4.go already gives the ADC(4) blocks (coupling2_4 etc.).
+// Parallel over COLUMNS (the 2h1p configs), not rows. The row axis here is the 1h main block,
+// i.e. nocc — 58 for the production system — which sits below parallel.Rows' serial-fallback threshold of
+// 2·GOMAXPROCS (128 on a 64-core node), so a row split silently ran this whole block on one
+// core. That is not a small loss: c12's second-order part (c12_2) is an O(n_vir²) sum, ~1.7e5
+// scattered reads of the 16 GB flat ERI tensor per element, so the production system's 58×518k block is
+// ~5e12 cache-missing loads — over 76 h serial. Jobs 14134491, 14160403 and 14224889 each
+// died at their 5-day walltime inside this call, having never reached the solver's first
+// block, and lanczos' checkpoint only begins covering work after the first ApplyBlock
+// returns, so every generation of the daisychain restarted it from zero. The column axis is
+// 518k wide and parallelizes across every core.
+//
+// Worker w owns the contiguous column range [lo,hi) and writes only cells (r,c) with c in that
+// range, so the work items are disjoint (parallel.Chunks' contract) and the fill is bit-identical
+// to the serial one — each cell is still computed exactly once by the same expression; only the
+// order in which independent cells are filled changes. `elements` is immutable after
+// construction and v/so are pure reads, so the concurrent c12 calls are safe. Same treatment
+// matvec4.go already gives the ADC(4) blocks (coupling2_4 etc.).
 func (mx *Matrix) coupling() backend.Mat {
 	sp := mx.sp
-	nSat := sp.Size() - sp.BeginSat
-	C := backend.NewMat(sp.BeginSat, nSat)
-	parallel.Rows(sp.BeginSat, func(r int) {
-		j := sp.Configs[r].Occ[0]
-		for cIdx := range nSat {
-			C.Set(r, cIdx, mx.el.c12(j, sp.Configs[sp.BeginSat+cIdx]))
+	main := sp.BeginSat
+	nSat := sp.Size() - main
+	C := backend.NewMat(main, nSat)
+	parallel.Chunks(nSat, parallel.ChunkWorkers(nSat), func(_, lo, hi int) {
+		for cIdx := lo; cIdx < hi; cIdx++ {
+			cfg := sp.Configs[main+cIdx]
+			for r := range main {
+				C.Set(r, cIdx, mx.el.c12(sp.Configs[r].Occ[0], cfg))
+			}
 		}
 	})
 	return C
@@ -198,6 +218,43 @@ func (mx *Matrix) OperatorResidentBytes() uint64 {
 
 // assemble uploads the blocks once for the resident matrix-vector product. Order 4
 // (CVS ADC(4), with a 3h2p space) uses the assemble4 path (matvec4.go).
+// Assembly progress logging. On by default, and deliberately: block assembly is the phase
+// between the static self-energy and the solver's first block, it can dominate a large run,
+// and it used to be completely silent. The production system's 1h/2h1p coupling ran >76 h there while the
+// job looked alive at 100% of one core with eight idle GPUs, and lanczos' checkpoint only
+// starts covering work once the first ApplyBlock returns — so three consecutive 5-day
+// walltimes produced no log line, no checkpoint and no way to tell progress from a hang
+// (jobs 14134491, 14160403, 14224889). The cost here is a handful of lines per sector.
+//
+// Every line carries sym= because concurrent sectors (-sym all on a multi-GPU pool) interleave
+// their output.
+func (mx *Matrix) assembleStart(order string, main, n2, n3 int) time.Time {
+	dims := fmt.Sprintf("main=%d 2h1p=%d", main, n2)
+	if n3 > 0 {
+		dims += fmt.Sprintf(" 3h2p=%d", n3)
+	}
+	fmt.Fprintf(os.Stderr, "adcgo: sip sym=%d assemble %s: n=%d (%s)\n",
+		mx.sp.Sym, order, mx.sp.Size(), dims)
+	return time.Now()
+}
+
+// assembleDone closes the run started by assembleStart. Deferred, so it also fires if a block
+// build panics — the elapsed time up to the failure is worth having.
+func (mx *Matrix) assembleDone(t0 time.Time) {
+	fmt.Fprintf(os.Stderr, "adcgo: sip sym=%d assemble complete in %s; entering the solver\n",
+		mx.sp.Sym, time.Since(t0).Round(time.Second))
+}
+
+// assembleStep runs one block build (fill + upload), bracketing it with a "started" line and
+// its wall-clock cost. The started line is what distinguishes a slow block from a hung one.
+func (mx *Matrix) assembleStep(what string, run func()) {
+	fmt.Fprintf(os.Stderr, "adcgo: sip sym=%d assemble: %s ...\n", mx.sp.Sym, what)
+	t0 := time.Now()
+	run()
+	fmt.Fprintf(os.Stderr, "adcgo: sip sym=%d assemble: %s done in %s\n",
+		mx.sp.Sym, what, time.Since(t0).Round(time.Second))
+}
+
 func (mx *Matrix) assemble() *assembledOp {
 	if mx.isADC4() {
 		return mx.assemble4()
@@ -205,15 +262,20 @@ func (mx *Matrix) assemble() *assembledOp {
 	sp := mx.sp
 	main := sp.BeginSat
 	nSat := sp.Size() - main
+	defer mx.assembleDone(mx.assembleStart("order 3", main, nSat, 0))
 	var parts []placement
 	var mfree []matFreePart
 	add := func(m backend.Mat, r0, c0 int, diag bool) {
 		parts = append(parts, placement{A: mx.be.UploadMat(m), RowOff: r0, ColOff: c0, Diag: diag})
 	}
 	if main > 0 {
-		add(mx.mainBlock(), 0, 0, true)
+		mx.assembleStep(fmt.Sprintf("1h/1h main block (%d×%d)", main, main), func() {
+			add(mx.mainBlock(), 0, 0, true)
+		})
 		if nSat > 0 {
-			add(mx.coupling(), 0, main, false)
+			mx.assembleStep(fmt.Sprintf("1h/2h1p coupling (%d×%d)", main, nSat), func() {
+				add(mx.coupling(), 0, main, false)
+			})
 		}
 	}
 	if nSat > 0 {
@@ -223,9 +285,13 @@ func (mx *Matrix) assemble() *assembledOp {
 		// GPU kernel when available) when requested or when the dense block exceeds the
 		// budget; else assemble it densely as before.
 		if mx.matFreeC22O3(int64(nSat) * int64(nSat) * 8) {
-			mfree = append(mfree, mx.newC22MatFreeO3())
+			mx.assembleStep(fmt.Sprintf("2h1p/2h1p satellite, matrix-free (%d×%d)", nSat, nSat), func() {
+				mfree = append(mfree, mx.newC22MatFreeO3())
+			})
 		} else {
-			add(mx.satBlock(), main, main, true)
+			mx.assembleStep(fmt.Sprintf("2h1p/2h1p satellite, dense (%d×%d)", nSat, nSat), func() {
+				add(mx.satBlock(), main, main, true)
+			})
 		}
 	}
 	return finalizeOp(parts, nil, mfree)
