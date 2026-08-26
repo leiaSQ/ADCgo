@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/backend"
 )
 
 // Data is the parsed sidecar.

@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/backend"
 )
 
 // poolChooser builds a chooser whose pool is n host (gonum) backends, so the concurrent

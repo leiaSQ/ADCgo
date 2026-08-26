@@ -25,7 +25,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/backend"
 )
 
 const (

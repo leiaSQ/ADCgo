@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/backend"
 )
 
 // orthHarness builds an orthonormal basis B (n×d) and scratch buffers, then runs

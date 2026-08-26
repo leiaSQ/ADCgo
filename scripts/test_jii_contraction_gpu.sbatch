@@ -46,8 +46,8 @@ for ker in adc4_kernels adc2dip_kernels; do
          -gencode arch=compute_80,code=sm_80 \
          -gencode arch=compute_86,code=sm_86 \
          -gencode arch=compute_90,code=sm_90 \
-         -c "internal/adc/backend/$ker.cu" \
-         -o "internal/adc/backend/$ker.o"
+         -c "backend/$ker.cu" \
+         -o "backend/$ker.o"
 done
 echo "#end<nvcc>"
 

@@ -5,7 +5,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/backend"
 )
 
 // TestCheckpointAllocGrowth pins the allocation behaviour of the checkpoint writer, which is what

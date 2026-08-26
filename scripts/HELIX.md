@@ -49,7 +49,7 @@ then a `-tags cuda` Go build. Both are wrapped in one script:
 scripts/build_adcgo_cuda_helix        # -> ./adcgo-cuda at the repo root
 ```
 
-It (1) `nvcc`-compiles `internal/adc/backend/adc4_kernels.cu` for every Helix GPU model
+It (1) `nvcc`-compiles `backend/adc4_kernels.cu` for every Helix GPU model
 (`-gencode` sm_80 for A100, sm_86 for A40, sm_90 for H200), then (2) `go build -tags cuda`.
 It reads the CUDA prefix from `$CUDA_HOME` (set by `module load devel/cuda/13.2`); override
 with `CGO_CFLAGS`/`CGO_LDFLAGS` if the headers/libs live elsewhere.

@@ -38,7 +38,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/backend"
 )
 
 // block records one accepted Lanczos block: its global column offset, its size (after

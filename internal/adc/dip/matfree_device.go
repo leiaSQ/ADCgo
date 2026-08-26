@@ -3,7 +3,7 @@ package dip
 import (
 	"unsafe"
 
-	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/backend"
 )
 
 // matfree_device.go — the DEVICE (CUDA) matrix-free applier for the 3h1p↔3h1p satellite region.

@@ -1,6 +1,6 @@
 package dip
 
-import "github.com/leiaSQ/ADCgo/internal/adc/backend"
+import "github.com/leiaSQ/ADCgo/backend"
 
 // singlet implements the singlet ADC2-DIP matrix elements
 // (../ADC/adc2_dip/singlet.cpp). Trust this transcription over Tarantelli's

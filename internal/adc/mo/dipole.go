@@ -1,6 +1,6 @@
 package mo
 
-import "github.com/leiaSQ/ADCgo/internal/adc/backend"
+import "github.com/leiaSQ/ADCgo/backend"
 
 // TransformMO carries a one-electron AO-basis matrix into the MO basis: Cᵀ·A·C, with
 // A nAO × nAO and C nAO × nMO. The result is nMO × nMO over exactly the MOs the

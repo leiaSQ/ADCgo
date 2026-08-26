@@ -66,8 +66,8 @@ echo "#begin<nvcc>"
 for ker in adc4_kernels adc2dip_kernels; do
     nvcc -O3 -std=c++14 -lineinfo \
          -gencode arch=compute_90,code=sm_90 \
-         -c "internal/adc/backend/$ker.cu" \
-         -o "internal/adc/backend/$ker.o" || { echo "nvcc failed for $ker" >&2; exit 1; }
+         -c "backend/$ker.cu" \
+         -o "backend/$ker.o" || { echo "nvcc failed for $ker" >&2; exit 1; }
 done
 echo "#end<nvcc>"
 
@@ -75,7 +75,7 @@ echo "#end<nvcc>"
 # toolchain launches (compiler, linker) out of the sanitized process.
 echo "#begin<go test -c>"
 go test -tags cuda -c -o dip.test     ./internal/adc/dip     || { echo "build dip.test failed" >&2; exit 1; }
-go test -tags cuda -c -o backend.test ./internal/adc/backend || { echo "build backend.test failed" >&2; exit 1; }
+go test -tags cuda -c -o backend.test ./backend || { echo "build backend.test failed" >&2; exit 1; }
 echo "#end<go test -c>"
 
 rc_total=0
@@ -108,7 +108,7 @@ run "dip mgpu satellite (per-device bands + NVLink gather)" internal/adc/dip    
 # The batched fill/gemm path and the single-device satellite apply, same kernels, simpler driver.
 run "dip matfree batched + device"                          internal/adc/dip     dip.test     'MatFree|Batched|Satellite'
 # Distributed backend plumbing: peer copies, row-band slicing, batched GEMM regrouping.
-run "backend distributed + gpu"                             internal/adc/backend backend.test 'Dist|Peer|Gemm|Repro|MultiDevice'
+run "backend distributed + gpu"                             backend backend.test 'Dist|Peer|Gemm|Repro|MultiDevice'
 
 echo
 # A green run means nothing unless the key test actually EXECUTED. Both failure modes seen so far

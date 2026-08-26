@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/backend"
 )
 
 // Transition dipoles between eigenstates of two *different* SIP configuration spaces

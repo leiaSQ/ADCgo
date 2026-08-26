@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/backend"
 )
 
 // The intermediate-state representation of a one-electron operator over the SIP

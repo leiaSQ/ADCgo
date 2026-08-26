@@ -3,8 +3,8 @@
 Orientation for the compute layer: what a `Backend` is, and — the part that is hard to
 reconstruct from the code alone — how one block-Lanczos mat-vec is partitioned across devices and
 turned into kernel launches. Companions:
-[`docs/dip_operator_memory.md`](../../../docs/dip_operator_memory.md) (why the satellite region is
-matrix-free) and [`docs/dip_lowmem_lanczos.md`](../../../docs/dip_lowmem_lanczos.md) (why only a
+[`docs/dip_operator_memory.md`](../docs/dip_operator_memory.md) (why the satellite region is
+matrix-free) and [`docs/dip_lowmem_lanczos.md`](../docs/dip_lowmem_lanczos.md) (why only a
 few panels are resident).
 
 ## The pieces

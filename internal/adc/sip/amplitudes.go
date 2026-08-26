@@ -1,6 +1,6 @@
 package sip
 
-import "github.com/leiaSQ/ADCgo/internal/adc/backend"
+import "github.com/leiaSQ/ADCgo/backend"
 
 // The spectroscopic (transition) amplitudes: the effective one-hole overlap of a
 // final cationic state is a = F·Y, where Y is the state's 1h (main-block)

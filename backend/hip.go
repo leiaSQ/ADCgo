@@ -25,6 +25,7 @@ static void  dev_zero(void* p, size_t bytes)              { hipMemset(p, 0, byte
 static void  dev_h2d(void* d, const void* s, size_t b)    { hipMemcpy(d, s, b, hipMemcpyHostToDevice); }
 static void  dev_d2h(void* d, const void* s, size_t b)    { hipMemcpy(d, s, b, hipMemcpyDeviceToHost); }
 static void  dev_d2d(void* d, const void* s, size_t b)    { hipMemcpy(d, s, b, hipMemcpyDeviceToDevice); }
+static void  dev_sync(void)                                { hipDeviceSynchronize(); }
 
 // Multi-GPU peer copy for the distributed backend (twin of cuda.go). dev_can_peer asks
 // whether `dev` may read `peer`'s memory; dev_enable_peer authorizes the calling thread's
@@ -168,6 +169,11 @@ func devD2H(dst []float64, src unsafe.Pointer) {
 func devD2D(dst, src unsafe.Pointer, n int) {
 	C.dev_d2d(dst, src, C.size_t(n*elemSize))
 }
+
+// devSync blocks until all queued device work completes. gpu_device.go is shared by the cuda
+// and hip builds and calls it from Sync (PeerCopier), so the hip build needs it too — without
+// it the whole `-tags hip` build fails to compile.
+func devSync() { C.dev_sync() }
 
 // devHostAlloc / devHostFree: pinned-host-memory hooks that gpu_device.go (shared by the cuda
 // and hip builds) calls for its batched-GEMM pointer staging. There is no hipHostMalloc binding

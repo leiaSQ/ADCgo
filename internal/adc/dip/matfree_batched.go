@@ -5,7 +5,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/leiaSQ/ADCgo/internal/adc/backend"
+	"github.com/leiaSQ/ADCgo/backend"
 )
 
 // matfree_batched.go — the jiiLKK half of the matrix-free satellite apply, routed through

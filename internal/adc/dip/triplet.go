@@ -1,6 +1,6 @@
 package dip
 
-import "github.com/leiaSQ/ADCgo/internal/adc/backend"
+import "github.com/leiaSQ/ADCgo/backend"
 
 // triplet implements the triplet ADC2-DIP matrix elements
 // (../ADC/adc2_dip/triplet.cpp). Closed-shell blocks do not exist for triplet
