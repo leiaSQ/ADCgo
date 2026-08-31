@@ -60,6 +60,13 @@ type gpuBackend struct {
 	// it (nil otherwise — hostA/B/C are then ordinary Go slices). Freed only on regrow.
 	pinned unsafe.Pointer
 
+	// Scratch for AddDiagPanel: cublasDdgmm has no accumulating form, so the scaled
+	// panel lands here before one DAXPY adds it in. Grown on demand and reused for the
+	// same reason as the pointer arrays -- MCTDH applies a grid-diagonal operator on
+	// every derivative evaluation, so a cudaMalloc here would sit on the hot path.
+	diagBuf unsafe.Pointer
+	diagCap int
+
 	// Scratch for DipSatFillJII: the materialized jiiLKK blocks of one apply. Same
 	// grown-on-demand, reused-across-calls rationale as the pointer arrays above — this is
 	// refilled every mat-vec, so allocating per call would put cudaMalloc on the hot path.
@@ -372,6 +379,130 @@ func (b *gpuBackend) GemmMatBatched(transA bool, alpha float64, a []DeviceMat, b
 		blasGemmBatched(b.h, !transA, false, c[0].Rows, c[0].Cols, bb[0].Rows, alpha,
 			b.ptrA, m0.cols, b.ptrB, bb[0].Ld, beta, b.ptrC, c[0].Ld, n)
 	})
+}
+
+// ensureDiagCap grows the AddDiagPanel scratch to hold at least n float64.
+// Must run on the device-owning thread.
+func (b *gpuBackend) ensureDiagCap(n int) {
+	if n <= b.diagCap {
+		return
+	}
+	if b.diagBuf != nil {
+		devFree(b.diagBuf)
+	}
+	b.diagBuf = devMalloc(n)
+	b.diagCap = n
+}
+
+// GemmBatched implements backend.BatchedGemm: one launch for a whole batch of
+// same-shaped panel products, c[i] := alpha*op(a[i])*op(b[i]) + beta*c[i].
+//
+// This is GemmMatBatched's sibling for mutable operands. The difference is not
+// cosmetic: GemmMatBatched's `a` is a DeviceMat, an immutable block uploaded once and
+// applied thousands of times, stored row-major -- which is why it inverts transA and
+// passes m.cols as the leading dimension. Here every operand is a BlockView, already
+// column-major and already what cuBLAS wants, so the flags pass through untouched and
+// both sides can be transposed.
+//
+// MCTDH is the caller that needs it: a mode matrix applied to one index of a
+// coefficient tensor is c_k := b_k*a-transpose, rebuilt every timestep, and the batch
+// runs over the ensemble. Shapes are read from element 0; the contract requires them
+// uniform, and the c[i] pairwise non-overlapping, because the members run concurrently
+// and accumulate.
+func (b *gpuBackend) GemmBatched(transA, transB bool, alpha float64, a, bb []BlockView, beta float64, c []BlockView) {
+	n := len(a)
+	if n == 0 {
+		return
+	}
+	if n == 1 { // a batched call of one is pure overhead
+		b.Gemm(transA, transB, alpha, a[0], bb[0], beta, c[0])
+		return
+	}
+	k := a[0].Cols
+	if transA {
+		k = a[0].Rows
+	}
+	b.do(func() {
+		b.ensurePtrCap(n)
+		for i := range n {
+			b.hostA[i] = a[i].V.(devVec).ptr()
+			b.hostB[i] = bb[i].V.(devVec).ptr()
+			b.hostC[i] = c[i].V.(devVec).ptr()
+		}
+		devH2DPtrs(b.ptrA, b.hostA[:n])
+		devH2DPtrs(b.ptrB, b.hostB[:n])
+		devH2DPtrs(b.ptrC, b.hostC[:n])
+		blasGemmBatched(b.h, transA, transB, c[0].Rows, c[0].Cols, k, alpha,
+			b.ptrA, a[0].Ld, b.ptrB, bb[0].Ld, beta, b.ptrC, c[0].Ld, n)
+	})
+}
+
+// AddDiagPanel implements backend.DiagPanelAdder: c += diag(d)*a over a whole
+// column-major panel, in two cuBLAS calls instead of one AxpyDiag per column.
+//
+// cublasDdgmm computes diag(d)*a but cannot accumulate, so the product goes to a
+// compact scratch and a single DAXPY adds it in. That last step is one call only when c
+// is compact; when it is padded (Ld > Rows) the columns are not contiguous and the add
+// goes column by column, which is still one launch per column but no worse than the
+// generic fallback -- and no panel MCTDH passes here is padded.
+func (b *gpuBackend) AddDiagPanel(d Vector, a, c BlockView) {
+	if a.Rows != c.Rows || a.Cols != c.Cols {
+		panic("backend: AddDiagPanel operand panels differ in shape")
+	}
+	if d.Len() != a.Rows {
+		panic("backend: AddDiagPanel diagonal length does not match the panel's rows")
+	}
+	rows, cols := a.Rows, a.Cols
+	if rows == 0 || cols == 0 {
+		return
+	}
+	dp, ap, cp := d.(devVec), a.V.(devVec), c.V.(devVec)
+	b.do(func() {
+		b.ensureDiagCap(rows * cols)
+		blasDgmm(b.h, rows, cols, ap.ptr(), a.Ld, dp.ptr(), b.diagBuf, rows)
+		if c.Ld == rows {
+			blasAxpy(b.h, b.diagBuf, cp.ptr(), rows*cols, 1)
+			return
+		}
+		for j := range cols {
+			src := unsafe.Add(b.diagBuf, j*rows*elemSize)
+			dst := unsafe.Add(cp.ptr(), j*c.Ld*elemSize)
+			blasAxpy(b.h, src, dst, rows, 1)
+		}
+	})
+}
+
+// AbsMax2 implements backend.AbsMax2er: the largest squared modulus of a planar complex
+// vector, as one number, without moving the vector.
+//
+// It is built from calls that already exist rather than from a custom reduction kernel.
+// diag(re)*re accumulated with diag(im)*im is re^2 + im^2 -- AddDiagPanel over a single
+// column -- and cublasIdamax then names the largest element of that, since it is
+// non-negative and |.| is the identity on it. Only that one element comes back.
+//
+// The alternative was a .cu block reduction, which would have meant a third object file
+// through nvcc and both build scripts. Four launches against one is the wrong trade only
+// if this were on the innermost path; it is called once per Bulirsch-Stoer extrapolation
+// column, where the thing being replaced was a full device-to-host copy of the SPF batch.
+func (b *gpuBackend) AbsMax2(re, im Vector) float64 {
+	n := re.Len()
+	if n != im.Len() {
+		panic("backend: AbsMax2 halves differ in length")
+	}
+	if n == 0 {
+		return 0
+	}
+	col := func(v Vector) BlockView { return BlockView{V: v, Rows: n, Cols: 1, Ld: n} }
+	var idx int
+	b.do(func() {
+		b.ensureDiagCap(n)
+		devZero(b.diagBuf, n)
+	})
+	sq := devVec{base: b.diagBuf, off: 0, n: n}
+	b.AddDiagPanel(re, col(re), col(sq))
+	b.AddDiagPanel(im, col(im), col(sq))
+	b.do(func() { idx = blasIamax(b.h, sq.ptr(), n) })
+	return b.Download(sq.Slice(idx, 1))[0]
 }
 
 // gpuSymEigMin is DeviceSymEigMin (perf.go), which lives outside the GPU build tags so

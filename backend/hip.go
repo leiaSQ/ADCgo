@@ -66,6 +66,22 @@ static int blas_gemm(hipblasHandle_t h, int transA, int transB, int m, int n, in
 // Batched DGEMM: one launch for `batch` same-shaped products. A, B, C are DEVICE
 // arrays of device pointers; members run concurrently, so the C pointers must not
 // overlap (see backend.PlanBatches).
+// 1-based index of the element of largest absolute value (hipblasIdamax); the hipBLAS
+// twin of cuda.go's blas_iamax. Returns -1 on failure.
+static int blas_iamax(hipblasHandle_t h, int n, const double* x) {
+	int idx = 0;
+	if (hipblasIdamax(h, n, x, 1, &idx) != HIPBLAS_STATUS_SUCCESS) return -1;
+	return idx;
+}
+
+// C := diag(x) * A for a column-major m x n matrix A (HIPBLAS_SIDE_LEFT). The hipBLAS
+// twin of cuda.go's blas_dgmm; see gpuBackend.AddDiagPanel for why an accumulate needs
+// this followed by a DAXPY.
+static int blas_dgmm(hipblasHandle_t h, int m, int n, const double* A, int lda,
+                     const double* x, double* C, int ldc) {
+	return (int)hipblasDdgmm(h, HIPBLAS_SIDE_LEFT, m, n, A, lda, x, 1, C, ldc);
+}
+
 static int blas_gemm_batched(hipblasHandle_t h, int transA, int transB, int m, int n, int k,
                              double alpha, const double* const* A, int lda,
                              const double* const* B, int ldb,
@@ -239,6 +255,26 @@ func blasGemm(h unsafe.Pointer, transA, transB bool, m, n, k int, alpha float64,
 		C.double(beta), (*C.double)(c), C.int(ldc))
 	if st != 0 {
 		panic(fmt.Sprintf("backend: hipblasDgemm failed (status %d): transA=%v transB=%v m=%d n=%d k=%d", int(st), transA, transB, m, n, k))
+	}
+}
+
+// blasIamax returns the ZERO-based index of the largest-magnitude element of x.
+func blasIamax(h unsafe.Pointer, x unsafe.Pointer, n int) int {
+	idx := int(C.blas_iamax(handle(h), C.int(n), (*C.double)(x)))
+	if idx < 1 {
+		panic(fmt.Sprintf("backend: hipblasIdamax failed (returned %d): n=%d", idx, n))
+	}
+	return idx - 1
+}
+
+// blasDgmm: c := diag(x) * a, column-major, a is m x n with leading dimension lda.
+func blasDgmm(h unsafe.Pointer, m, n int, a unsafe.Pointer, lda int, x unsafe.Pointer,
+	c unsafe.Pointer, ldc int) {
+	st := C.blas_dgmm(handle(h), C.int(m), C.int(n), (*C.double)(a), C.int(lda),
+		(*C.double)(x), (*C.double)(c), C.int(ldc))
+	if st != 0 {
+		panic(fmt.Sprintf("backend: hipblasDdgmm failed (hipblasStatus_t %d): m=%d n=%d lda=%d ldc=%d",
+			int(st), m, n, lda, ldc))
 	}
 }
 
