@@ -12,7 +12,8 @@ __pycache__/
 # editors
 .idea/
 .vscode/
-internal/adc/backend/adc4_kernels.o
+backend/adc4_kernels.o
+backend/adc2dip_kernels.o
 
 # large local-only inputs: pyridine N K-edge demo (658 MB FCIDUMP), no test reads these
 testdata/pyridine_N.*

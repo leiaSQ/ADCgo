@@ -5,11 +5,13 @@ import (
 	"math"
 	"os"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/leiaSQ/ADCgo/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // matfree_dist.go — matrix-free 3h1p↔3h1p satellite apply under the row-partitioned (-mgpu)
@@ -315,13 +317,13 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 
 // ownerOf returns the partition holding global row r. Bounds are group-aligned
 // (dip.PartitionBounds), so a whole block band never straddles two partitions.
+//
+// Binary search, not a scan: the ownership split calls this once per block reference per
+// partition — nd·2S ≈ 1.3e9 times for a production sector at -mgpu 8 — and bounds is ascending by
+// construction. sort.SearchInts(bounds, r+1)-1 is the index of the last bound ≤ r.
 func ownerOf(bounds []int, r int) int {
-	for d := 0; d < len(bounds)-1; d++ {
-		if r < bounds[d+1] {
-			return d
-		}
-	}
-	return len(bounds) - 2
+	d := sort.SearchInts(bounds, r+1) - 1
+	return min(max(d, 0), len(bounds)-2)
 }
 
 // newSatBatchedPerDevice is the multi-GPU contraction path: the -mgpu twin of
@@ -353,61 +355,79 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 		eri  unsafe.Pointer
 		eps  unsafe.Pointer
 		osym unsafe.Pointer
-		// members[b] lists the indices (into plan.batches[b].Blocks) this device owns.
-		members [][]int
 	}
 	st := make([]*devState, nd)
 
 	// One plan for the whole pool. It depends only on the Space and the virtual-symmetry groups,
 	// so building it per device produced N byte-identical copies — ~10.5 GB of []jiiSlot each at
 	// the production system's 82 M slots, ~84 GB of host RAM across 8 devices. Each device gets a clone that
-	// shares the planning data and owns its own issue scratch (jiiBatchPlan.clone).
+	// shares the planning data and owns its own application order and issue scratch (cloneWith).
 	basePlan := mx.buildJIIBatchPlan()
 
 	// Split the batches by owner up front. The plan is apply-invariant, so the ownership split
 	// is too — and settling it before the device loop is what lets a partition that owns no
 	// block in any batch be skipped entirely: no plan clone, no ERI/eps/osym upload, no slab,
 	// and no share of the gather. Such a partition never issued a GEMM in the first place.
-	active := make([]bool, nd)
+	//
+	// One pass over the block references, not one per device: ownerOf is evaluated once per
+	// reference and the result selects the destination list, instead of nd passes each testing
+	// every reference against one device (nd·2S ≈ 1.3e9 for the production system at -mgpu 8). Parallel over
+	// BATCHES, so every worker owns memberOf[*][bi] for its own bi and no two ever touch the same
+	// slice; within a batch the walk stays in bt.Blocks' ascending order, which appChunks and the
+	// device fill both rely on.
 	memberOf := make([][][]int, nd)
 	for d := range nd {
-		members := make([][]int, len(basePlan.batches))
-		for bi, bt := range basePlan.batches {
-			for _, si := range bt.Blocks {
-				sl := basePlan.slots[si]
-				off := sl.rowOff
-				if bt.Trans {
-					off = sl.colOff
-				}
-				if ownerOf(bounds, off) == d {
-					members[bi] = append(members[bi], si)
-					active[d] = true
-				}
+		memberOf[d] = make([][]int, len(basePlan.batches))
+	}
+	parallel.HeavyRows(len(basePlan.batches), func(bi int) {
+		bt := basePlan.batches[bi]
+		for _, si := range bt.Blocks {
+			sl := basePlan.slots[si]
+			off := sl.rowOff
+			if bt.Trans {
+				off = sl.colOff
 			}
+			d := ownerOf(bounds, off)
+			memberOf[d][bi] = append(memberOf[d][bi], si)
 		}
-		memberOf[d] = members
+	})
+
+	active := make([]bool, nd)
+	appsOf := make([][]int32, nd)
+	chunksOf := make([][]jiiChunk, nd)
+	for d := range nd {
+		// Each device fills ONLY the applications it will issue. The whole-plan fill this
+		// replaces materialized all 2S blocks on every device and discarded the (nd-1)/nd it did
+		// not own — nd-fold redundant work in the phase that is second-largest after the GEMM.
+		appsOf[d], chunksOf[d] = basePlan.appChunks(memberOf[d], JIIFillBudgetElems)
+		active[d] = len(appsOf[d]) > 0
 	}
 
-	for d := range nd {
+	// Build the per-device state CONCURRENTLY. Each device uploads the norb⁴ ERI tensor (16 GB at
+	// the production system's norb=212), the 21-array config SoA, the plan SoA and its n×w slab, and every one
+	// of those calls blocks on a round-trip through that device's owning goroutine — so a serial
+	// loop here uploads 8 GPUs one after another while 7 idle. The state is disjoint by
+	// construction (own backend, own kernels, own buffers, own slab, own plan clone), and
+	// goDevices recovers per device so a failed cudaMalloc still unwinds through the caller.
+	goDevices(nd, func(d int) {
 		if !active[d] {
-			continue
+			return
 		}
 		dk, ok := pd.PartKernels(d)
 		if !ok {
 			panic("dip: batched per-device satellite selected without device kernels")
 		}
-		plan := basePlan.clone()
+		plan := basePlan.cloneWith(appsOf[d], chunksOf[d])
 		bufs := mx.buildJIIDeviceBufs(dk, plan, s)
 		eri, eps, osym := dk.DeviceERI(s.eri), dk.UploadFloats(s.eps), dk.UploadInts(s.osym)
 		bufs.args.ERI, bufs.args.Eps, bufs.args.OrbSym = eri, eps, osym
 
-		members := memberOf[d]
 		st[d] = &devState{
-			be: pd.PartBackend(d), dk: dk, bufs: bufs, plan: plan, members: members,
+			be: pd.PartBackend(d), dk: dk, bufs: bufs, plan: plan,
 			slab: pd.PartBackend(d).Alloc(n * w),
 			eri:  eri, eps: eps, osym: osym,
 		}
-	}
+	})
 
 	apply := func(in, out backend.BlockView) {
 		nchunkCols := (in.Cols + w - 1) / w
@@ -460,7 +480,7 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 					Rows: rd, Cols: cw, Ld: rd,
 				}
 				fills[d], gemms[d], nfills[d], stats[d] = ds.plan.fillAndRun(
-					ds.dk, ds.bufs.args, ds.be, inView, outLocal, ds.members, bounds[d])
+					ds.dk, ds.bufs.args, ds.be, inView, outLocal, bounds[d])
 			})
 
 			var tFill, tGemm time.Duration

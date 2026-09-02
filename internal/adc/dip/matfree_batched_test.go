@@ -236,36 +236,108 @@ func TestJIIBatchedSymmetryOff(t *testing.T) {
 	}
 }
 
-// TestComputeChunks pins the bounded-chunking partition that keeps the device fill from
-// materializing the whole satellite operator at once (the 424 GB OOM, job 14026481). The
-// invariants it guards: chunks tile the slot range contiguously with no gap or overlap, each
-// chunk's element total matches the blocks it covers, every chunk except a lone oversized block
-// stays within budget, and a block larger than the budget forms its own single-block chunk
-// (a block cannot be split). These are exactly the properties the chunk-local BufOff and the
-// pointer-offset fill depend on.
-func TestComputeChunks(t *testing.T) {
+// TestAppChunks pins the application-order chunking that both bounds the device fill (the 424 GB
+// OOM, job 14026481) and keeps the batched GEMM actually batched.
+//
+// The invariants: chunks tile the application range contiguously with no gap or overlap; NO CHUNK
+// CROSSES A BATCH BOUNDARY (this is what makes a chunk issue as exactly one GemmMatBatched call —
+// cutting the SLOT order instead put one member of each of ~685 batches in every chunk and drove
+// members/call to 2.2 at production scale, job 14391094); each chunk's element total matches the
+// blocks it covers; every chunk except a lone oversized block stays within budget; and the
+// applications are exactly the batch members, in batch order. These are the properties the
+// chunk-local BufOff, the pointer-offset fill, and runChunk's single-batch assumption depend on.
+func TestAppChunks(t *testing.T) {
 	slot := func(rows, cols int) jiiSlot { return jiiSlot{rows: rows, cols: cols} }
+	batch := func(trans bool, blocks ...int) backend.Batch {
+		return backend.Batch{Trans: trans, Blocks: blocks}
+	}
 
 	cases := []struct {
-		name   string
-		slots  []jiiSlot
-		budget int
+		name    string
+		slots   []jiiSlot
+		batches []backend.Batch
+		owned   [][]int
+		budget  int
 	}{
-		{"empty", nil, 10},
-		{"single", []jiiSlot{slot(3, 3)}, 100},
-		{"one-oversized-block", []jiiSlot{slot(20, 20)}, 10}, // 400 > budget: its own chunk
-		{"exact-fit", []jiiSlot{slot(2, 2), slot(2, 2), slot(2, 2)}, 4},
-		{"splits", []jiiSlot{slot(3, 3), slot(3, 3), slot(3, 3), slot(3, 3)}, 20}, // 9 each
-		{"oversized-midstream", []jiiSlot{slot(2, 2), slot(10, 10), slot(2, 2)}, 8},
+		{name: "empty", budget: 10},
+		{
+			name:    "single",
+			slots:   []jiiSlot{slot(3, 3)},
+			batches: []backend.Batch{batch(false, 0)},
+			budget:  100,
+		},
+		{
+			name:    "one-oversized-block", // 400 > budget: its own chunk
+			slots:   []jiiSlot{slot(20, 20)},
+			batches: []backend.Batch{batch(false, 0)},
+			budget:  10,
+		},
+		{
+			name:    "exact-fit",
+			slots:   []jiiSlot{slot(2, 2), slot(2, 2), slot(2, 2)},
+			batches: []backend.Batch{batch(false, 0, 1, 2)},
+			budget:  4,
+		},
+		{
+			name:    "splits-within-one-batch", // 9 each, budget 20 -> 2 per chunk
+			slots:   []jiiSlot{slot(3, 3), slot(3, 3), slot(3, 3), slot(3, 3)},
+			batches: []backend.Batch{batch(false, 0, 1, 2, 3)},
+			budget:  20,
+		},
+		{
+			name:    "oversized-midstream",
+			slots:   []jiiSlot{slot(2, 2), slot(10, 10), slot(2, 2)},
+			batches: []backend.Batch{batch(false, 0, 1, 2)},
+			budget:  8,
+		},
+		{
+			// Two batches that would comfortably share a chunk by budget alone: the cut must
+			// still fall on the boundary, because runChunk issues one Trans per chunk.
+			name:    "batch-boundary-forces-a-cut",
+			slots:   []jiiSlot{slot(1, 1), slot(1, 1)},
+			batches: []backend.Batch{batch(false, 0, 1), batch(true, 0, 1)},
+			budget:  1000,
+		},
+		{
+			// The -mgpu case: a device sees only the members it owns, and an entirely unowned
+			// batch contributes no chunk at all.
+			name:    "owned-subset-skips-empty-batches",
+			slots:   []jiiSlot{slot(2, 2), slot(2, 2), slot(2, 2)},
+			batches: []backend.Batch{batch(false, 0, 1, 2), batch(true, 0, 1, 2)},
+			owned:   [][]int{{1}, {}},
+			budget:  1000,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			chunks := computeChunks(tc.slots, tc.budget)
+			p := &jiiBatchPlan{slots: tc.slots, batches: tc.batches}
+			apps, chunks := p.appChunks(tc.owned, tc.budget)
 
-			if len(tc.slots) == 0 {
-				if chunks != nil {
-					t.Fatalf("empty slots: got %d chunks, want none", len(chunks))
+			// The applications must be exactly the (owned) batch members, batch by batch, in each
+			// batch's own order — the order the device fill SoA is built in.
+			var wantApps []int32
+			for bi := range tc.batches {
+				mem := tc.batches[bi].Blocks
+				if tc.owned != nil {
+					mem = tc.owned[bi]
+				}
+				for _, si := range mem {
+					wantApps = append(wantApps, int32(si))
+				}
+			}
+			if len(apps) != len(wantApps) {
+				t.Fatalf("got %d applications, want %d", len(apps), len(wantApps))
+			}
+			for i := range apps {
+				if apps[i] != wantApps[i] {
+					t.Fatalf("application %d: got slot %d, want %d", i, apps[i], wantApps[i])
+				}
+			}
+
+			if len(wantApps) == 0 {
+				if apps != nil || chunks != nil {
+					t.Fatalf("no applications: got %d apps / %d chunks, want none", len(apps), len(chunks))
 				}
 				return
 			}
@@ -280,17 +352,39 @@ func TestComputeChunks(t *testing.T) {
 						i, chunks[i].lo, chunks[i-1].hi)
 				}
 			}
-			if last := chunks[len(chunks)-1].hi; last != len(tc.slots) {
-				t.Fatalf("last chunk ends at %d, want %d", last, len(tc.slots))
+			if last := chunks[len(chunks)-1].hi; last != len(apps) {
+				t.Fatalf("last chunk ends at %d, want %d", last, len(apps))
+			}
+
+			// Every application's batch, recovered independently from the member lists.
+			batchOf := make([]int, len(apps))
+			at := 0
+			for bi := range tc.batches {
+				mem := tc.batches[bi].Blocks
+				if tc.owned != nil {
+					mem = tc.owned[bi]
+				}
+				for range mem {
+					batchOf[at] = bi
+					at++
+				}
 			}
 
 			for i, ch := range chunks {
 				if ch.hi <= ch.lo {
 					t.Fatalf("chunk %d is empty: [%d,%d)", i, ch.lo, ch.hi)
 				}
+				// THE invariant: one batch per chunk.
+				for e := ch.lo; e < ch.hi; e++ {
+					if batchOf[e] != ch.batch {
+						t.Fatalf("chunk %d claims batch %d but application %d belongs to batch %d",
+							i, ch.batch, e, batchOf[e])
+					}
+				}
 				sum := 0
-				for _, s := range tc.slots[ch.lo:ch.hi] {
-					sum += s.rows * s.cols
+				for e := ch.lo; e < ch.hi; e++ {
+					sl := tc.slots[apps[e]]
+					sum += sl.rows * sl.cols
 				}
 				if sum != ch.elems {
 					t.Errorf("chunk %d elems %d, recomputed %d", i, ch.elems, sum)
@@ -303,4 +397,95 @@ func TestComputeChunks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAppChunksCoverEveryApplicationOnRealSectors is the whole-plan counterpart: on the real h2o
+// sectors, with a budget small enough to force many chunks, every planned block must be applied
+// exactly as many times as PlanBatches says (once on the block diagonal, twice otherwise), each
+// chunk must stay inside one batch, and the per-device split must partition — not duplicate or
+// drop — the applications across partitions.
+func TestAppChunksCoverEveryApplicationOnRealSectors(t *testing.T) {
+	h2oSectors(t, func(spin Spin, sym int, sp *Space, ints *integrals.Store, eps []float64, be backend.Backend) {
+		mx := New(sp, ints, eps, be)
+		p := mx.buildJIIBatchPlan()
+		if len(p.slots) == 0 {
+			return
+		}
+
+		// Force many chunks: a budget of one element cuts after every block.
+		apps, chunks := p.appChunks(nil, 1)
+
+		want := map[int]int{} // slot -> number of applications PlanBatches asks for
+		for _, bt := range p.batches {
+			for _, si := range bt.Blocks {
+				want[si]++
+			}
+		}
+		got := map[int]int{}
+		for _, si := range apps {
+			got[int(si)]++
+		}
+		for si, n := range want {
+			if got[si] != n {
+				t.Fatalf("spin=%v sym=%d: slot %d applied %d times, plan asks for %d",
+					spin, sym, si, got[si], n)
+			}
+		}
+		if len(got) != len(want) {
+			t.Fatalf("spin=%v sym=%d: %d slots applied, plan covers %d", spin, sym, len(got), len(want))
+		}
+
+		covered := 0
+		for _, ch := range chunks {
+			if ch.batch < 0 || ch.batch >= len(p.batches) {
+				t.Fatalf("chunk names batch %d, plan has %d", ch.batch, len(p.batches))
+			}
+			covered += ch.hi - ch.lo
+		}
+		if covered != len(apps) {
+			t.Fatalf("spin=%v sym=%d: chunks cover %d applications, want %d", spin, sym, covered, len(apps))
+		}
+
+		// Two partitions split at a group boundary: the per-device application lists must be a
+		// partition of the whole-plan list.
+		bounds := sp.PartitionBounds(2)
+		perDev := map[int]int{}
+		for d := range 2 {
+			members := make([][]int, len(p.batches))
+			for bi, bt := range p.batches {
+				for _, si := range bt.Blocks {
+					off := p.slots[si].rowOff
+					if bt.Trans {
+						off = p.slots[si].colOff
+					}
+					if ownerOf(bounds, off) == d {
+						members[bi] = append(members[bi], si)
+					}
+				}
+			}
+			dApps, dChunks := p.appChunks(members, JIIFillBudgetElems)
+			for _, si := range dApps {
+				perDev[int(si)]++
+			}
+			for _, ch := range dChunks {
+				for e := ch.lo; e < ch.hi; e++ {
+					si := int(dApps[e])
+					off := p.slots[si].rowOff
+					if p.batches[ch.batch].Trans {
+						off = p.slots[si].colOff
+					}
+					if ownerOf(bounds, off) != d {
+						t.Fatalf("spin=%v sym=%d: device %d fills slot %d owned by %d",
+							spin, sym, d, si, ownerOf(bounds, off))
+					}
+				}
+			}
+		}
+		for si, n := range want {
+			if perDev[si] != n {
+				t.Fatalf("spin=%v sym=%d: slot %d applied %d times across partitions, want %d",
+					spin, sym, si, perDev[si], n)
+			}
+		}
+	})
 }

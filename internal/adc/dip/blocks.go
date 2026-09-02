@@ -2,9 +2,14 @@ package dip
 
 import (
 	"math"
+	"sync"
+
+	"gonum.org/v1/gonum/blas"
+	"gonum.org/v1/gonum/blas/blas64"
 
 	"github.com/leiaSQ/ADCgo/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // Spin-coupling coefficients from the reference (singlet.cpp:4-12).
@@ -61,6 +66,11 @@ type blocks interface {
 	// callers use them to map a 3h1p config's virtual position to its orbital.
 	virSym(c Config) int
 	virOrbs(sym int) []int
+
+	// ensureSecondOrder materializes the W/U tables the 2h/2h elements read. Callers hoist it
+	// out of a worker pool before evaluating those elements, so the table build (itself
+	// parallel) gets the whole pool rather than nesting inside one worker.
+	ensureSecondOrder()
 }
 
 // base holds the SCF/integral data shared by the singlet and triplet block
@@ -69,6 +79,197 @@ type base struct {
 	sp   *Space
 	ints *integrals.Store
 	eps  []float64 // orbital energies (absolute index)
+
+	// sec is a POINTER so that copying a base (matvec.go New does `&singlet{b}`) copies the
+	// handle, not the sync.Once inside it.
+	sec *secondOrder
+}
+
+// secondOrder holds the precomputed second-order W and U tables the 2h/2h elements are built
+// from, plus the per-symmetry virtual-group lookups the block builders would otherwise rebuild
+// on every call.
+//
+// WHY. Both W and U were evaluated inside every one of the main²/2 element builds, each an
+// nvir²/2 sweep over virtual pairs. At the production system's main=1711, nvir=154, nocc=58 that is ~1.15e12
+// strided ERI loads on ONE core — hours of single-threaded work on the critical path of the
+// first apply, in a block that matvec.go's comment waves off as "small next to the satellite
+// region". It is small in DIMENSION, not in cost.
+//
+// W(i,k) depends only on an occupied PAIR — 3,364 distinct values for the production system — so it is
+// tabulated once instead of recomputed per element (~60× fewer evaluations, and the sweep
+// parallelizes over the table). U genuinely depends on all four occupied indices, but it
+// factorizes exactly into a GEMM; see buildSecondOrder.
+type secondOrder struct {
+	once sync.Once
+
+	wTab         []float64 // nocc·nocc, indexed i*nocc+k
+	uTab         []float64 // npair·npair over canonical occupied pairs (pairIndex)
+	pairI, pairJ []int32
+	npair        int
+
+	virOrbs  [][]int     // per symmetry group, absolute virtual orbitals in block order
+	diagEner [][]float64 // per symmetry group, that group's virtual orbital energies
+}
+
+// newSecondOrder builds the cheap per-symmetry tables eagerly; W and U are built on first use
+// (they cost real work and the satellite-only paths never touch them).
+func newSecondOrder(sp *Space, eps []float64) *secondOrder {
+	// Group count exactly as integrals.Store derives it: the largest 0-based irrep label
+	// present, rounded up to a power of two. Space.orbSym holds the 1-based FCIDUMP labels, so
+	// go through irrep(); with symmetry off it returns 0 for every orbital and nsym is 1.
+	maxLabel := 0
+	for o := range sp.Norb {
+		if lab := sp.irrep(o); lab > maxLabel {
+			maxLabel = lab
+		}
+	}
+	nsym := 1
+	for nsym < maxLabel+1 {
+		nsym <<= 1
+	}
+	sec := &secondOrder{
+		virOrbs:  make([][]int, nsym),
+		diagEner: make([][]float64, nsym),
+	}
+	for σ := range nsym {
+		for rp := range sp.Nvir {
+			orb := sp.Nocc + rp
+			if sp.irrep(orb) != σ {
+				continue
+			}
+			sec.virOrbs[σ] = append(sec.virOrbs[σ], orb)
+			sec.diagEner[σ] = append(sec.diagEner[σ], eps[orb])
+		}
+	}
+	return sec
+}
+
+// pairIndex maps a canonical occupied pair (a ≥ b) to its slot in uTab's square. Every 2h config
+// stores its pair that way — |ii⟩ as Occ={i,i}, |ij⟩ as Occ={i,j} with i>j (config.go) — so no
+// caller ever needs to reorder, which matters because the triplet's vminus kernel is
+// ANTISYMMETRIC under the swap.
+func pairIndex(a, b int) int { return a*(a+1)/2 + b }
+
+// ensureSecondOrder builds the W/U tables once, whichever goroutine asks first.
+func (b *base) ensureSecondOrder() { b.sec.once.Do(b.buildSecondOrder) }
+
+// wAt is Σ_{r≥s} wTerm(i,k,s,r) — the second-order W double sum for one occupied pair.
+func (b *base) wAt(i, k int) float64 { return b.sec.wTab[i*b.nocc()+k] }
+
+// uAt is Σ_{r≥s} uTerm(i,j,k,l,s,r) over the sector's symmetry channel.
+func (b *base) uAt(i, j, k, l int) float64 {
+	return b.sec.uTab[pairIndex(i, j)*b.sec.npair+pairIndex(k, l)]
+}
+
+// buildSecondOrder materializes wTab and uTab.
+//
+// W is a straight memoization: the (r,s) sweep per pair is byte-for-byte the loop the element
+// builders ran, so each table entry is bit-identical to what they computed — only the number of
+// times it is computed changes.
+//
+// U IS A GEMM. Write x = ε_r+ε_s, e_p = ε_i+ε_j for the row pair and e_q = ε_k+ε_l for the
+// column pair. uTerm's energy factor is
+//
+//	[x − ½(e_p+e_q)] / [(x−e_p)(x−e_q)]
+//
+// and since x − ½(e_p+e_q) = ½[(x−e_p) + (x−e_q)], that is exactly ½[1/(x−e_q) + 1/(x−e_p)] —
+// a SUM OF A ROW-ONLY AND A COLUMN-ONLY FACTOR, which is what makes the double sum separable.
+// The integral factor is already separable: vplus(r,i,s,j)·vplus(r,k,s,l) is P_p[t]·P_q[t] over
+// the flattened (r,s) list t. So with
+//
+//	X[p,t] = P_p[t]                        (P = vplus for singlet, vminus for triplet)
+//	Y[p,t] = w_t · P_p[t] / (x_t − e_p)    (w_t = ½ on the r==s diagonal, else 1)
+//
+// the whole table is U = ½(Y·Xᵀ + X·Yᵀ) = ½(M + Mᵀ) with M = Y·Xᵀ — ONE dgemm. At production scale
+// that is 2·1711²·11,935 ≈ 7.0e10 flops in place of ~7.0e10 scattered ERI loads with two
+// divisions each, i.e. ~1,700× fewer integral reads.
+//
+// The (r,s) list is the sector's symmetry channel σ_rs == Sym, which is what all three element
+// builders' guards reduce to: ijKL gates on σ_rs == σ_ij and addIJ admits a config only when
+// σ_ij == Sym, while iiJJ/ijKK gate on σ_rs == 0 and addII admits their family only when
+// Sym == 0.
+//
+// This reassociates the sum, so U is no longer bit-identical to the per-element form — it is
+// equal to ~1 ulp per term. TestSecondOrderTablesMatchDirectSums pins it against the direct
+// double sums, and the theADCcode-matched reference spectra bound the end-to-end effect.
+func (b *base) buildSecondOrder() {
+	nocc, norb := b.nocc(), b.norb()
+	sec := b.sec
+
+	// --- W(i,k): pure memoization, same sweep order as the element builders. ---
+	sec.wTab = make([]float64, nocc*nocc)
+	parallel.HeavyRows(nocc*nocc, func(t int) {
+		i, k := t/nocc, t%nocc
+		var acc float64
+		for r := nocc; r < norb; r++ {
+			for s := nocc; s <= r; s++ {
+				acc += b.wTerm(i, k, s, r)
+			}
+		}
+		sec.wTab[t] = acc
+	})
+
+	// --- U(p,q): the GEMM. ---
+	npair := nocc * (nocc + 1) / 2
+	sec.npair = npair
+	sec.uTab = make([]float64, npair*npair)
+	sec.pairI, sec.pairJ = make([]int32, npair), make([]int32, npair)
+	for a := range nocc {
+		for c := 0; c <= a; c++ {
+			sec.pairI[pairIndex(a, c)], sec.pairJ[pairIndex(a, c)] = int32(a), int32(c)
+		}
+	}
+
+	var rsR, rsS []int32
+	var rsW, rsX []float64
+	for r := nocc; r < norb; r++ {
+		for s := nocc; s <= r; s++ {
+			if symProduct(b.symOrb(r), b.symOrb(s)) != b.sp.Sym {
+				continue
+			}
+			w := 1.0
+			if r == s {
+				w = 0.5
+			}
+			rsR, rsS = append(rsR, int32(r)), append(rsS, int32(s))
+			rsW = append(rsW, w)
+			rsX = append(rsX, b.energy(r)+b.energy(s))
+		}
+	}
+	nt := len(rsR)
+	if nt == 0 {
+		return // no (r,s) pair in this sector's channel: every U term was gated out
+	}
+
+	x := make([]float64, npair*nt)
+	y := make([]float64, npair*nt)
+	minus := b.sp.Spin == Triplet
+	parallel.HeavyRows(npair, func(p int) {
+		i, j := int(sec.pairI[p]), int(sec.pairJ[p])
+		ep := b.energy(i) + b.energy(j)
+		xr, yr := x[p*nt:(p+1)*nt], y[p*nt:(p+1)*nt]
+		for t := range nt {
+			r, s := int(rsR[t]), int(rsS[t])
+			v := b.vplus(r, i, s, j)
+			if minus {
+				v = b.vminus(r, i, s, j)
+			}
+			xr[t] = v
+			yr[t] = rsW[t] * v / (rsX[t] - ep)
+		}
+	})
+
+	m := make([]float64, npair*npair)
+	blas64.Gemm(blas.NoTrans, blas.Trans, 1,
+		blas64.General{Rows: npair, Cols: nt, Stride: nt, Data: y},
+		blas64.General{Rows: npair, Cols: nt, Stride: nt, Data: x},
+		0, blas64.General{Rows: npair, Cols: npair, Stride: npair, Data: m})
+
+	parallel.HeavyRows(npair, func(p int) {
+		for q := range npair {
+			sec.uTab[p*npair+q] = 0.5 * (m[p*npair+q] + m[q*npair+p])
+		}
+	})
 }
 
 func (b *base) energy(o int) float64 { return b.eps[o] }
@@ -103,25 +304,25 @@ func (b *base) virSym(c Config) int { return b.symOrb(b.nocc() + c.Vir) }
 // block row/column order (position a ↔ virOrbs(sym)[a]). The matrix-free satellite path
 // maps a 3h1p config's virtual position to its absolute orbital to recompute a block
 // entry from the ERIs (satelem.go); it is the ordering diagEnergies also uses.
+// The returned slice is SHARED and must not be mutated: it was allocated per call and rebuilt
+// from scratch on every one, including once per block application in the device SoA marshal.
 func (b *base) virOrbs(sym int) []int {
-	pos := b.ints.VirGroup(sym)
-	out := make([]int, len(pos))
-	for i, p := range pos {
-		out[i] = b.nocc() + p
+	if sym < 0 || sym >= len(b.sec.virOrbs) {
+		return nil // matches integrals.Store.virGroup's out-of-range behaviour
 	}
-	return out
+	return b.sec.virOrbs[sym]
 }
 
 // diagEnergies is the vector of virtual-orbital energies for symmetry group sym,
 // ordered to match that group's building-block rows (adc2_dip_blocks.cpp:36-42).
+// The returned slice is SHARED and must not be mutated. It used to be append-grown from a full
+// nvir scan on every call, i.e. inside every diagonal jiiLKK/ijkLMN build — which under the
+// matrix-free path is once per block PER MAT-VEC.
 func (b *base) diagEnergies(sym int) []float64 {
-	var d []float64
-	for rp := range b.nvir() {
-		if b.symOrb(b.nocc()+rp) == sym {
-			d = append(d, b.eps[b.nocc()+rp])
-		}
+	if sym < 0 || sym >= len(b.sec.diagEner) {
+		return nil
 	}
-	return d
+	return b.sec.diagEner[sym]
 }
 
 // Satellite gate/shape helpers. The nonzero (Kronecker-δ) guard conditions are

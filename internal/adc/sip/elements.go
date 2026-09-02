@@ -98,37 +98,80 @@ func (e *elements) c11_3sums(i, j int) (cij, fij, fji float64) {
 	ei, ej := ep[i], ep[j]
 	no, nb := e.nocc, e.norb
 
-	// C_ij^(A)
-	for a := no; a < nb; a++ {
-		for b := no; b < nb; b++ {
-			for l := range no {
-				if e.so(a)^e.so(b)^e.so(l) != e.so(i) {
+	// C_ij^(A) — the dominant term: O(nvir^4 * nocc) per element, and for a C1 molecule the
+	// symmetry filters prune nothing, so the production system realizes all ~3.3e10 innermost iterations.
+	//
+	// Restructured by lifting l OUTSIDE (a,b). Everything the inner (c,d) loop reads that does
+	// not depend on (a,b) — v(c,d,j,l), v(c,d,l,j), both energy denominators and the (c,d)
+	// symmetry product — is invariant once l is fixed, yet the original a,b,l ordering re-read
+	// and re-divided all of it nvir^2 times over. It is precomputed per l into nvir^2 tables
+	// instead (154^2 float64 = 190 KB each, L2-resident).
+	//
+	// This is a memory-latency fix more than an arithmetic one. The ERI store is
+	// eri[((p*n+q)*n+r)*n+s] with n = NORB, so every one of the four v(c,d,..) reads strides by
+	// n over the innermost index d — a fresh cache line each iteration. Two of those four
+	// strided loads become compact table reads, and all three divisions leave the inner loop
+	// (0.25/exe splits into an (a,b)-invariant factor times a tabulated one; fji's divisor does
+	// not depend on (c,d) at all, so it divides once per (a,b) instead of per (c,d)).
+	//
+	// NOT bit-identical: the summation order changes and the divisions are re-associated, so
+	// results move at the 1e-16 relative level. Validated against theADCcode's reference gates
+	// rather than by byte comparison — see TestSIPMatchedReference and the validate package.
+	nv := nb - no
+	vjl := make([]float64, nv*nv) // v(c,d,j,l)
+	vlj := make([]float64, nv*nv) // v(c,d,l,j)
+	gj := make([]float64, nv*nv)  // 1/(ec+ed-el-ej)
+	gi := make([]float64, nv*nv)  // 1/(ec+ed-el-ei)
+	scd := make([]int, nv*nv)     // so(c)^so(d)
+	for l := range no {
+		el := ep[l]
+		for c := no; c < nb; c++ {
+			soc, ec := e.so(c), ep[c]
+			for d := no; d < nb; d++ {
+				idx := (c-no)*nv + (d - no)
+				vjl[idx] = e.v(c, d, j, l)
+				vlj[idx] = e.v(c, d, l, j)
+				dcd := ec + ep[d] - el
+				gj[idx] = 1 / (dcd - ej)
+				gi[idx] = 1 / (dcd - ei)
+				scd[idx] = soc ^ e.so(d)
+			}
+		}
+		for a := no; a < nb; a++ {
+			soa, ea := e.so(a), ep[a]
+			for b := no; b < nb; b++ {
+				if soa^e.so(b)^e.so(l) != e.so(i) {
 					continue
 				}
-				ea, eb, el := ep[a], ep[b], ep[l]
+				eb := ep[b]
 				vabil := e.v(a, b, i, l)
 				vabli := e.v(a, b, l, i)
+				pre := 0.25 / (ea + eb - el - ei)
+				sab := soa ^ e.so(b)
+				var accC, accF float64
 				for c := no; c < nb; c++ {
+					base := (c - no) * nv
 					for d := no; d < nb; d++ {
-						if e.so(c)^e.so(d) != e.so(a)^e.so(b) {
+						idx := base + (d - no)
+						if scd[idx] != sab {
 							continue
 						}
-						ec, ed := ep[c], ep[d]
-						vcdjl := e.v(c, d, j, l)
-						vcdlj := e.v(c, d, l, j)
+						vcdjl := vjl[idx]
+						vcdlj := vlj[idx]
 						vcdab := e.v(c, d, a, b)
 						vcdba := e.v(c, d, b, a)
-						exe := (ea + eb - el - ei) * (ec + ed - el - ej)
-						vvv := 0.25 / exe * (2*vabil*vcdjl*vcdab -
+						vvv := pre * gj[idx] * (2*vabil*vcdjl*vcdab -
 							vabil*vcdjl*vcdba - vabil*vcdlj*vcdab +
 							2*vabil*vcdlj*vcdba - vabli*vcdjl*vcdab +
 							2*vabli*vcdjl*vcdba + 2*vabli*vcdlj*vcdab -
 							vabli*vcdlj*vcdba)
-						cij += vvv
-						fij += vvv / (ec + ed - el - ei)
-						fji += vvv / (ea + eb - el - ej)
+						accC += vvv
+						accF += vvv * gi[idx]
 					}
 				}
+				cij += accC
+				fij += accF
+				fji += accC / (ea + eb - el - ej)
 			}
 		}
 	}
@@ -168,48 +211,102 @@ func (e *elements) c11_3sums(i, j int) (cij, fij, fji float64) {
 		}
 	}
 
-	// C_ij^(C)
-	for a := no; a < nb; a++ {
-		for b := no; b < nb; b++ {
-			for k := range no {
-				if e.so(a)^e.so(b)^e.so(k) != e.so(i) {
-					continue
+	// C_ij^(C) — restructured on the same principle as C^(A), and with more to gain: of the six
+	// ERI reads in the innermost (l,m) loop, FOUR — v(l,m,k,i), v(l,m,i,k), v(l,m,k,j),
+	// v(l,m,j,k) — depend only on (l,m,k) and the fixed (i,j), never on (a,b), yet the original
+	// a,b,k ordering recomputed them for every one of the nvir^2 = 23,716 (a,b) pairs. The other
+	// two, v(a,b,l,m) and v(a,b,m,l), do not depend on k and were recomputed nocc times.
+	//
+	// Tabulating both leaves the innermost loop with NO ERI access at all — it reads a 6 MB
+	// per-k table and an 81 KB per-(a,b) table, against ~28e9 strided loads into the 16 GB
+	// tensor before. The (l,m) symmetry filter does not depend on k either, so it is resolved
+	// once per (a,b) into a surviving-pair list, which also removes the branch from the loop.
+	//
+	// Same caveat as C^(A): re-associated divisions and a changed summation order, so this is
+	// validated against the reference gates, not by byte comparison.
+	{
+		nlm := no * no
+		vlmki := make([]float64, no*nlm) // [k][l][m]
+		vlmik := make([]float64, no*nlm)
+		vlmkj := make([]float64, no*nlm)
+		vlmjk := make([]float64, no*nlm)
+		for k := range no {
+			kb := k * nlm
+			for l := range no {
+				for m := range no {
+					idx := kb + l*no + m
+					vlmki[idx] = e.v(l, m, k, i)
+					vlmik[idx] = e.v(l, m, i, k)
+					vlmkj[idx] = e.v(l, m, k, j)
+					vlmjk[idx] = e.v(l, m, j, k)
 				}
-				ea, eb, ek := ep[a], ep[b], ep[k]
-				vabkj := e.v(a, b, k, j)
-				vabjk := e.v(a, b, j, k)
-				vabki := e.v(a, b, k, i)
-				vabik := e.v(a, b, i, k)
+			}
+		}
+
+		ablm := make([]float64, nlm)
+		abml := make([]float64, nlm)
+		dlm := make([]float64, nlm) // 1/(ea+eb-el-em)
+		pairs := make([]int32, 0, nlm)
+		for a := no; a < nb; a++ {
+			soa, ea := e.so(a), ep[a]
+			for b := no; b < nb; b++ {
+				eb := ep[b]
+				sab := soa ^ e.so(b)
+				pairs = pairs[:0]
 				for l := range no {
+					el := ep[l]
 					for m := range no {
-						if e.so(l)^e.so(m) != e.so(a)^e.so(b) {
+						if e.so(l)^e.so(m) != sab {
 							continue
 						}
-						el, em := ep[l], ep[m]
-						vablm := e.v(a, b, l, m)
-						vabml := e.v(a, b, m, l)
-						vlmki := e.v(l, m, k, i)
-						vlmik := e.v(l, m, i, k)
-						vlmkj := e.v(l, m, k, j)
-						vlmjk := e.v(l, m, j, k)
-						exe := (ea + eb - el - em) * (ea + eb - ek - ej)
-						vvv := 0.25 / exe * (2*vablm*vabkj*vlmki -
-							vablm*vabkj*vlmik - vablm*vabjk*vlmki +
-							2*vablm*vabjk*vlmik - vabml*vabkj*vlmki +
-							2*vabml*vabkj*vlmik + 2*vabml*vabjk*vlmki -
-							vabml*vabjk*vlmik)
-						cij += vvv
-						fij += vvv / (ea + eb - ei - ek)
-						// h.c. part
-						exe2 := (ea + eb - el - em) * (ea + eb - ek - ei)
-						vvv2 := 0.25 / exe2 * (2*vablm*vabki*vlmkj -
-							vablm*vabki*vlmjk - vablm*vabik*vlmkj +
-							2*vablm*vabik*vlmjk - vabml*vabki*vlmkj +
-							2*vabml*vabki*vlmjk + 2*vabml*vabik*vlmkj -
-							vabml*vabik*vlmjk)
-						cij += vvv2
-						fji += vvv2 / (ea + eb - ej - ek)
+						lm := l*no + m
+						pairs = append(pairs, int32(lm))
+						ablm[lm] = e.v(a, b, l, m)
+						abml[lm] = e.v(a, b, m, l)
+						dlm[lm] = 1 / (ea + eb - el - ep[m])
 					}
+				}
+				if len(pairs) == 0 {
+					continue
+				}
+				for k := range no {
+					if sab^e.so(k) != e.so(i) {
+						continue
+					}
+					ek := ep[k]
+					vabkj := e.v(a, b, k, j)
+					vabjk := e.v(a, b, j, k)
+					vabki := e.v(a, b, k, i)
+					vabik := e.v(a, b, i, k)
+					pre1 := 0.25 / (ea + eb - ek - ej)
+					pre2 := 0.25 / (ea + eb - ek - ei)
+					kb := k * nlm
+					var accC, accF, accG float64
+					for _, pk := range pairs {
+						lm := int(pk)
+						idx := kb + lm
+						vablm, vabml, d := ablm[lm], abml[lm], dlm[lm]
+						wki, wik := vlmki[idx], vlmik[idx]
+						wkj, wjk := vlmkj[idx], vlmjk[idx]
+						vvv := pre1 * d * (2*vablm*vabkj*wki -
+							vablm*vabkj*wik - vablm*vabjk*wki +
+							2*vablm*vabjk*wik - vabml*vabkj*wki +
+							2*vabml*vabkj*wik + 2*vabml*vabjk*wki -
+							vabml*vabjk*wik)
+						accC += vvv
+						accF += vvv
+						// h.c. part
+						vvv2 := pre2 * d * (2*vablm*vabki*wkj -
+							vablm*vabki*wjk - vablm*vabik*wkj +
+							2*vablm*vabik*wjk - vabml*vabki*wkj +
+							2*vabml*vabki*wjk + 2*vabml*vabik*wkj -
+							vabml*vabik*wjk)
+						accC += vvv2
+						accG += vvv2
+					}
+					cij += accC
+					fij += accF / (ea + eb - ei - ek)
+					fji += accG / (ea + eb - ej - ek)
 				}
 			}
 		}

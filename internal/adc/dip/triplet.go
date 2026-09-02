@@ -17,23 +17,18 @@ func (t *triplet) ijKL(row, col Config) (float64, bool) {
 	i, j := row.Occ[0], row.Occ[1]
 	k, l := col.Occ[0], col.Occ[1]
 	deltaIK, deltaJK, deltaJL := i == k, j == k, j == l
-	var W, U float64
-	for r := t.nocc(); r < t.norb(); r++ {
-		for ss := t.nocc(); ss <= r; ss++ {
-			if deltaIK && t.symOrb(j) == t.symOrb(l) {
-				W += t.wTerm(j, l, ss, r)
-			}
-			if deltaJK && t.symOrb(i) == t.symOrb(l) {
-				W -= t.wTerm(i, l, ss, r)
-			}
-			if deltaJL && t.symOrb(i) == t.symOrb(k) {
-				W += t.wTerm(i, k, ss, r)
-			}
-			if symProduct(t.symOrb(i), t.symOrb(j)) == symProduct(t.symOrb(r), t.symOrb(ss)) {
-				U += t.uTerm(i, j, k, l, ss, r, false)
-			}
-		}
+	t.ensureSecondOrder()
+	var W float64
+	if deltaIK && t.symOrb(j) == t.symOrb(l) {
+		W += t.wAt(j, l)
 	}
+	if deltaJK && t.symOrb(i) == t.symOrb(l) {
+		W -= t.wAt(i, l)
+	}
+	if deltaJL && t.symOrb(i) == t.symOrb(k) {
+		W += t.wAt(i, k)
+	}
+	U := t.uAt(i, j, k, l)
 	el := t.vminus(i, k, j, l) + W - U
 	if deltaIK && deltaJL {
 		el += -(t.energy(i) + t.energy(j))

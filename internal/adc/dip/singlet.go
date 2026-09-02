@@ -11,20 +11,11 @@ type singlet struct{ base }
 func (s *singlet) iiJJ(row, col Config) (float64, bool) {
 	i, j := row.Occ[0], col.Occ[0]
 	deltaIJ := i == j
-	var W, U float64
-	for r := s.nocc(); r < s.norb(); r++ {
-		for ss := s.nocc(); ss <= r; ss++ {
-			if deltaIJ {
-				W += s.wTerm(i, i, ss, r)
-			}
-			if s.symOrb(r) == s.symOrb(ss) {
-				U += s.uTerm(i, i, j, j, ss, r, true)
-			}
-		}
-	}
+	s.ensureSecondOrder()
+	U := s.uAt(i, i, j, j)
 	el := s.v(i, j, i, j) - 0.5*U
 	if deltaIJ {
-		el += 2 * (W - s.energy(i))
+		el += 2 * (s.wAt(i, i) - s.energy(i))
 	}
 	return el, true
 }
@@ -33,18 +24,12 @@ func (s *singlet) iiJJ(row, col Config) (float64, bool) {
 func (s *singlet) ijKK(row, col Config) (float64, bool) {
 	i, j, k := row.Occ[0], row.Occ[1], col.Occ[0]
 	deltaIK, deltaJK := i == k, j == k
-	var W, U float64
-	for r := s.nocc(); r < s.norb(); r++ {
-		for ss := s.nocc(); ss <= r; ss++ {
-			if deltaIK || deltaJK {
-				W += s.wTerm(i, j, ss, r)
-			}
-			if s.symOrb(r) == s.symOrb(ss) {
-				U += s.uTerm(i, j, k, k, ss, r, true)
-			}
-		}
+	s.ensureSecondOrder()
+	var W float64
+	if deltaIK || deltaJK {
+		W = s.wAt(i, j)
 	}
-	el := (s.v(i, k, j, k) - 0.5*U + W) * sqrt2
+	el := (s.v(i, k, j, k) - 0.5*s.uAt(i, j, k, k) + W) * sqrt2
 	return el, true
 }
 
@@ -53,24 +38,18 @@ func (s *singlet) ijKL(row, col Config) (float64, bool) {
 	i, j := row.Occ[0], row.Occ[1]
 	k, l := col.Occ[0], col.Occ[1]
 	deltaIK, deltaJK, deltaJL := i == k, j == k, j == l
-	var W, U float64
-	for r := s.nocc(); r < s.norb(); r++ {
-		for ss := s.nocc(); ss <= r; ss++ {
-			if deltaIK && s.symOrb(j) == s.symOrb(l) {
-				W += s.wTerm(j, l, ss, r)
-			}
-			if deltaJK && s.symOrb(i) == s.symOrb(l) {
-				W += s.wTerm(i, l, ss, r)
-			}
-			if deltaJL && s.symOrb(i) == s.symOrb(k) {
-				W += s.wTerm(i, k, ss, r)
-			}
-			if symProduct(s.symOrb(i), s.symOrb(j)) == symProduct(s.symOrb(r), s.symOrb(ss)) {
-				U += s.uTerm(i, j, k, l, ss, r, true)
-			}
-		}
+	s.ensureSecondOrder()
+	var W float64
+	if deltaIK && s.symOrb(j) == s.symOrb(l) {
+		W += s.wAt(j, l)
 	}
-	el := s.vplus(i, k, j, l) + W - U
+	if deltaJK && s.symOrb(i) == s.symOrb(l) {
+		W += s.wAt(i, l)
+	}
+	if deltaJL && s.symOrb(i) == s.symOrb(k) {
+		W += s.wAt(i, k)
+	}
+	el := s.vplus(i, k, j, l) + W - s.uAt(i, j, k, l)
 	if deltaIK && deltaJL {
 		el += -(s.energy(i) + s.energy(j))
 	}

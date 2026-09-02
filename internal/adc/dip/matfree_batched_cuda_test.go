@@ -54,9 +54,9 @@ func TestJIIFillDeviceMatchesHost(t *testing.T) {
 		defer bufs.free()
 		bufs.args.ERI, bufs.args.Eps, bufs.args.OrbSym = dERI, dEps, dOsym
 
-		if len(p.chunks) < 2 && len(p.slots) > 1 {
-			t.Fatalf("spin=%v sym=%d: expected multiple chunks at budget=1 (%d slots), got %d",
-				spin, sym, len(p.slots), len(p.chunks))
+		if len(p.chunks) < 2 && len(p.apps) > 1 {
+			t.Fatalf("spin=%v sym=%d: expected multiple chunks at budget=1 (%d applications), got %d",
+				spin, sym, len(p.apps), len(p.chunks))
 		}
 
 		// Materialize chunk by chunk, comparing each chunk's handles to the host block builder.
@@ -68,15 +68,16 @@ func TestJIIFillDeviceMatchesHost(t *testing.T) {
 				t.Fatalf("spin=%v sym=%d: chunk [%d,%d) returned %d handles, want %d",
 					spin, sym, ch.lo, ch.hi, len(mats), ch.hi-ch.lo)
 			}
-			for k, sl := range p.slots[ch.lo:ch.hi] {
+			for k, si := range p.apps[ch.lo:ch.hi] {
+				sl := p.slots[si]
 				want, ok := ref.buildSlot(sl)
 				if !ok {
-					t.Fatalf("spin=%v sym=%d: slot %d has no host block", spin, sym, ch.lo+k)
+					t.Fatalf("spin=%v sym=%d: slot %d has no host block", spin, sym, si)
 				}
 				r, c := mats[k].Dims()
 				if r != want.Rows || c != want.Cols {
 					t.Fatalf("spin=%v sym=%d: slot %d dims %dx%d, host %dx%d",
-						spin, sym, ch.lo+k, r, c, want.Rows, want.Cols)
+						spin, sym, si, r, c, want.Rows, want.Cols)
 				}
 				got := dk.DownloadMat(mats[k])
 				for j := range want.Data {

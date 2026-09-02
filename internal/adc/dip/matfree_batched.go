@@ -6,6 +6,7 @@ import (
 	"unsafe"
 
 	"github.com/leiaSQ/ADCgo/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // matfree_batched.go — the jiiLKK half of the matrix-free satellite apply, routed through
@@ -89,9 +90,11 @@ func (mx *Matrix) buildSlot(s jiiSlot) (backend.Mat, bool) {
 // A var so a test can force many chunks on a small system.
 var JIIFillBudgetElems = 1 << 29 // 4 GiB of float64
 
-// jiiChunk is a contiguous slot range [lo,hi) whose blocks total elems doubles (≤ the budget,
-// except a lone oversized block). The device fill materializes one chunk at a time.
-type jiiChunk struct{ lo, hi, elems int }
+// jiiChunk is a contiguous APPLICATION range [lo,hi) into jiiBatchPlan.apps whose blocks total
+// elems doubles (≤ the budget, except a lone oversized block), every one of them a member of
+// batch `batch`. The device fill materializes one chunk at a time and the GEMM then issues that
+// chunk as exactly ONE batched call — see jiiBatchPlan.apps for why the two are cut together.
+type jiiChunk struct{ lo, hi, elems, batch int }
 
 // satStats counts what a fill+GEMM pass actually issued. It answers the question the wall-clock
 // trace cannot: whether the cost is many narrow GEMM calls or few wide ones.
@@ -110,7 +113,27 @@ type satStats struct {
 type jiiBatchPlan struct {
 	slots   []jiiSlot
 	batches []backend.Batch
-	chunks  []jiiChunk // slot ranges the device fill materializes one at a time
+
+	// apps is the device fill/GEMM order: one entry per BLOCK APPLICATION (an off-diagonal block
+	// is applied twice, as A and as Aᵀ, so it appears twice), listing the slot to materialize.
+	// Applications are grouped by batch, and within a batch in that batch's own ascending member
+	// order. chunks then cuts apps on batch boundaries, so a chunk is a run inside ONE batch and
+	// issues as ONE GemmMatBatched call.
+	//
+	// This ordering is the fix for the measured production pathology (job 14391094): cutting the
+	// SLOT list instead put one member of each of ~685 batches in every fill chunk, so
+	// members/call read 2.2 against a plan whose batches hold ~32,567 members each, and 9.27 M
+	// near-empty batched calls per device per column chunk cost 452 s at 48.7 µs of dispatch
+	// apiece — 0.4% of fp64 peak. satStats existed to detect exactly this, and did.
+	//
+	// The price is that a block appearing in two batches is materialized twice per apply, and
+	// that the device SoA buildJIIDeviceBufs uploads is indexed by application rather than slot.
+	// Under -mgpu both are more than repaid by filling only the applications this device OWNS
+	// (newSatBatchedPerDevice), which the whole-plan fill did nd-fold redundantly: measured on
+	// uracil2W_dz singlet at nd=4, batched calls fall 21.3x (members/call 33.2 -> 706.2) while
+	// the blocks filled fall 2.0x. The single-GPU path pays the 2x with no ownership saving.
+	apps   []int32
+	chunks []jiiChunk
 
 	// stats accumulates over one fillAndRun. Per-plan, and every device holds its own clone, so
 	// the parallel per-device loop writes disjoint counters.
@@ -131,100 +154,161 @@ type jiiBatchPlan struct {
 // byte-identical one: at the production system's 82 M slots that is ~10.5 GB of []jiiSlot each, ~84 GB of host
 // RAM across 8 devices, plus eight identical PlanBatches runs over 164 M block references.
 //
-// The scratch cannot be shared: sa/sb/sc are filled in place by runBatches* while issuing a batch,
-// so two devices running concurrently would overwrite each other's arguments. Splitting the two
-// this way is what makes the per-device loop safe to parallelise.
-func (p *jiiBatchPlan) clone() *jiiBatchPlan {
+// The scratch cannot be shared: sa/sb/sc are filled in place while issuing a batch, so two devices
+// running concurrently would overwrite each other's arguments. Splitting the two this way is what
+// makes the per-device loop safe to parallelise.
+//
+// apps/chunks are per-device too, because each device fills only the applications it owns.
+func (p *jiiBatchPlan) cloneWith(apps []int32, chunks []jiiChunk) *jiiBatchPlan {
 	return &jiiBatchPlan{
 		slots:   p.slots,
 		batches: p.batches,
-		chunks:  p.chunks,
+		apps:    apps,
+		chunks:  chunks,
 		sa:      make([]backend.DeviceMat, len(p.sa)),
 		sb:      make([]backend.BlockView, len(p.sb)),
 		sc:      make([]backend.BlockView, len(p.sc)),
 	}
 }
 
-// computeChunks partitions slots into contiguous ranges each totalling ≤ budget elements (a lone
-// block exceeding budget forms its own chunk — a block cannot be split). The ranges drive both the
-// chunk-local BufOff (buildJIIDeviceBufs) and the fill/GEMM loop, so they must agree by construction.
-func computeChunks(slots []jiiSlot, budget int) []jiiChunk {
-	if len(slots) == 0 {
-		return nil
-	}
-	var chunks []jiiChunk
-	lo, acc := 0, 0
-	for i, s := range slots {
-		e := s.rows * s.cols
-		if i > lo && acc+e > budget { // close the current chunk before this block overflows it
-			chunks = append(chunks, jiiChunk{lo, i, acc})
-			lo, acc = i, 0
+// appChunks flattens the plan's batches into application order and cuts that order into chunks of
+// ≤ budget elements, never crossing a batch boundary. It returns both because they must agree by
+// construction: the ranges drive the chunk-local BufOff (buildJIIDeviceBufs), the device fill's
+// [SlotLo,SlotHi) window, and the GEMM issue loop.
+//
+// owned selects which members of each batch to include — nil takes every batch's full member list
+// (single-GPU), and the -mgpu path passes the per-device ownership split so a device fills only
+// what it will actually issue. A batch contributing no member is skipped entirely.
+//
+// A lone block exceeding budget forms its own chunk; a block cannot be split.
+func (p *jiiBatchPlan) appChunks(owned [][]int, budget int) ([]int32, []jiiChunk) {
+	total := 0
+	for bi := range p.batches {
+		if owned != nil {
+			total += len(owned[bi])
+		} else {
+			total += len(p.batches[bi].Blocks)
 		}
-		acc += e
 	}
-	return append(chunks, jiiChunk{lo, len(slots), acc})
+	if total == 0 {
+		return nil, nil
+	}
+	apps := make([]int32, 0, total)
+	var chunks []jiiChunk
+	for bi := range p.batches {
+		mem := p.batches[bi].Blocks
+		if owned != nil {
+			mem = owned[bi]
+		}
+		if len(mem) == 0 {
+			continue
+		}
+		lo, acc := len(apps), 0
+		for _, si := range mem {
+			sl := p.slots[si]
+			e := sl.rows * sl.cols
+			if len(apps) > lo && acc+e > budget { // close before this block overflows the chunk
+				chunks = append(chunks, jiiChunk{lo: lo, hi: len(apps), elems: acc, batch: bi})
+				lo, acc = len(apps), 0
+			}
+			apps = append(apps, int32(si))
+			acc += e
+		}
+		chunks = append(chunks, jiiChunk{lo: lo, hi: len(apps), elems: acc, batch: bi})
+	}
+	return apps, chunks
 }
 
-// buildJIIBatchPlan enumerates every nonzero jiiLKK block via the cheap gate (no integrals, no
-// Mat allocation) and groups them with PlanBatches. Walk order matches satelliteResidentBytes'
-// (gr descending-inclusive over gc <= gr), so the two agree on which blocks exist by
-// construction — TestJIIBatchPlanMatchesGateWalk pins that.
-func (mx *Matrix) buildJIIBatchPlan() *jiiBatchPlan {
+// walkPlanRow visits every nonzero satellite block whose ROW is task t, in the exact order the
+// serial walk emitted them, calling emit for each. Task t indexes jiiLKK rows over [0,nJ), then
+// ijkMLL rows, then ijkLMN rows — so concatenating the tasks in order reproduces that walk
+// byte-for-byte, which both TestJIIBatchPlanMatchesGateWalk and PlanBatches' reproducibility
+// depend on.
+//
+// One function drives both the counting and the filling pass so the two cannot drift.
+func (mx *Matrix) walkPlanRow(t, nJ int, emit func(k satKind, rc, cc Config, r0, c0, rows, cols int, diag bool)) {
 	sp := mx.sp
-	var slots []jiiSlot
-	var blocks []backend.Block
-
-	add := func(k satKind, rc, cc Config, r0, c0, rows, cols int, diag bool) {
-		slots = append(slots, jiiSlot{
-			kind: k, rowCfg: rc, colCfg: cc,
-			rowOff: r0, colOff: c0, rows: rows, cols: cols, diag: diag,
-		})
-		blocks = append(blocks, backend.Block{
-			A: jiiShapeMat{rows, cols}, RowOff: r0, ColOff: c0, Diag: diag,
-		})
-	}
-
-	// jiiLKK: JII rows × JII cols, lower triangle inclusive (mirrors pass 1a/2a).
-	for gr := range sp.JII {
+	switch {
+	case t < nJ: // jiiLKK: JII rows × JII cols, lower triangle inclusive (mirrors pass 1a/2a).
+		gr := t
 		r0 := sp.JII[gr]
 		rc := sp.Configs[r0]
 		for gc := 0; gc <= gr; gc++ {
 			c0 := sp.JII[gc]
 			if rows, cols, ok := mx.blk.jiiLKKGate(rc, sp.Configs[c0]); ok {
-				add(kindJII, rc, sp.Configs[c0], r0, c0, rows, cols, gr == gc)
+				emit(kindJII, rc, sp.Configs[c0], r0, c0, rows, cols, gr == gc)
 			}
 		}
-	}
-
-	// ijkMLL: IJK rows × ALL JII cols — never on the block diagonal, since the row and column
-	// families differ, so it is always applied in both directions (mirrors pass 1b/2a).
-	for gr := range sp.IJK {
+	case t < nJ+len(sp.IJK):
+		// ijkMLL: IJK rows × ALL JII cols — never on the block diagonal, since the row and
+		// column families differ, so it is always applied both ways (mirrors pass 1b/2a).
+		gr := t - nJ
 		r0 := sp.IJK[gr]
 		rc := sp.Configs[r0]
 		for _, c0 := range sp.JII {
 			if rows, cols, ok := mx.blk.ijkMLLGate(rc, sp.Configs[c0]); ok {
-				add(kindIJKMLL, rc, sp.Configs[c0], r0, c0, rows, cols, false)
+				emit(kindIJKMLL, rc, sp.Configs[c0], r0, c0, rows, cols, false)
 			}
 		}
-	}
-
-	// ijkLMN: IJK rows × IJK cols, lower triangle inclusive (mirrors pass 1b/2b).
-	for gr := range sp.IJK {
+	default: // ijkLMN: IJK rows × IJK cols, lower triangle inclusive (mirrors pass 1b/2b).
+		gr := t - nJ - len(sp.IJK)
 		r0 := sp.IJK[gr]
 		rc := sp.Configs[r0]
 		for gc := 0; gc <= gr; gc++ {
 			c0 := sp.IJK[gc]
 			if rows, cols, ok := mx.blk.ijkLMNGate(rc, sp.Configs[c0]); ok {
-				add(kindIJKLMN, rc, sp.Configs[c0], r0, c0, rows, cols, gr == gc)
+				emit(kindIJKLMN, rc, sp.Configs[c0], r0, c0, rows, cols, gr == gc)
 			}
 		}
 	}
+}
+
+// buildJIIBatchPlan enumerates every nonzero satellite block via the cheap gate (no integrals, no
+// Mat allocation) and groups them with PlanBatches.
+//
+// Two passes — count, prefix-sum, fill — both parallel over ROWS. The gate walk is
+// O(G_J²/2 + G_I·G_J + G_I²/2), i.e. nocc⁶: ~5.3e8 gate calls at production scale, which the serial
+// version ran on one core while its exact twin satelliteResidentBytes (matfree.go) already
+// walked the same structure across a worker pool. Counting first also means the slot and block
+// arrays are allocated at their exact final size instead of append-grown, so the peak is one
+// copy of a ~4 GB slice rather than the 1.5× an amortized doubling leaves behind.
+func (mx *Matrix) buildJIIBatchPlan() *jiiBatchPlan {
+	sp := mx.sp
+	nJ := len(sp.JII)
+	nrow := nJ + 2*len(sp.IJK)
+
+	counts := make([]int, nrow)
+	parallel.HeavyRows(nrow, func(t int) {
+		n := 0
+		mx.walkPlanRow(t, nJ, func(satKind, Config, Config, int, int, int, int, bool) { n++ })
+		counts[t] = n
+	})
+	offs := make([]int, nrow+1)
+	for t := range nrow {
+		offs[t+1] = offs[t] + counts[t]
+	}
+
+	slots := make([]jiiSlot, offs[nrow])
+	blocks := make([]backend.Block, offs[nrow])
+	parallel.HeavyRows(nrow, func(t int) {
+		i := offs[t]
+		mx.walkPlanRow(t, nJ, func(k satKind, rc, cc Config, r0, c0, rows, cols int, diag bool) {
+			slots[i] = jiiSlot{
+				kind: k, rowCfg: rc, colCfg: cc,
+				rowOff: r0, colOff: c0, rows: rows, cols: cols, diag: diag,
+			}
+			blocks[i] = backend.Block{
+				A: jiiShapeMat{rows, cols}, RowOff: r0, ColOff: c0, Diag: diag,
+			}
+			i++
+		})
+	})
 
 	p := &jiiBatchPlan{
 		slots:   slots,
 		batches: backend.PlanBatches(blocks),
-		chunks:  computeChunks(slots, JIIFillBudgetElems),
 	}
+	p.apps, p.chunks = p.appChunks(nil, JIIFillBudgetElems)
 	widest := 0
 	for _, bt := range p.batches {
 		if len(bt.Blocks) > widest {
@@ -250,18 +334,29 @@ func (mx *Matrix) newJIIMatFreeBatched() matFreePart {
 	mats := make([]backend.DeviceMat, len(p.slots))
 
 	apply := func(in, out backend.BlockView) {
-		// Fill every slot ONCE per apply. An off-diagonal block appears in two batches (A and
-		// Aᵀ); rebuilding it per batch would double the block-build cost, which
-		// BenchmarkBlockBuildVsApply shows is ~20% of the work at b=64.
-		for i, s := range p.slots {
-			blk, ok := mx.buildSlot(s)
-			if !ok {
-				// The gate said this block is nonzero, so the value builder must agree.
-				// Disagreement would silently drop operator contributions.
-				panic("dip: satellite gate/value disagreement in batched plan")
+		// Fill every slot ONCE per apply, across the worker pool. An off-diagonal block appears
+		// in two batches (A and Aᵀ); rebuilding it per batch would double the block-build cost,
+		// which BenchmarkBlockBuildVsApply shows is ~20% of the work at b=64 — so unlike the
+		// device path this one stays slot-indexed and fills the whole plan at once.
+		//
+		// Each worker owns a disjoint span of mats, and buildSlot reads only immutable integral
+		// data (integrals.Store's panel cache publishes with atomics, taking no lock), so the
+		// values are independent of how the range is split.
+		//
+		// The live footprint is still the whole materialized region — bounding it the way the
+		// device path does would cost the doubled build above and would not rescue anything,
+		// since a system whose blocks do not fit host RAM has no host path to fall back to.
+		parallel.Chunks(len(p.slots), parallel.ChunkWorkers(len(p.slots)), func(_, lo, hi int) {
+			for i := lo; i < hi; i++ {
+				blk, ok := mx.buildSlot(p.slots[i])
+				if !ok {
+					// The gate said this block is nonzero, so the value builder must agree.
+					// Disagreement would silently drop operator contributions.
+					panic("dip: satellite gate/value disagreement in batched plan")
+				}
+				mats[i] = mx.be.UploadMat(blk)
 			}
-			mats[i] = mx.be.UploadMat(blk)
-		}
+		})
 		p.runBatches(mx.be, mats, in, out)
 	}
 	return matFreePart{apply: apply, release: func() {}}
@@ -287,7 +382,7 @@ func (b *jiiDeviceBufs) free() {
 // (offset, count) per slot — the same ragged-list encoding matfree_device.go already uses for the
 // 3h2p/2h1p group virtuals.
 func (mx *Matrix) buildJIIDeviceBufs(dk backend.DeviceKernels, p *jiiBatchPlan, s *satDeviceSoA) *jiiDeviceBufs {
-	n := len(p.slots)
+	n := len(p.apps)
 	kind := make([]int32, n)
 	rowO0, rowO1, rowO2 := make([]int32, n), make([]int32, n), make([]int32, n)
 	colO0, colO1, colO2 := make([]int32, n), make([]int32, n), make([]int32, n)
@@ -300,17 +395,20 @@ func (mx *Matrix) buildJIIDeviceBufs(dk backend.DeviceKernels, p *jiiBatchPlan, 
 	// Group virtual lists are shared between slots; cache by virtual-symmetry so the flat array
 	// does not blow up with duplicates.
 	cache := map[int]int32{}
+	sizes := map[int]int32{}
 	putVirs := func(cfg Config) (off, cnt int32) {
 		vs := mx.blk.virSym(cfg)
-		orbs := mx.blk.virOrbs(vs)
+		// Check the cache BEFORE virOrbs, which allocates a fresh slice on every call
+		// (blocks.go). This runs once per application — 164 M times for a production sector.
 		if o, ok := cache[vs]; ok {
-			return o, int32(len(orbs))
+			return o, sizes[vs]
 		}
+		orbs := mx.blk.virOrbs(vs)
 		o := int32(len(virs))
 		for _, orb := range orbs {
 			virs = append(virs, int32(orb))
 		}
-		cache[vs] = o
+		cache[vs], sizes[vs] = o, int32(len(orbs))
 		return o, int32(len(orbs))
 	}
 
@@ -329,11 +427,12 @@ func (mx *Matrix) buildJIIDeviceBufs(dk backend.DeviceKernels, p *jiiBatchPlan, 
 	// `maxElems` stay whole-plan (grid sizing / informational).
 	total, maxElems := 0, 0
 	local, ci := 0, 0
-	for i, sl := range p.slots {
+	for i, si := range p.apps {
 		if i == p.chunks[ci].hi { // start of the next chunk
 			ci++
 			local = 0
 		}
+		sl := p.slots[si]
 		rowThree := sl.kind != kindJII    // ijkMLL/ijkLMN have 3-occupied rows
 		colThree := sl.kind == kindIJKLMN // only ijkLMN has a 3-occupied column
 		kind[i] = int32(sl.kind)
@@ -407,7 +506,7 @@ func (mx *Matrix) newJIIMatFreeBatchedDevice(dk backend.DeviceKernels, s *satDev
 	bufs.args.ERI, bufs.args.Eps, bufs.args.OrbSym = eri, eps, osym
 
 	apply := func(in, out backend.BlockView) {
-		p.fillAndRun(dk, bufs.args, mx.be, in, out, nil, 0) //nolint:dogsled // single-GPU path ignores the trace counters
+		p.fillAndRun(dk, bufs.args, mx.be, in, out, 0) //nolint:dogsled // single-GPU path ignores the trace counters
 	}
 	return matFreePart{apply: apply, release: bufs.free}, p
 }
@@ -430,42 +529,38 @@ func sliceRange(mem []int, lo, hi int) (int, int) {
 	return a, b
 }
 
-// runBatchesOwnedRange runs the -mgpu per-device batches for the slot chunk [lo,hi): only slots in the
-// range are issued, and `mats` is the chunk-local handle slice DipSatFillJII returned for it, so a
-// global slot si indexes mats[si-lo]. Splitting a batch across chunks is exact — its members have
-// pairwise-disjoint outputs and accumulate (beta=1), so each is issued once, in whichever chunk
-// owns it, order-independent.
+// runChunk issues one fill chunk as exactly ONE batched GEMM.
 //
-// in is a FULL-HEIGHT slab (global row indexing, Ld = n) because a block's column band can live on
-// any partition; out is this device's local band, so its global write offset has outRowOff
-// subtracted. owned[bi] lists which slots of batch bi belong here — precomputed once, since the
-// plan and the partition bounds are both apply-invariant.
-func (p *jiiBatchPlan) runBatchesOwnedRange(be backend.Backend, mats []backend.DeviceMat, in, out backend.BlockView, owned [][]int, outRowOff, lo, hi int) {
-	for bi, bt := range p.batches {
-		n := 0
-		// owned[bi] is sorted ascending (it is built by walking the sorted bt.Blocks), so the
-		// members inside [lo,hi) are one contiguous run. Scanning instead is O(chunks × members)
-		// and was the dominant cost of the production apply: ~13.5 k chunks × ~20 M owned members
-		// per device per column chunk (job 14211868).
-		mem := owned[bi]
-		mlo, mhi := sliceRange(mem, lo, hi)
-		for _, si := range mem[mlo:mhi] {
-			s := p.slots[si]
-			p.sa[n] = mats[si-lo]
-			if bt.Trans {
-				p.sb[n] = in.RowRange(s.rowOff, s.rows)            // global: full-height slab
-				p.sc[n] = out.RowRange(s.colOff-outRowOff, s.cols) // local: this partition
-			} else {
-				p.sb[n] = in.RowRange(s.colOff, s.cols)
-				p.sc[n] = out.RowRange(s.rowOff-outRowOff, s.rows)
-			}
-			n++
+// A chunk is a contiguous run of applications inside a single batch (appChunks), so every member
+// shares Trans and — by the invariant PlanBatches establishes and asserts — writes to a distinct
+// output offset. `mats` is the chunk-local handle slice DipSatFillJII returned, so application e
+// indexes mats[e-ch.lo].
+//
+// Splitting a batch across chunks is exact: members accumulate (beta=1) into pairwise-disjoint
+// outputs, so each is issued once, in whichever chunk owns it, order-independent.
+//
+// in is a FULL-HEIGHT slab (global row indexing) whenever the caller is the -mgpu path, because a
+// block's column band can live on any partition; out is that device's local band, so its global
+// write offset has outRowOff subtracted. Single-device callers pass outRowOff = 0.
+func (p *jiiBatchPlan) runChunk(be backend.Backend, mats []backend.DeviceMat, in, out backend.BlockView, ch jiiChunk, outRowOff int) {
+	bt := p.batches[ch.batch]
+	n := 0
+	for e := ch.lo; e < ch.hi; e++ {
+		s := p.slots[p.apps[e]]
+		p.sa[n] = mats[e-ch.lo]
+		if bt.Trans {
+			p.sb[n] = in.RowRange(s.rowOff, s.rows)            // global: full-height slab
+			p.sc[n] = out.RowRange(s.colOff-outRowOff, s.cols) // local: this partition
+		} else {
+			p.sb[n] = in.RowRange(s.colOff, s.cols)
+			p.sc[n] = out.RowRange(s.rowOff-outRowOff, s.rows)
 		}
-		if n > 0 {
-			p.stats.calls++
-			p.stats.members += int64(n)
-			be.GemmMatBatched(bt.Trans, 1, p.sa[:n], p.sb[:n], 1, p.sc[:n])
-		}
+		n++
+	}
+	if n > 0 {
+		p.stats.calls++
+		p.stats.members += int64(n)
+		be.GemmMatBatched(bt.Trans, 1, p.sa[:n], p.sb[:n], 1, p.sc[:n])
 	}
 }
 
@@ -506,11 +601,14 @@ func (p *jiiBatchPlan) runBatchesRange(be backend.Backend, mats []backend.Device
 	}
 }
 
-// fillAndRun materializes the plan on `dk` in bounded chunks, running each chunk's batched GEMMs
-// before reusing the buffer. args carries the uploaded, apply-invariant SoA; this sets only the
-// per-chunk range/size fields. When owned is nil the whole plan is run (single-GPU); otherwise
-// only the slots this device owns, rebased by outRowOff (the -mgpu per-device path).
-func (p *jiiBatchPlan) fillAndRun(dk backend.DeviceKernels, args backend.DipFillJIIArgs, be backend.Backend, in, out backend.BlockView, owned [][]int, outRowOff int) (fill, gemm time.Duration, nchunk int, st satStats) {
+// fillAndRun materializes this plan's applications on `dk` in bounded chunks, issuing each chunk's
+// single batched GEMM before reusing the buffer. args carries the uploaded, apply-invariant SoA;
+// this sets only the per-chunk range/size fields.
+//
+// outRowOff rebases a block's global write offset onto a row-partitioned output panel (the -mgpu
+// per-device path); single-GPU callers pass 0. Which applications run is decided at construction,
+// by which ones went into p.apps — not here.
+func (p *jiiBatchPlan) fillAndRun(dk backend.DeviceKernels, args backend.DipFillJIIArgs, be backend.Backend, in, out backend.BlockView, outRowOff int) (fill, gemm time.Duration, nchunk int, st satStats) {
 	p.stats = satStats{}
 	for _, ch := range p.chunks {
 		args.SlotLo, args.SlotHi, args.ChunkElems = ch.lo, ch.hi, ch.elems
@@ -522,11 +620,7 @@ func (p *jiiBatchPlan) fillAndRun(dk backend.DeviceKernels, args backend.DipFill
 			continue
 		}
 		t0 = time.Now()
-		if owned == nil {
-			p.runBatchesRange(be, mats, in, out, ch.lo, ch.hi)
-		} else {
-			p.runBatchesOwnedRange(be, mats, in, out, owned, outRowOff, ch.lo, ch.hi)
-		}
+		p.runChunk(be, mats, in, out, ch, outRowOff)
 		gemm += time.Since(t0)
 	}
 	return fill, gemm, nchunk, p.stats

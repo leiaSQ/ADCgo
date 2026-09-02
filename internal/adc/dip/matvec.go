@@ -18,6 +18,11 @@ type Matrix struct {
 	eps  []float64        // orbital energies (absolute index), for the device path
 	op   *assembledOp     // built lazily on the first ApplyFull, reused thereafter
 
+	// flatERI is the norb⁴ dense ERI copy the device kernels index (buildSatDeviceSoA). It is
+	// 16 GB at the production system's norb=212 and depends only on ints, so it is built once per Matrix and
+	// shared by every applier constructor rather than rebuilt by each.
+	flatERI []float64
+
 	matFree       matfree.Mode // dense (default) vs matrix-free 3h1p↔3h1p satellite region
 	matFreeBudget int64        // Auto threshold: satellite dense bytes above which to go matrix-free
 }
@@ -25,7 +30,7 @@ type Matrix struct {
 // New builds the matrix engine for space sp over the given integrals and orbital
 // energies (absolute index).
 func New(sp *Space, ints *integrals.Store, eps []float64, be backend.Backend) *Matrix {
-	b := base{sp: sp, ints: ints, eps: eps}
+	b := base{sp: sp, ints: ints, eps: eps, sec: newSecondOrder(sp, eps)}
 	var blk blocks
 	if sp.Spin == Triplet {
 		blk = &triplet{b}
@@ -101,10 +106,18 @@ func (mx *Matrix) mainCouplingTasks() []func(emit blockEmit) {
 	var tasks []func(emit blockEmit)
 
 	// 2h/2h main block: a dense symmetric square (both triangles filled), applied
-	// as a single GemvN over the main sub-range. One task; evaluated serially by its
-	// worker (main is small next to the satellite region, which carries the tasks
-	// that actually fill the pool).
+	// as a single GemvN over the main sub-range. One task, evaluated serially by its worker —
+	// which is only defensible now that each element is a table lookup plus one integral.
+	//
+	// It was not before. The W and U second-order double sums used to be evaluated INSIDE every
+	// one of the main²/2 element builds, each an nvir²/2 sweep: ~1.15e12 strided ERI loads on
+	// this one worker at production scale, hours of single-threaded time on the critical path of
+	// the first apply. blocks.go now tabulates both (W memoized per occupied pair, U as a
+	// single GEMM), and the build is hoisted HERE — outside the closure, so it runs on the
+	// caller's goroutine with the whole worker pool available instead of nesting inside one
+	// pool worker.
 	if main := sp.BeginJII; main > 0 {
+		mx.blk.ensureSecondOrder()
 		tasks = append(tasks, func(emit blockEmit) {
 			M := backend.NewMat(main, main)
 			for row := range main {
@@ -324,21 +337,41 @@ func (mx *Matrix) Diagonal(be backend.Backend) backend.Vector {
 			d[row] = el
 		}
 	}
-	// 3h1p/3h1p diagonal self-blocks (type I via jiiLKK, type II via ijkLMN).
-	for _, r0 := range sp.JII {
-		if blk, ok := mx.blk.jiiLKK(sp.Configs[r0], sp.Configs[r0]); ok {
-			for a := range blk.Rows {
-				d[r0+a] = blk.At(a, a)
+	// 3h1p/3h1p diagonal self-blocks (type I via jiiLKK, type II via ijkLMN), read one ENTRY at
+	// a time through the …Elem accessors rather than by materializing the block.
+	//
+	// Building the block to read its diagonal costs nvR·nvC integral-weighted writes and an
+	// allocation to keep nvR of them: at the production system's 32,567 groups and 154 virtuals that is ~4e9
+	// element writes to extract ~1e7 numbers. The …Elem form (blocks.go, the same functions the
+	// CUDA kernel transcribes) evaluates exactly the entries wanted. The groups are independent
+	// and write disjoint spans of d, so the walk is a plain parallel loop.
+	parts := sp.Mult
+	parallel.HeavyRows(len(sp.JII), func(g int) {
+		r0 := sp.JII[g]
+		cfg := sp.Configs[r0]
+		if _, _, ok := mx.blk.jiiLKKGate(cfg, cfg); !ok {
+			return
+		}
+		for a, orb := range mx.blk.virOrbs(mx.blk.virSym(cfg)) {
+			d[r0+a] = mx.blk.jiiLKKElem(cfg, cfg, orb, orb)
+		}
+	})
+	parallel.HeavyRows(len(sp.IJK), func(g int) {
+		r0 := sp.IJK[g]
+		cfg := sp.Configs[r0]
+		if _, _, ok := mx.blk.ijkLMNGate(cfg, cfg); !ok {
+			return
+		}
+		// A self-block is parts·nv square and the space lays the group out as r0 + pr·nv + a,
+		// which is exactly the block's flat row index — so the diagonal entry (pr,a),(pr,a).
+		vir := mx.blk.virOrbs(mx.blk.virSym(cfg))
+		nv := len(vir)
+		for pr := range parts {
+			for a, orb := range vir {
+				d[r0+pr*nv+a] = mx.blk.ijkLMNElem(cfg, cfg, pr, orb, pr, orb)
 			}
 		}
-	}
-	for _, r0 := range sp.IJK {
-		if blk, ok := mx.blk.ijkLMN(sp.Configs[r0], sp.Configs[r0]); ok {
-			for a := range blk.Rows {
-				d[r0+a] = blk.At(a, a)
-			}
-		}
-	}
+	})
 	return be.Upload(d)
 }
 

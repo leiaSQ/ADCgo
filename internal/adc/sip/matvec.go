@@ -79,23 +79,56 @@ type diagPart struct {
 // calc_k1 + calc_c11_2 (+ calc_c11_3) and then does main_block->daxpy(-1., *sigma_) —
 // with Σ coming from its separate self-energy module (&self-energy), not from the ADC
 // matrix code. With Σ nil (the default) this is the bare c11 block.
+// The block is tiny — 58x58 for the production system — but its ELEMENTS are not: at order 3 each c11 call
+// runs c11_3sums, whose C^(A) term is a five-deep a,b,l,c,d loop costing O(nvir^4·nocc). For
+// the production system (nvir=154, nocc=58) that is ~3.3e10 innermost iterations PER ELEMENT, each with four
+// scattered reads of the 16 GB ERI tensor, over 1711 lower-triangle elements. Serially that is
+// days on one core with every GPU idle — job 14418411 sat here for 42 h having printed only the
+// step's opening line, and would have hit its 5-day walltime inside this call. Nothing downstream
+// checkpoints until the first ApplyBlock returns, so each generation of the daisychain restarted
+// it from zero: the same failure mode that killed jobs 14134491/14160403/14224889 inside
+// coupling(), which was parallelized for it while this block was left serial.
+//
+// Note the symmetry filters inside c11_3sums prune NOTHING here: the production system is C1, so every orbital
+// shares one irrep and each `so(a)^so(b)^so(l) != so(i)` test is 0 != 0. The full O(nvir^4) cost
+// is realized. A symmetric molecule pays a fraction of this, which is why it went unnoticed.
+//
+// Parallelized over the FLATTENED lower triangle rather than over rows. Row r holds r+1 elements
+// of equal cost, so a row split both caps the workers at nocc and leaves the longest row (58
+// elements) as the critical path; the flat list balances to 1711/workers. HeavyRows, not Rows,
+// because nocc is far below Rows' 2*GOMAXPROCS serial-fallback threshold — a row count of 58 on
+// a 64-core node is exactly the case that fallback gets wrong.
+//
+// Each (r,c) writes only its own cell and its mirror, and distinct pairs of the lower triangle
+// have disjoint mirrors, so the workers never touch the same cell. elements is immutable after
+// construction and v/so/eps and the Σ closure are pure reads — the same argument coupling() makes.
+// Bit-identical: every element is still computed once by the same expression.
 func (mx *Matrix) mainBlock() backend.Mat {
 	sp := mx.sp
-	M := backend.NewMat(sp.BeginSat, sp.BeginSat)
-	for r := range sp.BeginSat {
-		i := sp.Configs[r].Occ[0]
+	main := sp.BeginSat
+	M := backend.NewMat(main, main)
+
+	type cell struct{ r, c int }
+	cells := make([]cell, 0, main*(main+1)/2)
+	for r := range main {
 		for c := 0; c <= r; c++ {
-			j := sp.Configs[c].Occ[0]
-			el := mx.el.c11(i, j)
-			if mx.sigma != nil {
-				el -= mx.sigma(i, j)
-			}
-			M.Set(r, c, el)
-			if r != c {
-				M.Set(c, r, el)
-			}
+			cells = append(cells, cell{r, c})
 		}
 	}
+
+	parallel.HeavyRows(len(cells), func(k int) {
+		r, c := cells[k].r, cells[k].c
+		i := sp.Configs[r].Occ[0]
+		j := sp.Configs[c].Occ[0]
+		el := mx.el.c11(i, j)
+		if mx.sigma != nil {
+			el -= mx.sigma(i, j)
+		}
+		M.Set(r, c, el)
+		if r != c {
+			M.Set(c, r, el)
+		}
+	})
 	return M
 }
 

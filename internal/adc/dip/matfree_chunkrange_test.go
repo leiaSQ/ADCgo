@@ -162,12 +162,12 @@ func TestRunBatchesChunkedEqualsWhole(t *testing.T) {
 			return be.Download(outBuf)
 		}
 
-		whole := run([]jiiChunk{{0, len(p.slots), 0}})
+		whole := run([]jiiChunk{{lo: 0, hi: len(p.slots)}})
 
 		// Many small chunks, including size-1, to cross every batch boundary.
 		var tiny []jiiChunk
 		for lo := 0; lo < len(p.slots); lo += 3 {
-			tiny = append(tiny, jiiChunk{lo, min(lo+3, len(p.slots)), 0})
+			tiny = append(tiny, jiiChunk{lo: lo, hi: min(lo+3, len(p.slots))})
 		}
 		split := run(tiny)
 
@@ -185,6 +185,99 @@ func TestRunBatchesChunkedEqualsWhole(t *testing.T) {
 		if maxRel > 1e-12 {
 			t.Errorf("spin=%v sym=%d: chunked apply differs from whole by %.3e relative — "+
 				"far above rounding, so a block was dropped or double-counted", spin, sym, maxRel)
+		}
+	})
+}
+
+// TestRunChunkEqualsWholeBatches is the application-order counterpart: the device path issues one
+// GemmMatBatched per fill chunk (runChunk), and a batch may be split across several chunks. This
+// pins that the split is exact — every member issued once, into the same output — against a run
+// that issues each batch whole.
+//
+// It also asserts the batching health directly: with the production budget every chunk carries its
+// whole batch, so calls equals the number of non-empty batches. That is the property whose absence
+// (members/call = 2.2 against ~32,567-member batches) cost the production system 452 s of dispatch per device
+// per column chunk, job 14391094.
+func TestRunChunkEqualsWholeBatches(t *testing.T) {
+	h2oSectors(t, func(spin Spin, sym int, sp *Space, ints *integrals.Store, eps []float64, be backend.Backend) {
+		mx := New(sp, ints, eps, be)
+		defer mx.Release()
+		p := mx.buildJIIBatchPlan()
+		if len(p.slots) == 0 {
+			return
+		}
+
+		mats := make([]backend.DeviceMat, len(p.slots))
+		for i, s := range p.slots {
+			blk, ok := mx.buildSlot(s)
+			if !ok {
+				t.Fatalf("spin=%v sym=%d: gate/value disagreement at slot %d", spin, sym, i)
+			}
+			mats[i] = be.UploadMat(blk)
+		}
+
+		n := mx.sp.Size()
+		const cols = 3
+		rng := rand.New(rand.NewSource(int64(len(p.slots)) + 1))
+		hostIn := make([]float64, n*cols)
+		for i := range hostIn {
+			hostIn[i] = rng.NormFloat64()
+		}
+		in := backend.BlockView{V: be.Upload(hostIn), Rows: n, Cols: cols, Ld: n}
+
+		// run issues the given application order and chunking, handing runChunk the chunk-local
+		// handle slice the device fill would have returned.
+		run := func(apps []int32, chunks []jiiChunk) ([]float64, satStats) {
+			q := p.cloneWith(apps, chunks)
+			outBuf := be.Alloc(n * cols)
+			be.Zero(outBuf)
+			out := backend.BlockView{V: outBuf, Rows: n, Cols: cols, Ld: n}
+			for _, ch := range chunks {
+				local := make([]backend.DeviceMat, ch.hi-ch.lo)
+				for e := ch.lo; e < ch.hi; e++ {
+					local[e-ch.lo] = mats[apps[e]]
+				}
+				q.runChunk(be, local, in, out, ch, 0)
+			}
+			return be.Download(outBuf), q.stats
+		}
+
+		wholeApps, wholeChunks := p.appChunks(nil, JIIFillBudgetElems)
+		whole, st := run(wholeApps, wholeChunks)
+
+		nonEmpty := 0
+		for _, bt := range p.batches {
+			if len(bt.Blocks) > 0 {
+				nonEmpty++
+			}
+		}
+		if st.calls != int64(nonEmpty) {
+			t.Errorf("spin=%v sym=%d: %d batched calls for %d non-empty batches — the production "+
+				"budget must leave every batch in one chunk", spin, sym, st.calls, nonEmpty)
+		}
+		if st.members != int64(len(wholeApps)) {
+			t.Errorf("spin=%v sym=%d: issued %d members, plan has %d applications",
+				spin, sym, st.members, len(wholeApps))
+		}
+
+		// A budget of one element cuts after every block, so every batch is split maximally.
+		tinyApps, tinyChunks := p.appChunks(nil, 1)
+		split, _ := run(tinyApps, tinyChunks)
+
+		if len(whole) != len(split) {
+			t.Fatalf("spin=%v sym=%d: length mismatch %d vs %d", spin, sym, len(whole), len(split))
+		}
+		var maxRel float64
+		for i := range whole {
+			d := math.Abs(split[i] - whole[i])
+			scale := math.Max(math.Abs(whole[i]), 1)
+			if rel := d / scale; rel > maxRel {
+				maxRel = rel
+			}
+		}
+		if maxRel > 1e-12 {
+			t.Errorf("spin=%v sym=%d: split-batch apply differs from whole-batch by %.3e relative — "+
+				"far above rounding, so a member was dropped or double-counted", spin, sym, maxRel)
 		}
 	})
 }

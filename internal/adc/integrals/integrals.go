@@ -24,6 +24,8 @@
 package integrals
 
 import (
+	"sync/atomic"
+
 	"github.com/leiaSQ/ADCgo/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
 )
@@ -37,6 +39,26 @@ type Store struct {
 	orbSym   []int   // 0-based irrep per absolute orbital (all 0 when symmetry off)
 	nsym     int     // number of symmetry groups (power of two ≥ max label + 1)
 	virBySym [][]int // virBySym[σ] = virtual positions (0-based, ascending) of irrep σ
+
+	// Lazy panel caches. A/B/V depend on occupied indices and a symmetry label ONLY — never on
+	// a virtual index or a spin part — yet the DIP block builders re-materialize them on every
+	// call, and the matrix-free path calls those builders once per block PER MAT-VEC. One
+	// singlet.ijkLMN issues 35 A/B calls for 12 distinct panels; triplet.klmIJ issues 24 V calls
+	// for 12 distinct. There are at most nocc²·nsym distinct A/B panels (3,364 for the production system's C1
+	// nocc=58) against millions of block builds, so caching turns an nvR·nvC strided ERI gather
+	// plus an allocation into a pointer load, and subsumes hand common-subexpression elimination
+	// inside the builders.
+	//
+	// Entries are filled lazily — most index combinations never occur — and published with an
+	// atomic pointer rather than a mutex: the builders run under parallel.Chunks worker pools, a
+	// panel is a pure function of its key, and two workers racing to build the same one produce
+	// identical bytes, so the loser's copy is simply dropped. No lock is taken on the hot path.
+	//
+	// Returned panels are shared and must not be mutated. Every consumer reads them
+	// (Mat.AddSubMat / Mat.AddSubVec accumulate FROM src), which dip's TestPanelCacheNotMutated pins.
+	aCache []atomic.Pointer[backend.Mat] // (i*nocc+j)*nsym + sym
+	bCache []atomic.Pointer[backend.Mat] // (i*nocc+j)*nsym + sym
+	vCache []atomic.Pointer[[]float64]   // ((i*nocc+j)*nocc+k)*nsym + sym
 }
 
 // New builds a Store for a closed-shell reference with nocc occupied orbitals.
@@ -72,6 +94,11 @@ func New(d *fcidump.Data, nocc int, orbSym []int) *Store {
 		σ := s.orbSym[nocc+rp]
 		s.virBySym[σ] = append(s.virBySym[σ], rp)
 	}
+	// Cache slots: pointers only (nil until first use), so this costs nocc²·nsym·8 bytes for
+	// A and B (27 KB at production scale) and nocc³·nsym·8 for V, not the panels themselves.
+	s.aCache = make([]atomic.Pointer[backend.Mat], nocc*nocc*s.nsym)
+	s.bCache = make([]atomic.Pointer[backend.Mat], nocc*nocc*s.nsym)
+	s.vCache = make([]atomic.Pointer[[]float64], nocc*nocc*nocc*s.nsym)
 	return s
 }
 
@@ -115,18 +142,31 @@ func (s *Store) EriPlus(p, q, r, t int) float64 {
 
 // V returns the vector V[r] = (rk|ij) with r running over the virtual group of
 // symmetry sym (length SizeVirGroup(sym)).
+//
+// The result is CACHED AND SHARED: treat it as read-only.
 func (s *Store) V(i, j, k, sym int) []float64 {
+	slot := &s.vCache[((i*s.nocc+j)*s.nocc+k)*s.nsym+sym]
+	if p := slot.Load(); p != nil {
+		return *p
+	}
 	rs := s.virGroup(sym)
 	v := make([]float64, len(rs))
 	for idx, rp := range rs {
 		v[idx] = s.d.TwoE(s.nocc+rp, k, i, j)
 	}
+	slot.Store(&v)
 	return v
 }
 
 // A returns the block A[r,s] = (ri|sj); s runs over the virtual group of symmetry
 // sym, r over the group fixed by the integral symmetry (irrep(i)⊗irrep(j)⊗sym).
+//
+// The result is CACHED AND SHARED: treat it as read-only.
 func (s *Store) A(i, j, sym int) backend.Mat {
+	slot := &s.aCache[(i*s.nocc+j)*s.nsym+sym]
+	if p := slot.Load(); p != nil {
+		return *p
+	}
 	rows := s.virGroup(symProduct(s.orbSym[i], s.orbSym[j], sym))
 	cols := s.virGroup(sym)
 	m := backend.NewMat(len(rows), len(cols))
@@ -135,12 +175,19 @@ func (s *Store) A(i, j, sym int) backend.Mat {
 			m.Set(ri, ci, s.d.TwoE(s.nocc+rp, i, s.nocc+sp, j))
 		}
 	}
+	slot.Store(&m)
 	return m
 }
 
 // B returns the block B[r,s] = (rs|ij); s runs over the virtual group of symmetry
 // sym, r over the group fixed by the integral symmetry (irrep(i)⊗irrep(j)⊗sym).
+//
+// The result is CACHED AND SHARED: treat it as read-only.
 func (s *Store) B(i, j, sym int) backend.Mat {
+	slot := &s.bCache[(i*s.nocc+j)*s.nsym+sym]
+	if p := slot.Load(); p != nil {
+		return *p
+	}
 	rows := s.virGroup(symProduct(s.orbSym[i], s.orbSym[j], sym))
 	cols := s.virGroup(sym)
 	m := backend.NewMat(len(rows), len(cols))
@@ -149,6 +196,7 @@ func (s *Store) B(i, j, sym int) backend.Mat {
 			m.Set(ri, ci, s.d.TwoE(s.nocc+rp, s.nocc+sp, i, j))
 		}
 	}
+	slot.Store(&m)
 	return m
 }
 

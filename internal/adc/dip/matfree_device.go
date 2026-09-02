@@ -4,6 +4,7 @@ import (
 	"unsafe"
 
 	"github.com/leiaSQ/ADCgo/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // matfree_device.go — the DEVICE (CUDA) matrix-free applier for the 3h1p↔3h1p satellite region.
@@ -78,17 +79,29 @@ func (mx *Matrix) buildSatDeviceSoA(p *satScalarPlan) *satDeviceSoA {
 		}
 	}
 
-	s.eri = make([]float64, norb*norb*norb*norb)
-	for a := range norb {
-		for b := range norb {
-			for c := range norb {
-				base := ((a*norb+b)*norb + c) * norb
-				for d := range norb {
-					s.eri[base+d] = mx.ints.Eri(a, b, c, d)
+	// The flat norb⁴ ERI copy, memoized on the Matrix and built in parallel.
+	//
+	// Both matter at scale. It is norb⁴ doubles — 16 GB at the production system's norb=212 — and every
+	// applier constructor (newSatBatchedDevice, newSatelliteMatFreeDevice,
+	// newSatelliteMatFreePerDevice, newSatBatchedPerDevice) calls buildSatDeviceSoA, so each
+	// rebuilt a byte-identical copy from scratch: 2.0e9 strided Eri() calls on ONE core, per
+	// applier. The value depends only on the integral store, so it is cached; the a-bands are
+	// disjoint output ranges, so filling them concurrently is bit-identical.
+	if mx.flatERI == nil {
+		flat := make([]float64, norb*norb*norb*norb)
+		parallel.HeavyRows(norb, func(a int) {
+			for b := range norb {
+				for c := range norb {
+					base := ((a*norb+b)*norb + c) * norb
+					for d := range norb {
+						flat[base+d] = mx.ints.Eri(a, b, c, d)
+					}
 				}
 			}
-		}
+		})
+		mx.flatERI = flat
 	}
+	s.eri = mx.flatERI
 	s.osym = make([]int32, norb)
 	for o := range norb {
 		s.osym[o] = int32(mx.ints.OrbIrrep(o))
