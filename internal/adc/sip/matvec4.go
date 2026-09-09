@@ -40,6 +40,21 @@ func (mx *Matrix) isADC4() bool { return mx.el.order == 4 && mx.sp.adc4 }
 // self-energy supplied via SetStaticSelfEnergy (nil → bare −ε_P). theADCcode assembles
 // the same −ε−Σ (egf.F: WORK=−SIGMA−EPSI on the diagonal, AMATRX=−SIGMA off-diagonal),
 // reading Σ from a separate self-energy module.
+// mainBlock4Cached is mainBlock4() behind the same persistent cache the order-3 path uses. The
+// cache key carries the ADC order, so an order-3 and an order-4 block can never be confused.
+func (mx *Matrix) mainBlock4Cached() backend.Mat {
+	if mx.loadMain != nil {
+		if m, ok := mx.loadMain(); ok {
+			return m
+		}
+	}
+	m := mx.mainBlock4()
+	if mx.saveMain != nil {
+		mx.saveMain(m)
+	}
+	return m
+}
+
 func (mx *Matrix) mainBlock4() backend.Mat {
 	sp := mx.sp
 	n := sp.BeginSat
@@ -200,7 +215,7 @@ func (mx *Matrix) assemble4() *assembledOp {
 	}
 	if main > 0 {
 		mx.assembleStep(fmt.Sprintf("1h/1h main block (%d×%d)", main, main), func() {
-			add(mx.mainBlock4(), 0, 0, true)
+			add(mx.mainBlock4Cached(), 0, 0, true)
 		})
 		if n2 > 0 {
 			mx.assembleStep(fmt.Sprintf("1h/2h1p coupling (%d×%d)", main, n2), func() {
@@ -255,7 +270,7 @@ func (mx *Matrix) buildMatrix4() backend.Mat {
 	main := sp.BeginSat
 	M := backend.NewMat(sp.Size(), sp.Size())
 
-	mb := mx.mainBlock4()
+	mb := mx.mainBlock4Cached()
 	for r := range main {
 		for c := range main {
 			M.Set(r, c, mb.At(r, c))

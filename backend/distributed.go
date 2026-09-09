@@ -26,6 +26,8 @@ package backend
 
 import (
 	"fmt"
+	"os"
+	"runtime/debug"
 	"sync"
 )
 
@@ -37,14 +39,26 @@ type distBackend struct {
 	n     int
 	main  int
 	bound []int
-	// stage holds one reusable host buffer per device for DownloadInto, allocated in
-	// NewDistributed so no caller ever writes the outer slice. DownloadInto has no device
+	// stage holds one reusable host buffer per device, shared by the three methods that move a
+	// whole row-partitioned panel between the host and the devices — Download, DownloadInto and
+	// AddPanel. Allocated in NewDistributed so no caller ever writes the outer slice; each call
+	// grows only the entries it needs, to the size that call needs.
+	//
+	// Reuse is the point. be.Download hands back a fresh multi-hundred-MB slice per device per
+	// call and AddPanel used to make one per device per apply, and Go returns large freed spans
+	// to the OS only lazily, so the churn accumulates as RSS until the cgroup OOM-kills the job
+	// (the 733 GB kill, jobs 14040959 / 14075367; see BufferedDownloader's doc in backend.go).
+	//
+	// stageMu serializes those three methods against each other. None of them takes a device
 	// parameter — one call sweeps EVERY device and may re-make any stage[d] that is too small —
-	// so distinct calls cannot be partitioned by device and are never safe to run concurrently
-	// on one distBackend. (Within a single call the per-device workers each touch only their own
-	// entry, which is what makes that loop concurrent.) The only caller is the single-threaded
-	// checkpoint writer; a second concurrent one would need its own staging, not a finer lock.
-	stage [][]float64
+	// so distinct calls cannot be partitioned by device the way the per-device workers inside a
+	// single call can (each of those touches only its own entry, which is what makes those loops
+	// concurrent). In practice the callers are single-threaded — the checkpoint writer, and the
+	// satellite fallback's Download-then-AddPanel — so the mutex is never contended; it is here
+	// so that a future concurrent caller is merely serialized instead of silently overwriting a
+	// neighbour's staging.
+	stage   [][]float64
+	stageMu sync.Mutex
 }
 
 // NewDistributed builds a row-partitioned backend over subs (one per device), splitting n
@@ -92,6 +106,76 @@ func enablePeers(subs []Backend) {
 			}
 		}
 		pc.EnablePeerAccess(others)
+	}
+}
+
+// goDevices runs body(d) for every partition concurrently, blocks until all of them have
+// stopped, and then re-raises the lowest-index panic on the CALLER's goroutine. Every
+// per-device fan-out in this file goes through it.
+//
+// SCHEDULING is the first reason it exists. Every call into a sub-backend blocks on a
+// round-trip through that device's owning goroutine (gpuBackend.do), so a plain
+// `for d := range b.ndev()` loop runs one GPU and idles the other seven for the whole
+// sweep. That is the "summed per-device time equals wall time, i.e. no overlap at all"
+// pathology job 14211868 measured for the mat-vec and dip/matfree_dist.go already fixed
+// on its own side.
+//
+// PANICS are the second, and the reason this is a helper rather than a bare wg.Go loop.
+// gpuBackend.do re-raises a device fault — a failed cudaMalloc, or a sticky
+// cudaErrorLaunchFailure surfacing at the next checked call, as in the cudaError_t 719
+// that killed job 14561251 — as a panic on whichever goroutine called it. Raised on a bare
+// goroutine that panic has no path back to the solver: it aborts the process, so a fault
+// 30 h into a production mat-vec dies with a goroutine dump and, unless the block happened to
+// have reached cp.Every, no checkpoint. Recovering per device and re-raising on the
+// caller's goroutine restores the unwind through ApplyBlock -> SolveLowMem, where the
+// errInterrupted / checkpoint handling lives.
+//
+// Every device is allowed to stop before anything is re-raised: a sibling still writing to
+// a buffer that an unwinding goroutine is about to free would be a use-after-free. The
+// lowest device index wins so a reproducible fault reports reproducibly; the others are
+// logged rather than lost.
+//
+// This is the backend-side twin of dip.goDevices (internal/adc/dip/matfree_dist.go),
+// duplicated rather than shared because backend must stay importable on its own.
+func goDevices(nd int, body func(d int)) {
+	if nd == 1 {
+		// One partition: no goroutine and no recover, so a fault keeps its original stack
+		// instead of being re-raised with the worker frames already unwound.
+		body(0)
+		return
+	}
+	panics := make([]any, nd)
+	stacks := make([][]byte, nd)
+	var wg sync.WaitGroup
+	for d := range nd {
+		wg.Go(func() {
+			defer func() {
+				if r := recover(); r != nil {
+					panics[d], stacks[d] = r, debug.Stack()
+				}
+			}()
+			body(d)
+		})
+	}
+	wg.Wait()
+
+	first := -1
+	for d := range nd {
+		if panics[d] == nil {
+			continue
+		}
+		if first < 0 {
+			first = d
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "backend: partition %d also failed: %v\n%s\n", d, panics[d], stacks[d])
+	}
+	if first >= 0 {
+		// Re-raise the original value, not a wrapper: any type-based handling upstream still
+		// sees what the device backend raised. The partition and its worker stack — which the
+		// re-panic's own stack no longer shows — go to stderr first.
+		fmt.Fprintf(os.Stderr, "backend: partition %d failed:\n%s\n", first, stacks[first])
+		panic(panics[first])
 	}
 }
 
@@ -198,25 +282,41 @@ func (b *distBackend) panelCols(length int) int {
 	return 0
 }
 
+// Alloc fans out over the devices. Worker d allocates only parts[d], on its own sub-backend,
+// and writes only its own element of parts — distinct words of a slice, no shared accumulator
+// and no arithmetic at all, so this is bit-for-bit identical to the serial form.
+//
+// Worth doing because each sub-Alloc is a blocking round-trip through that device's owning
+// goroutine AND, on the GPU backends, memsets the whole allocation (gpu_device.go Alloc calls
+// devZero). A production DIP Krylov panel is ~17 GB per device, so serially this was eight
+// sequential multi-GB cudaMalloc+cudaMemset pairs with seven H200s idle, once per panel.
 func (b *distBackend) Alloc(length int) Vector {
+	nd := b.ndev()
+	parts := make([]Vector, nd)
 	if cols := b.panelCols(length); cols > 0 {
-		parts := make([]Vector, b.ndev())
-		for d := range parts {
-			parts[d] = b.subs[d].Alloc(b.rowsOn(d) * cols)
-		}
+		goDevices(nd, func(d int) { parts[d] = b.subs[d].Alloc(b.rowsOn(d) * cols) })
 		return distVec{b: b, part: parts, grows: b.n, gcols: cols}
 	}
-	parts := make([]Vector, b.ndev())
-	for d := range parts {
-		parts[d] = b.subs[d].Alloc(length)
-	}
+	goDevices(nd, func(d int) { parts[d] = b.subs[d].Alloc(length) })
 	return distVec{b: b, part: parts, repl: true, grows: 1, gcols: length}
 }
 
+// Upload fans out over the devices. Worker d READS only the [bound[d], bound[d+1]) row band of
+// each column of host — the bands are disjoint and host is never written — and writes only its
+// own staging slice and its own element of parts. Copies and one H2D transfer per device: no
+// arithmetic, no shared accumulator, hence bit-for-bit identical to the serial form.
+//
+// Serially this was ndev sequential blocking H2D transfers of a whole panel band (~17 GB per
+// device at production DIP scale) with the rest of the node idle.
+//
+// The per-device gather buffer stays a fresh make rather than the reusable `stage`: Upload is a
+// setup-path call (seeding a panel), not a per-apply one, so holding a second ndev × band-sized
+// host allocation resident for the run would cost more than the churn it saves.
 func (b *distBackend) Upload(host Vec) Vector {
+	nd := b.ndev()
+	parts := make([]Vector, nd)
 	if cols := b.panelCols(len(host)); cols > 0 {
-		parts := make([]Vector, b.ndev())
-		for d := range parts {
+		goDevices(nd, func(d int) {
 			rd := b.rowsOn(d)
 			sub := make([]float64, rd*cols)
 			// Gather device d's rows out of the global column-major host panel.
@@ -224,16 +324,26 @@ func (b *distBackend) Upload(host Vec) Vector {
 				copy(sub[c*rd:(c+1)*rd], host[c*b.n+b.bound[d]:c*b.n+b.bound[d]+rd])
 			}
 			parts[d] = b.subs[d].Upload(sub)
-		}
+		})
 		return distVec{b: b, part: parts, grows: b.n, gcols: cols}
 	}
-	parts := make([]Vector, b.ndev())
-	for d := range parts {
-		parts[d] = b.subs[d].Upload(host)
-	}
+	goDevices(nd, func(d int) { parts[d] = b.subs[d].Upload(host) })
 	return distVec{b: b, part: parts, repl: true, grows: 1, gcols: len(host)}
 }
 
+// Download materializes the global column-major panel on the host, fanning out over the
+// devices and staging each device's band through the reusable per-device buffer.
+//
+// Concurrency is bit-for-bit free, for the same reason as DownloadInto below: worker d touches
+// only stage[d] and writes only the [bound[d], bound[d+1]) row band of every column of out, and
+// the bands are disjoint by construction. Copies only, no arithmetic, no shared accumulator.
+// Serially this was ndev sequential blocking D2H transfers of a whole panel band (~17 GB per
+// device at production DIP scale), once per satellite apply on the -mgpu fallback path.
+//
+// The RETURNED panel must stay a fresh allocation — the caller keeps it — but the per-device
+// intermediates need not be, and they are the ones that churn: be.Download hands back a new
+// multi-hundred-MB slice per device per call, which is the allocation pattern that OOM-killed
+// the SIP runs at 733 GB RSS (jobs 14040959 / 14075367).
 func (b *distBackend) Download(v Vector) Vec {
 	dv := v.(distVec)
 	if dv.repl {
@@ -241,16 +351,32 @@ func (b *distBackend) Download(v Vector) Vec {
 	}
 	cols := dv.gcols
 	out := make([]float64, b.n*cols)
-	for d := range b.ndev() {
+	b.stageMu.Lock()
+	defer b.stageMu.Unlock()
+	goDevices(b.ndev(), func(d int) {
 		if dv.part[d] == nil {
-			continue
+			return
 		}
 		rd := b.rowsOn(d)
-		sub := b.subs[d].Download(dv.part[d])
+		var sub []float64
+		if bd, ok := b.subs[d].(BufferedDownloader); ok {
+			// Sized to the PART, not to rd*cols: a located row band (RowRange) holds a shorter
+			// span than a full panel band, and staging it into a longer buffer would silently
+			// read stale tail data where the allocating path slices out of range and panics.
+			// Matching Download's own length keeps the two paths byte-for-byte equivalent.
+			ln := dv.part[d].Len()
+			if len(b.stage[d]) < ln {
+				b.stage[d] = make([]float64, ln)
+			}
+			sub = b.stage[d][:ln]
+			bd.DownloadInto(sub, dv.part[d])
+		} else {
+			sub = b.subs[d].Download(dv.part[d])
+		}
 		for c := range cols {
 			copy(out[c*b.n+b.bound[d]:c*b.n+b.bound[d]+rd], sub[c*rd:(c+1)*rd])
 		}
-	}
+	})
 	return out
 }
 
@@ -284,60 +410,83 @@ func (b *distBackend) DownloadInto(dst Vec, v Vector) {
 	// [bound[d], bound[d+1]) row band of every column of dst, and the bands are disjoint by
 	// construction — so the workers share nothing. The download itself is a blocking round-trip
 	// through that device's owning goroutine, so serially this cost ndev sequential transfers of
-	// the whole basis every time the checkpoint writer ran.
-	var wg sync.WaitGroup
-	for d := range b.ndev() {
+	// the whole basis every time the checkpoint writer ran. Copies only, no arithmetic and no
+	// shared accumulator, so the fan-out is bit-for-bit free.
+	//
+	// Through goDevices rather than a bare wg.Go loop so that a device fault here — a failed
+	// cudaMalloc growing the staging, a sticky launch failure surfacing at the D2H — unwinds to
+	// the checkpoint writer that called this instead of aborting the process.
+	b.stageMu.Lock()
+	defer b.stageMu.Unlock()
+	goDevices(b.ndev(), func(d int) {
 		if dv.part[d] == nil {
-			continue
+			return
 		}
-		wg.Go(func() {
-			rd := b.rowsOn(d)
-			var sub []float64
-			if bd, ok := b.subs[d].(BufferedDownloader); ok {
-				if len(b.stage[d]) < rd*cols {
-					b.stage[d] = make([]float64, rd*cols)
-				}
-				sub = b.stage[d][:rd*cols]
-				bd.DownloadInto(sub, dv.part[d])
-			} else {
-				sub = b.subs[d].Download(dv.part[d])
+		rd := b.rowsOn(d)
+		var sub []float64
+		if bd, ok := b.subs[d].(BufferedDownloader); ok {
+			if len(b.stage[d]) < rd*cols {
+				b.stage[d] = make([]float64, rd*cols)
 			}
-			for c := range cols {
-				copy(dst[c*b.n+b.bound[d]:c*b.n+b.bound[d]+rd], sub[c*rd:(c+1)*rd])
-			}
-		})
-	}
-	wg.Wait()
+			sub = b.stage[d][:rd*cols]
+			bd.DownloadInto(sub, dv.part[d])
+		} else {
+			sub = b.subs[d].Download(dv.part[d])
+		}
+		for c := range cols {
+			copy(dst[c*b.n+b.bound[d]:c*b.n+b.bound[d]+rd], sub[c*rd:(c+1)*rd])
+		}
+	})
 }
 
+// Zero clears every device's band concurrently. Worker d writes only part[d], on its own
+// sub-backend: disjoint device memory, no shared accumulator, no arithmetic — bit-for-bit
+// identical to the serial form, only the issue order changes.
+//
+// This is the first thing every ApplyBlock does (dip/matvec.go applyBatches zeroes the output
+// panel before accumulating the batches into it), and the panel it clears is ~17 GB per device
+// at production DIP scale. Serially that was eight sequential multi-GB memsets — each a blocking
+// round-trip through one device's owning goroutine — at the top of every mat-vec.
 func (b *distBackend) Zero(v Vector) {
 	dv := v.(distVec)
-	for d := range dv.part {
+	goDevices(len(dv.part), func(d int) {
 		if dv.part[d] != nil {
 			b.subs[d].Zero(dv.part[d])
 		}
-	}
+	})
 }
 
+// Copy runs one device-to-device copy per partition, concurrently. Worker i reads only
+// src.part[i] and writes only dst.part[i], both resident on sub-backend i: disjoint memory, no
+// shared accumulator, no arithmetic — bit-for-bit free. Serially this was ndev sequential
+// blocking D2D copies of a panel band (~17 GB per device at production DIP scale), which the
+// Mode-B recurrence issues several times per Lanczos iteration.
 func (b *distBackend) Copy(dst, src Vector) {
-	d, s := dst.(distVec), src.(distVec)
-	for i := range d.part {
-		if d.part[i] != nil && s.part[i] != nil {
-			b.subs[i].Copy(d.part[i], s.part[i])
+	dd, ss := dst.(distVec), src.(distVec)
+	goDevices(len(dd.part), func(i int) {
+		if dd.part[i] != nil && ss.part[i] != nil {
+			b.subs[i].Copy(dd.part[i], ss.part[i])
 		}
-	}
+	})
 }
 
+// Free releases every device's band concurrently. Worker d frees only its own allocation on
+// its own sub-backend — disjoint memory, no shared accumulator, nothing computed, so this is
+// bit-for-bit free as well as race-free.
+//
+// It matters because cudaFree implicitly synchronizes its device, so each of these is a full
+// device drain on top of the round-trip through the owning goroutine, and the Mode-B driver
+// frees and reallocates ~17 GB-per-device panels between blocks.
 func (b *distBackend) Free(v Vector) {
 	dv, ok := v.(distVec)
 	if !ok {
 		return
 	}
-	for d := range dv.part {
+	goDevices(len(dv.part), func(d int) {
 		if dv.part[d] != nil {
 			b.subs[d].Free(dv.part[d])
 		}
-	}
+	})
 }
 
 // --- local BlockView reconstruction -----------------------------------------
@@ -396,6 +545,10 @@ func (b *distBackend) Gemm(transA, transB bool, alpha float64, a, bb BlockView, 
 		// Bit-exact: the per-device partials are independent arithmetic on disjoint operands, so
 		// only their issue order changes. The reduction that consumes them stays serial and in
 		// ascending device order below.
+		//
+		// Through goDevices (see its doc) rather than a bare wg.Go loop: a device fault raised
+		// inside one of these workers used to abort the process outright, with no path back to
+		// the solver's checkpoint handling.
 		nd := b.ndev()
 		views := make([]BlockView, nd)
 		aLocal := make([]BlockView, nd)
@@ -406,13 +559,9 @@ func (b *distBackend) Gemm(transA, transB bool, alpha float64, a, bb BlockView, 
 			views[d] = BlockView{V: cdv.part[d], Rows: c.Rows, Cols: c.Cols, Ld: c.Ld}
 			aLocal[d], bLocal[d] = b.panelLocal(a, d), b.panelLocal(bb, d)
 		}
-		var wgGemm sync.WaitGroup
-		for d := range nd {
-			wgGemm.Go(func() {
-				b.subs[d].Gemm(true, transB, alpha, aLocal[d], bLocal[d], 0, views[d])
-			})
-		}
-		wgGemm.Wait()
+		goDevices(nd, func(d int) {
+			b.subs[d].Gemm(true, transB, alpha, aLocal[d], bLocal[d], 0, views[d])
+		})
 		// All-reduce: sum the per-device buffers and replicate the total back to every device.
 		// Gaps outside the c.Rows×c.Cols result region are never read by the consumer, so
 		// summing whole buffers is safe.
@@ -428,11 +577,7 @@ func (b *distBackend) Gemm(transA, transB bool, alpha float64, a, bb BlockView, 
 		// Only the transfers overlap. Download returns a fresh host copy on every backend, so
 		// the partials do not alias device storage.
 		parts := make([][]float64, nd)
-		var wgDown sync.WaitGroup
-		for d := range nd {
-			wgDown.Go(func() { parts[d] = b.subs[d].Download(cdv.part[d]) })
-		}
-		wgDown.Wait()
+		goDevices(nd, func(d int) { parts[d] = b.subs[d].Download(cdv.part[d]) })
 
 		acc := parts[0]
 		for d := 1; d < nd; d++ {
@@ -442,15 +587,11 @@ func (b *distBackend) Gemm(transA, transB bool, alpha float64, a, bb BlockView, 
 		}
 
 		// Replicate the total back. acc is read-only here, shared across the workers.
-		var wgUp sync.WaitGroup
-		for d := range nd {
-			wgUp.Go(func() {
-				up := b.subs[d].Upload(acc)
-				b.subs[d].Copy(cdv.part[d], up)
-				b.subs[d].Free(up)
-			})
-		}
-		wgUp.Wait()
+		goDevices(nd, func(d int) {
+			up := b.subs[d].Upload(acc)
+			b.subs[d].Copy(cdv.part[d], up)
+			b.subs[d].Free(up)
+		})
 		return
 	}
 	// The local panel update: device d reads its own row band of a, its own copy of the
@@ -458,7 +599,8 @@ func (b *distBackend) Gemm(transA, transB bool, alpha float64, a, bb BlockView, 
 	// communication. Concurrent for the same reason as the reduce above; each sub-Gemm is a
 	// blocking round-trip through one device's owning goroutine, so a serial loop is ndev
 	// sequential GEMMs where the hardware can run them at once. Operands resolved here rather
-	// than in the workers so a mis-shaped one panics on the caller's goroutine.
+	// than in the workers so a mis-shaped one panics on the caller's goroutine, and issued
+	// through goDevices so a device fault inside a worker unwinds to the caller too.
 	nd := b.ndev()
 	aLocal := make([]BlockView, nd)
 	bLocal := make([]BlockView, nd)
@@ -466,13 +608,9 @@ func (b *distBackend) Gemm(transA, transB bool, alpha float64, a, bb BlockView, 
 	for d := range nd {
 		aLocal[d], bLocal[d], cLocal[d] = b.panelLocal(a, d), b.smallLocal(bb, d), b.panelLocal(c, d)
 	}
-	var wg sync.WaitGroup
-	for d := range nd {
-		wg.Go(func() {
-			b.subs[d].Gemm(false, transB, alpha, aLocal[d], bLocal[d], beta, cLocal[d])
-		})
-	}
-	wg.Wait()
+	goDevices(nd, func(d int) {
+		b.subs[d].Gemm(false, transB, alpha, aLocal[d], bLocal[d], beta, cLocal[d])
+	})
 }
 
 // AddPanel adds the full n×cols column-major host panel into dst (a row-partitioned panel),
@@ -486,12 +624,33 @@ func (b *distBackend) AddPanel(dst Vector, full []float64) {
 		panic("distributed AddPanel: destination must be a row-partitioned panel")
 	}
 	cols := len(full) / b.n
-	for d := range b.ndev() {
+	// Concurrent over devices, and staged through the reusable per-device buffers.
+	//
+	// Bit-for-bit free: worker d READS only the [bound[d], bound[d+1]) row band of every column
+	// of full (disjoint bands, full is never written), writes only stage[d], and accumulates
+	// only into part[d] on its own sub-backend. There is no shared accumulator anywhere, so each
+	// Axpy sums exactly the same values in exactly the same order however the workers interleave.
+	//
+	// Both halves earn their place on this path — the scatter half of the -mgpu satellite
+	// fallback, run once per apply. Serially it was ndev sequential blocking H2D uploads of a
+	// full panel band, each preceded by a fresh host make of rd·cols float64 (~17 GB per device
+	// at production DIP scale). That make is exactly the allocation churn BufferedDownloader exists
+	// to remove: Go returns large freed spans to the OS only lazily, and the accumulated RSS is
+	// what the cgroup OOM-killed at 733 GB (jobs 14040959 / 14075367). Reusing `stage` costs the
+	// same peak and none of the churn — and it is safe to hand a reused buffer to Upload because
+	// every backend's Upload copies it (Gonum.Upload makes and copies; the GPU backends
+	// cudaMemcpy H2D), so no sub-backend retains a reference past the call.
+	b.stageMu.Lock()
+	defer b.stageMu.Unlock()
+	goDevices(b.ndev(), func(d int) {
 		if dv.part[d] == nil {
-			continue
+			return
 		}
 		rd := b.rowsOn(d)
-		band := make([]float64, rd*cols)
+		if len(b.stage[d]) < rd*cols {
+			b.stage[d] = make([]float64, rd*cols)
+		}
+		band := b.stage[d][:rd*cols]
 		for c := range cols {
 			copy(band[c*rd:(c+1)*rd], full[c*b.n+b.bound[d]:c*b.n+b.bound[d]+rd])
 		}
@@ -501,7 +660,7 @@ func (b *distBackend) AddPanel(dst Vector, full []float64) {
 		// only into the first cols columns — their rd·cols storage is contiguous at the front.
 		b.subs[d].Axpy(1, up, dv.part[d].Slice(0, rd*cols))
 		b.subs[d].Free(up)
-	}
+	})
 }
 
 // --- per-device apply capability (PartitionedDevices) ------------------------
@@ -694,12 +853,27 @@ func (b *distBackend) GemmMatBatched(transA bool, alpha float64, a []DeviceMat, 
 		lc[do] = append(lc[do], BlockView{V: cdv.part[do], Rows: cdv.loc.rows, Cols: c[i].Cols, Ld: cdv.loc.ld})
 	}
 
-	for d := range nd {
+	// Issue the per-device batches CONCURRENTLY. This is the hottest fan-out in the file: one
+	// call per batch per mat-vec (dip/matvec.go applyBatches), thousands of batches for a
+	// production DIP sector, and every sub-call is a blocking round-trip through that device's
+	// owning goroutine — so a serial loop ran one H200 at a time and idled the other seven for
+	// the whole dense main/coupling apply. The production DIP trace (job 14561251) put block 0's
+	// total apply at 2h09m07s with only 16m53s of it in the satellite phase; the remaining
+	// ~1h52m is the dense path that runs through exactly this loop.
+	//
+	// Bit-for-bit free, for the same reason the regrouping above is: GemmMatBatched's contract
+	// requires a batch's members to have pairwise non-overlapping outputs (PlanBatches
+	// establishes it — batches are formed per shape, taking at most one block per distinct write
+	// offset), and the bucketing above only ever sends a member to the device that OWNS its
+	// output band. So device d reads input bands it holds and accumulates into rows no other
+	// device touches: there is no shared accumulator, and no output element's summation order
+	// changes. Only the issue order does.
+	goDevices(nd, func(d int) {
 		if len(la[d]) == 0 {
-			continue
+			return
 		}
 		b.subs[d].GemmMatBatched(transA, alpha, la[d], lb[d], beta, lc[d])
-	}
+	})
 }
 
 // --- unsupported outside the Mode B block path -------------------------------

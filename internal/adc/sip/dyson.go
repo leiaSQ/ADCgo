@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/leiaSQ/ADCgo/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // The Dyson amplitude of a cationic state — the overlap of the (N−1)-electron state
@@ -101,13 +102,31 @@ func (mx *Matrix) DysonOrbitals(vecs backend.Mat, states []int) (backend.Mat, er
 	// Virtual block: one sweep over the 2h1p configurations, accumulating f⁽¹⁾·X into
 	// every requested state at once. The 3h2p configurations of an ADC(4) space are
 	// skipped — they first contribute at O(2).
-	for ci := main; ci < len(sp.Configs); ci++ {
-		cfg := sp.Configs[ci]
-		for av := range sp.Nvir {
-			a := sp.Nocc + av
-			if sp.irrep(a) != sp.Sym {
-				continue
-			}
+	//
+	// Parallel over the VIRTUAL orbital, with the configuration sweep left as the inner loop.
+	// The sweep is n_2h1p × nvir = 518,056 × 154 ≈ 8e7 dysonVirtCoeff evaluations for the production system,
+	// each a c12_1/kopp1 spin contraction over scattered reads of the 16 GB ERI tensor — hours
+	// on one core, and it runs after the solver, where a walltime kill costs the whole run.
+	//
+	// The loop order is inverted rather than the outer ci loop split because this IS a
+	// reduction: many configurations accumulate into the same out[a][si]. Owning whole `a`
+	// rows makes each output cell the property of exactly one worker AND leaves its summation
+	// order untouched — ci still ascends from main to the end for every (a,si), so the result
+	// is bit-identical to the serial sweep, not merely equal to rounding. Nothing is
+	// reassociated. The irrep gate is hoisted out of the inner loop for the same reason it was
+	// cheap before: it depends only on a.
+	//
+	// HeavyRows, not Rows: nvir is 154 here but the sector's virtual count is small for most
+	// molecules, and Rows would silently run the whole sweep serially below 2*GOMAXPROCS.
+	// The irrep gate leaves most `a` doing nothing, so the work is very uneven — exactly what
+	// HeavyRows' work-stealing handles and a static split would not.
+	parallel.HeavyRows(sp.Nvir, func(av int) {
+		a := sp.Nocc + av
+		if sp.irrep(a) != sp.Sym {
+			return
+		}
+		for ci := main; ci < len(sp.Configs); ci++ {
+			cfg := sp.Configs[ci]
 			fc := mx.dysonVirtCoeff(a, cfg)
 			if fc == 0 {
 				continue
@@ -116,7 +135,7 @@ func (mx *Matrix) DysonOrbitals(vecs backend.Mat, states []int) (backend.Mat, er
 				out.Set(a, si, out.At(a, si)+fc*vecs.At(ci, k))
 			}
 		}
-	}
+	})
 	return out, nil
 }
 

@@ -4,7 +4,11 @@
 // reference code disagree, the code (singlet.cpp/triplet.cpp) is authoritative.
 package dip
 
-import "slices"
+import (
+	"slices"
+
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
+)
 
 // Spin selects the spin adaptation of the 3h1p satellite space. The values match
 // the reference's spin() convention (0 = singlet, 2 = triplet).
@@ -188,54 +192,145 @@ func (s *Space) addIJ() {
 	s.BeginJII = len(s.Configs)
 }
 
-// addJIIR: |jiir> 3h1p type I. Group boundaries recorded in JII.
-func (s *Space) addJIIR() {
-	s.JII = append(s.JII, s.BeginJII)
-	for j := range s.Nocc {
-		for i := range s.Nocc {
-			if i == j {
+// walkJIIRow visits every |jiir> config whose outer occupied index is j, in the exact order the
+// serial enumeration emitted them, calling emit once per config. `first` marks the opening config
+// of a nonempty (j,i) group, i.e. exactly the points the group-start list JII records.
+//
+// One function drives both the counting and the filling pass below, so the two cannot drift —
+// the same discipline buildJIIBatchPlan uses one file over. The enumeration ORDER is load-bearing
+// (Configs and JII index the operator and the reference comparison), so it lives here once.
+func (s *Space) walkJIIRow(j int, emit func(i, rp int, first bool)) {
+	for i := range s.Nocc {
+		if i == j {
+			continue
+		}
+		first := true
+		for rp := range s.Nvir {
+			r := s.Nocc + rp
+			if s.Sym != symProduct(s.irrep(j), s.irrep(r)) {
 				continue
 			}
-			exists := false
-			for rp := range s.Nvir {
-				r := s.Nocc + rp
-				if s.Sym != symProduct(s.irrep(j), s.irrep(r)) {
-					continue
-				}
-				s.Configs = append(s.Configs, Config{Occ: [3]int{j, i, i}, Vir: rp})
-				exists = true
-			}
-			if exists {
-				s.JII = append(s.JII, len(s.Configs))
-			}
+			emit(i, rp, first)
+			first = false
 		}
 	}
-	s.JII = s.JII[:len(s.JII)-1] // drop trailing boundary → JII[m] = group m start
+}
+
+// addJIIR: |jiir> 3h1p type I. Group boundaries recorded in JII.
+//
+// Count / prefix-sum / parallel-fill over the outer index j. The serial version was
+// nocc²·nvir ≈ 5.2e5 iterations for the production system (nocc=58, nvir=154) on one core, growing Configs by
+// unsized append — and Configs reaches 10.0 M entries × 40 B = 400 MB on the production singlet, so
+// amortized doubling left a ~1.5× peak plus repeated copies of a slice that size. Counting first
+// gives the exact allocation.
+//
+// Bit-reproducible: this is pure enumeration, no floating-point reduction. Every worker owns one
+// j and writes only into Configs[cfgOf[j]:cfgOf[j+1]] and JII[grpOf[j]:grpOf[j+1]] — offsets
+// computed by the serial prefix sum, so each config lands at exactly the index the serial append
+// would have given it, whatever order the workers run in. HeavyRows, not parallel.Rows: nocc=58
+// is below Rows' 2*GOMAXPROCS cutoff, which would have run the whole thing serially anyway.
+func (s *Space) addJIIR() {
+	nocc := s.Nocc
+	cfgOf := make([]int, nocc+1) // configs emitted by rows < j
+	grpOf := make([]int, nocc+1) // JII groups opened by rows < j
+	parallel.HeavyRows(nocc, func(j int) {
+		nc, ng := 0, 0
+		s.walkJIIRow(j, func(_, _ int, first bool) {
+			nc++
+			if first {
+				ng++
+			}
+		})
+		cfgOf[j+1], grpOf[j+1] = nc, ng
+	})
+	for j := range nocc {
+		cfgOf[j+1] += cfgOf[j]
+		grpOf[j+1] += grpOf[j]
+	}
+
+	// JII[m] is group m's absolute start. The serial version built it as the running end of each
+	// nonempty group with the leading BeginJII prepended and the trailing boundary dropped; the
+	// groups are contiguous, so end(m) == start(m+1) and the two lists are identical.
+	base := len(s.Configs) // == s.BeginJII
+	s.Configs = slices.Grow(s.Configs, cfgOf[nocc])[:base+cfgOf[nocc]]
+	s.JII = make([]int, grpOf[nocc])
+	parallel.HeavyRows(nocc, func(j int) {
+		ci, gi := base+cfgOf[j], grpOf[j]
+		s.walkJIIRow(j, func(i, rp int, first bool) {
+			if first {
+				s.JII[gi] = ci
+				gi++
+			}
+			s.Configs[ci] = Config{Occ: [3]int{j, i, i}, Vir: rp}
+			ci++
+		})
+	})
 	s.BeginIJK = len(s.Configs)
 }
 
-// addIJKR: |ijkr,T> 3h1p type II, i>j>k, type outer / r inner. Groups in IJK.
-func (s *Space) addIJKR() {
-	s.IJK = append(s.IJK, s.BeginIJK)
-	for i := range s.Nocc {
-		for j := range i {
-			for k := range j {
-				exists := false
-				for typ := range s.Mult {
-					for rp := range s.Nvir {
-						r := s.Nocc + rp
-						if s.Sym != symProduct(s.irrep(i), s.irrep(j), s.irrep(k), s.irrep(r)) {
-							continue
-						}
-						exists = true
-						s.Configs = append(s.Configs, Config{Occ: [3]int{i, j, k}, Vir: rp, Typ: typ})
+// walkIJKRow visits every |ijkr,T> config whose leading occupied index is i, in the exact order
+// the serial enumeration emitted them (j > k inner, then type outer / r inner). `first` marks the
+// opening config of a nonempty (i,j,k) group — the points IJK records. Shared by the counting and
+// filling passes of addIJKR for the same no-drift reason as walkJIIRow.
+func (s *Space) walkIJKRow(i int, emit func(j, k, typ, rp int, first bool)) {
+	for j := range i {
+		for k := range j {
+			first := true
+			for typ := range s.Mult {
+				for rp := range s.Nvir {
+					r := s.Nocc + rp
+					if s.Sym != symProduct(s.irrep(i), s.irrep(j), s.irrep(k), s.irrep(r)) {
+						continue
 					}
-				}
-				if exists {
-					s.IJK = append(s.IJK, len(s.Configs))
+					emit(j, k, typ, rp, first)
+					first = false
 				}
 			}
 		}
 	}
-	s.IJK = s.IJK[:len(s.IJK)-1]
+}
+
+// addIJKR: |ijkr,T> 3h1p type II, i>j>k, type outer / r inner. Groups in IJK.
+//
+// Same count / prefix-sum / parallel-fill structure as addJIIR, and the bigger of the two by far:
+// C(58,3)=30,856 groups × mult × nvir is ~9.5e6 iterations on the production singlet and ~1.43e7 on
+// the triplet, all of it serial on one core with an unsized append behind it. Rows are wildly
+// uneven (row i holds C(i,2) triples, so the last row alone is ~5% of the work), which is exactly
+// what HeavyRows' work-stealing schedule absorbs and a static split would not.
+//
+// Bit-reproducible for the same reason as addJIIR: enumeration only, disjoint precomputed output
+// ranges per row, no floating-point reduction and no concurrent appends.
+func (s *Space) addIJKR() {
+	nocc := s.Nocc
+	cfgOf := make([]int, nocc+1)
+	grpOf := make([]int, nocc+1)
+	parallel.HeavyRows(nocc, func(i int) {
+		nc, ng := 0, 0
+		s.walkIJKRow(i, func(_, _, _, _ int, first bool) {
+			nc++
+			if first {
+				ng++
+			}
+		})
+		cfgOf[i+1], grpOf[i+1] = nc, ng
+	})
+	for i := range nocc {
+		cfgOf[i+1] += cfgOf[i]
+		grpOf[i+1] += grpOf[i]
+	}
+
+	base := len(s.Configs) // == s.BeginIJK
+	s.Configs = slices.Grow(s.Configs, cfgOf[nocc])[:base+cfgOf[nocc]]
+	s.IJK = make([]int, grpOf[nocc])
+	parallel.HeavyRows(nocc, func(i int) {
+		ci, gi := base+cfgOf[i], grpOf[i]
+		s.walkIJKRow(i, func(j, k, typ, rp int, first bool) {
+			if first {
+				s.IJK[gi] = ci
+				gi++
+			}
+			s.Configs[ci] = Config{Occ: [3]int{i, j, k}, Vir: rp, Typ: typ}
+			ci++
+		})
+	})
 }

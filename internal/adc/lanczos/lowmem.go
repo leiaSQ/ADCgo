@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/leiaSQ/ADCgo/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // block records one accepted Lanczos block: its global column offset, its size (after
@@ -401,11 +402,23 @@ func fillDense(T backend.Mat, blocks []lmBlock) {
 func packLowMem(theta []float64, topVecs, botVecs [][]float64, sDense backend.Mat, qmain []float64, blocks []lmBlock, betaExtra backend.Mat, dim, main int, modeB bool) Result {
 	mainVecs := backend.NewMat(main, dim)
 	if modeB {
-		for k := range dim {
-			for r := range main {
-				mainVecs.Set(r, k, topVecs[r][k])
+		// topVecs is `main` independent row slices, so this transpose re-bases the pointer on
+		// every element: dim·main scattered loads. At the DIP singlet block width (main = 1711)
+		// with -blocks 200 that is 342,200 × 1711 ≈ 5.9e8 loads/stores, one-time but on a single
+		// core as written. Every cell mainVecs[r,k] is written exactly once from topVecs[r][k] —
+		// no accumulator, nothing reassociated — so splitting the k range is bit-for-bit the
+		// serial result; only the order of independent stores changes.
+		//
+		// Chunks, not Rows: the split is over k, and Chunks has no serial floor (parallel.Rows
+		// falls back to a serial walk below 2*GOMAXPROCS) and gives each worker a fixed
+		// contiguous k range, so the schedule cannot vary run to run.
+		parallel.Chunks(dim, parallel.ChunkWorkers(dim), func(_, k0, k1 int) {
+			for k := k0; k < k1; k++ {
+				for r := range main {
+					mainVecs.Set(r, k, topVecs[r][k])
+				}
 			}
-		}
+		})
 	} else {
 		// Qmain is column-major main×dim; MainVecs = Qmain · sDense.
 		qm := backend.Mat{Rows: main, Cols: dim, Data: make([]float64, main*dim)}
@@ -418,14 +431,22 @@ func packLowMem(theta []float64, topVecs, botVecs [][]float64, sDense backend.Ma
 	}
 
 	ps := make([]float64, dim)
-	for k := range dim {
-		var acc float64
-		for r := range main {
-			v := mainVecs.At(r, k)
-			acc += v * v
+	// A reduction, so the partition is by WHOLE columns: acc for a given k is summed over
+	// r = 0..main-1 in ascending order inside one goroutine, exactly as before, and ps[k] is
+	// therefore byte-for-byte the serial value. Nothing is reassociated across workers — only
+	// independent columns move between cores. Chunks' static contiguous ranges are what
+	// guarantee a column is never split; parallel.Rows would additionally have run serially
+	// below 2*GOMAXPROCS. dim·main is the same ≈5.9e8 multiply-adds as the transpose above.
+	parallel.Chunks(dim, parallel.ChunkWorkers(dim), func(_, k0, k1 int) {
+		for k := k0; k < k1; k++ {
+			var acc float64
+			for r := range main {
+				v := mainVecs.At(r, k)
+				acc += v * v
+			}
+			ps[k] = 100 * acc
 		}
-		ps[k] = 100 * acc
-	}
+	})
 
 	// Ritz residual ‖β_extra · (eigenvector's last-block components)‖. Mode A takes the
 	// last-block rows from the dense eigenvectors; Mode B from the tail of the banded

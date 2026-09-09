@@ -23,6 +23,46 @@ type Matrix struct {
 	matFree       MatFreeMode // dense (default) vs matrix-free for large ADC(4) blocks
 	matFreeBudget int64       // Auto threshold: dense block bytes above which to go matrix-free
 	wert3         bool        // include the WERT3 5th-order 3h2p-diagonal correction (opt-in)
+
+	// loadMain/saveMain persist the assembled 1h/1h main block across processes. nil (the
+	// default) keeps this package free of I/O, exactly as lanczos.Options.Checkpoint does.
+	loadMain func() (backend.Mat, bool)
+	saveMain func(backend.Mat)
+
+	// flatERI is the norb⁴ dense ERI copy the device kernels index (deviceERI, matfree.go).
+	// Memoized here because every device applier constructor needs the same bytes and
+	// rebuilding it is 2.0e9 Eri() calls / 16.2 GB at the production system's norb=212. Mirrors dip's
+	// Matrix.flatERI.
+	flatERI []float64
+}
+
+// SetMainBlockCache installs load/save hooks for the assembled 1h/1h main block.
+//
+// The block is tiny (58×58 = 26 KiB at production scale) and enormously expensive: job 14551670
+// measured 8 h 16 m 27 s for it, against 3 m 55 s for the coupling and 3 s for the entire
+// matrix-free satellite region. Every element is an O(nvir⁴·nocc) sum and C1 symmetry prunes
+// none of it. Nothing in -checkpoint covers assembly, so a daisychained run paid that 8 h again
+// in every generation.
+//
+// load returns (block, true) on a hit; the caller owns validating that the cached block belongs
+// to this problem — see cmd/adcgo/mainblock_cache.go, whose key is deliberately conservative
+// because a wrong main block shifts every ionization line without failing.
+func (mx *Matrix) SetMainBlockCache(load func() (backend.Mat, bool), save func(backend.Mat)) {
+	mx.loadMain, mx.saveMain = load, save
+}
+
+// mainBlockCached is mainBlock() behind the optional persistent cache.
+func (mx *Matrix) mainBlockCached() backend.Mat {
+	if mx.loadMain != nil {
+		if m, ok := mx.loadMain(); ok {
+			return m
+		}
+	}
+	m := mx.mainBlock()
+	if mx.saveMain != nil {
+		mx.saveMain(m)
+	}
+	return m
 }
 
 // SetWert3 enables the WERT3 5th-order 3h2p-CI diagonal correction (the full EIGAB
@@ -303,7 +343,7 @@ func (mx *Matrix) assemble() *assembledOp {
 	}
 	if main > 0 {
 		mx.assembleStep(fmt.Sprintf("1h/1h main block (%d×%d)", main, main), func() {
-			add(mx.mainBlock(), 0, 0, true)
+			add(mx.mainBlockCached(), 0, 0, true)
 		})
 		if nSat > 0 {
 			mx.assembleStep(fmt.Sprintf("1h/2h1p coupling (%d×%d)", main, nSat), func() {
@@ -416,7 +456,7 @@ func (mx *Matrix) BuildMatrix() backend.Mat {
 	main := sp.BeginSat
 	M := backend.NewMat(sp.Size(), sp.Size())
 
-	mb := mx.mainBlock()
+	mb := mx.mainBlockCached()
 	for r := range main {
 		for c := range main {
 			M.Set(r, c, mb.At(r, c))

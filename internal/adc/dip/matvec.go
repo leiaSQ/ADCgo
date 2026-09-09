@@ -556,6 +556,14 @@ func (mx *Matrix) ApplyBlockSatellite(out, in backend.BlockView) {
 func (mx *Matrix) applyBatches(parts []placement, batches []backend.Batch, out, in backend.BlockView) {
 	mx.be.Zero(out.V)
 	op := mx.op
+	// The member fill below stays SERIAL, deliberately. It is ~32.6 k three-word struct copies
+	// per mat-vec at production scale — a few hundred microseconds against an apply measured in
+	// hours (job 14158038: 40 h 15 m for one block) — so it is bookkeeping, not FLOPs, and a
+	// worker-pool fan-out per batch would cost more in goroutine barriers than the loop itself.
+	// It also cannot be hoisted out of the batch loop: op.sa/sb/sc are ONE scratch set refilled
+	// in place before each GemmMatBatched, and the batches must issue in order because their
+	// output row bands overlap across batches (only WITHIN a batch is PlanBatches' distinct-write
+	// invariant guaranteed).
 	for _, bt := range batches {
 		n := len(bt.Blocks)
 		for i, pi := range bt.Blocks {

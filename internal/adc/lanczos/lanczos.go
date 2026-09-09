@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/leiaSQ/ADCgo/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // Timing accumulates the wall time of each phase of Solve. The phases are
@@ -456,6 +457,15 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 		pc := backend.BlockView{V: pbuf, Rows: dim, Cols: blkSize, Ld: maxdim}
 		be.Gemm(true, false, 1, basis.Cut(dim), w, 0, pc)
 		pd := be.Download(pc.V)
+		// Deliberately serial. Splitting this by j is NOT a disjoint-write partition: the
+		// current block is the trailing part of [0,dim) (blkStart+blkSize == dim), so for i
+		// and blkStart+j both inside the block, worker j's direct store t[i][blkStart+j] and
+		// worker j' 's mirror store t[blkStart+j'][i] land on the SAME cell of the diagonal
+		// sub-block with different values — pd[j*maxdim+blkStart+j'] vs pd[j'*maxdim+blkStart+j],
+		// equal only in exact arithmetic, not after a GEMM. The serial j-ascending order is
+		// what makes the winner deterministic; parallelizing would race and cost bit
+		// reproducibility. It is also not worth the risk: blkSize·dim = 58 × 11,600 ≈ 6.7e5
+		// stores per block against an ApplyBlock of seconds on the same block, well under 0.1%.
 		for j := range blkSize {
 			for i := range dim {
 				v := pd[j*maxdim+i]
@@ -569,11 +579,31 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 			be.Gemm(false, false, 1, basis.Cut(dim), sblk, 0, wv)
 			be.Free(sv)
 			hd := be.Download(wbuf)
-			for j := range cols {
-				for r := range n {
-					fullVecs.Set(r, k0+j, hd[j*n+r])
+			// Transpose the column-major device panel into the row-major host matrix, split
+			// over ROW ranges. Every cell fullVecs[r, k0+j] is written exactly once, from
+			// hd[j*n+r]: no accumulator is shared and no sum is reassociated, so the parallel
+			// form is bit-for-bit the serial one — only the order of independent stores moves.
+			//
+			// Chunks over rows, NOT Rows over columns. Summed over the dim/main chunks this
+			// scatter is n·dim bounds-checked Mat.Set calls — production SIP at -blocks 200 is
+			// 518,114 × 11,600 ≈ 6e9 — and it ran on a single core. Splitting by column is a
+			// non-starter: cols == main == 58, below parallel.Rows' 2*GOMAXPROCS serial floor
+			// (128 on the 64-core nodes), so Rows would have looked like a fix and changed
+			// nothing. n is in the hundreds of thousands, so a static row split fills every core.
+			//
+			// r outer / j inner, unlike the serial form: each row then writes `cols` CONTIGUOUS
+			// doubles of fullVecs instead of touching a fresh cache line per store (the row
+			// stride is dim = 11,600 doubles), while the strided reads hd[j*n+r] hit `cols`
+			// streams whose lines are fully consumed by the next 7 rows. That turns a scatter
+			// whose working set (8k rows × 58 lines ≈ 4 MB per worker) overflows L2 on every one
+			// of the 58 j-passes into two clean streams. Pure store reordering — no arithmetic.
+			parallel.Chunks(n, parallel.ChunkWorkers(n), func(_, r0, r1 int) {
+				for r := r0; r < r1; r++ {
+					for j := range cols {
+						fullVecs.Set(r, k0+j, hd[j*n+r])
+					}
 				}
-			}
+			})
 		}
 	}
 

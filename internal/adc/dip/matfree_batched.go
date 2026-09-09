@@ -132,8 +132,17 @@ type jiiBatchPlan struct {
 	// (newSatBatchedPerDevice), which the whole-plan fill did nd-fold redundantly: measured on
 	// uracil2W_dz singlet at nd=4, batched calls fall 21.3x (members/call 33.2 -> 706.2) while
 	// the blocks filled fall 2.0x. The single-GPU path pays the 2x with no ownership saving.
-	apps   []int32
-	chunks []jiiChunk
+	//
+	// Built LAZILY, by ensureApps at the head of buildJIIDeviceBufs — the one funnel every
+	// consumer passes through. Only the SINGLE-GPU path consumes this whole-plan version: the
+	// -mgpu constructor recomputes a per-device split (newSatBatchedPerDevice) and hands it to
+	// cloneWith, and the host applier walks p.batches directly through runBatches. Building it
+	// eagerly in buildJIIBatchPlan therefore cost every -mgpu and every host run a dead
+	// ~1.64e8-application pass (the production system's 82 M slots, each off-diagonal one applied twice) on one
+	// core, plus the ~660 MB []int32 it leaves behind.
+	apps      []int32
+	chunks    []jiiChunk
+	appsBuilt bool
 
 	// stats accumulates over one fillAndRun. Per-plan, and every device holds its own clone, so
 	// the parallel per-device loop writes disjoint counters.
@@ -165,10 +174,35 @@ func (p *jiiBatchPlan) cloneWith(apps []int32, chunks []jiiChunk) *jiiBatchPlan 
 		batches: p.batches,
 		apps:    apps,
 		chunks:  chunks,
-		sa:      make([]backend.DeviceMat, len(p.sa)),
-		sb:      make([]backend.BlockView, len(p.sb)),
-		sc:      make([]backend.BlockView, len(p.sc)),
+		// The caller supplied this device's order outright, so ensureApps must never overwrite
+		// it with the whole-plan one.
+		appsBuilt: true,
+		// Sized from the WIDEST BATCH, not from apps: runChunk issues at most one member per
+		// batch member, and a per-device clone owns a subset of those members. Deriving it from
+		// len(apps) would be wrong for the host plan (which has no apps at all).
+		sa: make([]backend.DeviceMat, len(p.sa)),
+		sb: make([]backend.BlockView, len(p.sb)),
+		sc: make([]backend.BlockView, len(p.sc)),
 	}
+}
+
+// ensureApps materializes the whole-plan application order on first use.
+//
+// It is separate from buildJIIBatchPlan because the pass is ~1.64e8 applications at production scale
+// and is DEAD for both production paths — see the apps field comment. buildJIIDeviceBufs is the
+// single place that calls it, and every consumer of apps/chunks (runChunk, fillAndRun, and the
+// parity tests) operates on a plan that has been through buildJIIDeviceBufs first, so the
+// invariant holds without a check on the hot path.
+//
+// Construction-time and single-goroutine by that same invariant: the -mgpu path builds each
+// device's bufs from its own cloneWith copy, which already has appsBuilt set, so no two
+// goroutines ever race here.
+func (p *jiiBatchPlan) ensureApps() {
+	if p.appsBuilt {
+		return
+	}
+	p.apps, p.chunks = p.appChunks(nil, JIIFillBudgetElems)
+	p.appsBuilt = true
 }
 
 // appChunks flattens the plan's batches into application order and cuts that order into chunks of
@@ -308,7 +342,9 @@ func (mx *Matrix) buildJIIBatchPlan() *jiiBatchPlan {
 		slots:   slots,
 		batches: backend.PlanBatches(blocks),
 	}
-	p.apps, p.chunks = p.appChunks(nil, JIIFillBudgetElems)
+	// apps/chunks are deliberately NOT built here — ensureApps does it on the single-GPU path
+	// that is their only consumer. The scratch below is sized from the widest BATCH, which does
+	// not depend on them.
 	widest := 0
 	for _, bt := range p.batches {
 		if len(bt.Blocks) > widest {
@@ -382,6 +418,9 @@ func (b *jiiDeviceBufs) free() {
 // (offset, count) per slot — the same ragged-list encoding matfree_device.go already uses for the
 // 3h2p/2h1p group virtuals.
 func (mx *Matrix) buildJIIDeviceBufs(dk backend.DeviceKernels, p *jiiBatchPlan, s *satDeviceSoA) *jiiDeviceBufs {
+	// The one funnel for the lazily-built application order: a single-GPU plan arrives without
+	// it, an -mgpu clone arrives with its own per-device order already set.
+	p.ensureApps()
 	n := len(p.apps)
 	kind := make([]int32, n)
 	rowO0, rowO1, rowO2 := make([]int32, n), make([]int32, n), make([]int32, n)

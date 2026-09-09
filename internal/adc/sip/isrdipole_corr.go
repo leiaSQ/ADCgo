@@ -5,6 +5,7 @@ import (
 
 	"github.com/leiaSQ/ADCgo/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // The correlation corrections to the ISR representation of a one-particle operator — the
@@ -126,32 +127,90 @@ func holes(sp *Space) []int {
 	return out
 }
 
+// p11Scratch is one worker's reusable factor tables for term12a/term12b.
+//
+// Both terms build a bra-side and a ket-side factor plus their exchange partners, and both
+// tables have exactly nocc·nvir² entries — term12a indexes them as [vir][(vir,occ)] and
+// term12b as [occ][(vir,vir)]. term12a runs to completion before term12b starts, so the
+// four buffers serve both and the worker's footprint is 4·nocc·nvir²·8 bytes (44 MB for
+// the production system's nocc=58, nvir=154) instead of eight buffers' 88 MB.
+//
+// Hoisted out of the pair loop because that loop runs 3364 times for the production system and each pass
+// allocated and immediately discarded these 44 MB — 150 GB of pure GC churn per build, with
+// every worker racing the collector. Allocating once per worker also bounds the resident
+// scratch at workers·44 MB, which an allocate-per-pair loop does not.
+type p11Scratch struct {
+	braFac, braSwap []float64
+	ketFac, ketSwap []float64
+}
+
+func newP11Scratch(nocc, nvir int) *p11Scratch {
+	m := nocc * nvir * nvir
+	return &p11Scratch{
+		braFac: make([]float64, m), braSwap: make([]float64, m),
+		ketFac: make([]float64, m), ketSwap: make([]float64, m),
+	}
+}
+
 // buildP11 fills p11 for every (bra hole, ket hole) pair.
+//
+// One pair costs O(n_o·n_v³) — term12a's factor build alone is nvir²·nocc integral lookups
+// and its contraction nvir²·(nvir·nocc) multiply-adds — and there are up to nocc² = 3364 of
+// them for the production system, ~1.2e12 innermost iterations in total. Serially that is hours before the
+// first transition moment appears, and it is paid three times over in effect because all
+// three Cartesian components wait on this one shared build.
+//
+// The pairs are enumerated (and deduplicated) serially first, then filled by a static split:
+// every pair costs the same — the loop bounds are nocc/nvir, never i or j — so there is no
+// tail to steal, and parallel.Chunks additionally hands each worker an index with which to
+// own a p11Scratch. Rows/HeavyRows cannot: their work-stealing schedule has no worker
+// identity to key scratch on.
+//
+// Each pair writes exactly one slice header, c.p11[i][j], and the pair list is deduplicated,
+// so no two workers write the same cell and none of them grows a shared structure. densityFor
+// is a pure function of (i,j) over immutable data — ints.Eri, eps and the rho closure are all
+// table reads — so the fill is bit-identical to the serial one; no sum is reassociated.
 func (c *isrCorr) buildP11(bra, ket *Space) {
 	c.p11 = make([][][]float64, c.nocc)
 	for i := range c.nocc {
 		c.p11[i] = make([][]float64, c.nocc)
 	}
-	for _, i := range holes(bra) {
-		for _, j := range holes(ket) {
-			if c.p11[i][j] != nil {
+
+	type holePair struct{ i, j int }
+	braHoles, ketHoles := holes(bra), holes(ket)
+	pairs := make([]holePair, 0, len(braHoles)*len(ketHoles))
+	seen := make([]bool, c.nocc*c.nocc)
+	for _, i := range braHoles {
+		for _, j := range ketHoles {
+			if seen[i*c.nocc+j] {
 				continue
 			}
-			c.p11[i][j] = c.densityFor(i, j)
+			seen[i*c.nocc+j] = true
+			pairs = append(pairs, holePair{i, j})
 		}
 	}
+
+	parallel.Chunks(len(pairs), parallel.ChunkWorkers(len(pairs)), func(_, lo, hi int) {
+		sc := newP11Scratch(c.nocc, c.nvir)
+		for k := lo; k < hi; k++ {
+			c.p11[pairs[k].i][pairs[k].j] = c.densityFor(sc, pairs[k].i, pairs[k].j)
+		}
+	})
 }
 
 // densityFor builds the norb×norb contraction density of the 1h/1h correction for the hole
 // pair (i, j). The expression is symmetric under i↔j once contracted with a symmetric d, so
 // the operator stays symmetric — TestCorrDipoleSymmetric checks that rather than assuming it.
-func (c *isrCorr) densityFor(i, j int) []float64 {
+//
+// sc carries the caller's reusable factor tables; the returned density is freshly allocated
+// (it is kept in p11) and every scratch entry is fully overwritten before it is read.
+func (c *isrCorr) densityFor(sc *p11Scratch, i, j int) []float64 {
 	n := c.norb
 	p := make([]float64, n*n)
 
 	c.term13c(p, i, j)
-	c.term12a(p, i, j)
-	c.term12b(p, i, j)
+	c.term12a(sc, p, i, j)
+	c.term12b(sc, p, i, j)
 	c.term12c(p, i, j)
 	return p
 }
@@ -186,13 +245,12 @@ func (c *isrCorr) term13c(p []float64, i, j int) {
 // integral lookups instead of the O(n_v³n_o) the literal quadruple loop would pay, and the
 // contraction itself is pure arithmetic. That is the whole optimization, and
 // TestCorrMatchesLiteralLoops gates it against a verbatim transcription of the legacy.
-func (c *isrCorr) term12a(p []float64, i, j int) {
+func (c *isrCorr) term12a(sc *p11Scratch, p []float64, i, j int) {
 	nocc, nvir, n := c.nocc, c.nvir, c.norb
 	m := nvir * nocc // the composite (f,n) index
 
 	// aFac[b][(f,n)] = (2⟨jn|fb⟩ − ⟨jn|bf⟩)/(ε_j+ε_n−ε_f−ε_b), and aSwap the exchanged pair.
-	aFac := make([]float64, nvir*m)
-	aSwap := make([]float64, nvir*m)
+	aFac, aSwap := sc.braFac, sc.braSwap
 	for bi := range nvir {
 		b := nocc + bi
 		for fi := range nvir {
@@ -206,8 +264,7 @@ func (c *isrCorr) term12a(p []float64, i, j int) {
 		}
 	}
 	// bFac[g][(f,n)] = ⟨fg|in⟩/(ε_i+ε_n−ε_f−ε_g), and bSwap the ⟨fg|ni⟩ partner.
-	bFac := make([]float64, nvir*m)
-	bSwap := make([]float64, nvir*m)
+	bFac, bSwap := sc.ketFac, sc.ketSwap
 	for gi := range nvir {
 		g := nocc + gi
 		for fi := range nvir {
@@ -238,12 +295,11 @@ func (c *isrCorr) term12a(p []float64, i, j int) {
 //	          / [(ε_j+ε_k−ε_f−ε_g)(ε_i+ε_n−ε_f−ε_g)] )
 //
 // Same factorization as (12a), now separating over the two occupied labels k and n.
-func (c *isrCorr) term12b(p []float64, i, j int) {
+func (c *isrCorr) term12b(sc *p11Scratch, p []float64, i, j int) {
 	nocc, nvir, n := c.nocc, c.nvir, c.norb
 	m := nvir * nvir // the composite (f,g) index
 
-	kFac := make([]float64, nocc*m)
-	kSwap := make([]float64, nocc*m)
+	kFac, kSwap := sc.braFac, sc.braSwap
 	for k := range nocc {
 		for fi := range nvir {
 			f := nocc + fi
@@ -256,8 +312,7 @@ func (c *isrCorr) term12b(p []float64, i, j int) {
 			}
 		}
 	}
-	nFac := make([]float64, nocc*m)
-	nSwap := make([]float64, nocc*m)
+	nFac, nSwap := sc.ketFac, sc.ketSwap
 	for nn := range nocc {
 		for fi := range nvir {
 			f := nocc + fi

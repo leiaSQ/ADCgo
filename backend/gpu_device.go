@@ -25,6 +25,7 @@ package backend
 import (
 	"fmt"
 	"runtime"
+	"sync"
 	"unsafe"
 )
 
@@ -574,13 +575,38 @@ func (b *gpuBackend) SymEig(a Mat) ([]float64, Mat) {
 
 // transposeSquareInPlace transposes an n×n row-major matrix without a second n²
 // allocation — the matrices here reach 1.1 GB.
+//
+// Parallel over the row index i, which is the MIN index of every pair {(i,j),(j,i)} the body
+// swaps. Partitioning by i therefore partitions the PAIRS: two workers with disjoint i sets can
+// never touch the same element, so no synchronization is needed beyond the final Wait. It is a
+// permutation of stored values with no arithmetic at all, so the result is bit-for-bit identical
+// to the serial loop however the workers interleave.
+//
+// Worth parallelizing because it is a single-core O(n²) tail on the Rayleigh-Ritz path, run once
+// per eigensolve with the whole node otherwise idle, and n reaches 11,600 for a production SIP
+// sector — 67 M swaps strided across a 1.1 GB matrix.
+//
+// Strided (k, k+w, k+2w, …) rather than contiguous i-ranges because row i does n−1−i swaps:
+// contiguous blocks would hand the first worker most of the work. No panic recovery here,
+// unlike the device fan-outs: this body only indexes a caller-owned host slice and makes no
+// call that can fault.
 func transposeSquareInPlace(m Mat) {
 	n := m.Rows
-	for i := range n {
-		for j := i + 1; j < n; j++ {
-			m.Data[i*n+j], m.Data[j*n+i] = m.Data[j*n+i], m.Data[i*n+j]
-		}
+	w := min(runtime.GOMAXPROCS(0), n)
+	if w < 1 {
+		return
 	}
+	var wg sync.WaitGroup
+	for k := range w {
+		wg.Go(func() {
+			for i := k; i < n; i += w {
+				for j := i + 1; j < n; j++ {
+					m.Data[i*n+j], m.Data[j*n+i] = m.Data[j*n+i], m.Data[i*n+j]
+				}
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // DeviceMem reports free and total device memory, so the backend chooser can refuse a

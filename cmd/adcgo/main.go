@@ -92,6 +92,7 @@ func main() {
 	sigma := flag.String("sigma", "auto", "static self-energy added to the SIP main block: auto | off | three | four | fplus | infinite. The ADC matrix code does not build Σ (theADCcode keeps it in a separate &self-energy module and subtracts it); omitting it shifts every main line by ~0.2-0.35 eV. auto = infinite, the all-order resolvent resummation, bit-exact vs theADCcode.")
 	sigmaAkrit := flag.Float64("sigma-akrit", 0, "Σ(∞) resolvent convergence threshold on Σ(Δx)² (0 = converge tightly; theADCcode's own default is 1e-9)")
 	sigmaMaxIt := flag.Int("sigma-maxit", 0, "Σ(∞) resolvent iteration cap (0 = 200; theADCcode's own default is 30)")
+	mainCache := flag.String("mainblock-cache", "auto", "where to cache the assembled SIP 1h/1h main block so a later run skips rebuilding it: auto = <fcidump>.mainblock.o<order>.i<irrep>.cache | off | an explicit path prefix. The block is 26 KB at production scale but took 8h16m to build (job 14551670) because every element is an O(nvir^4*nocc) sum, and -checkpoint covers only the Krylov state, so each daisychain generation rebuilt it. The cached copy is rejected unless the ADC order, sector irrep and multiplicity, orbital-space dimensions, WERT3 flag, a hash of the orbital energies, a hash of the static self-energy, and the FCIDUMP size/mtime all match")
 	sigmaCache := flag.String("sigma-cache", "auto", "where to cache the static self-energy so a later run skips rebuilding it: auto = <fcidump>.sigma-<scheme>.cache | off | an explicit path. Σ(∞) dominates a large SIP run (78 h for the production system) and is only n² floats (351 KB at norb=212), so a daisychain that is walltime-killed before its solver checkpoints would otherwise pay those hours again every generation. The cached copy is rejected unless the scheme, its tuning, the orbital-space dimensions, a hash of the orbital energies, and the FCIDUMP size/mtime all match")
 	out := flag.String("out", "", "write JSON to this file (default stdout)")
 	profile := flag.Bool("profile", false, "print per-sector solver phase timings to stderr")
@@ -118,7 +119,7 @@ func main() {
 	flag.Var(&groups, "group", "decay-site grouping NAME=col1,col2 (repeatable; ~col makes a column passive); a bare -group prompts interactively; default each population column is its own site")
 	convert := flag.String("convert", "", "read a previously emitted solver document JSON (the default -dip/-sip output) and emit its bare stick spectrum without re-solving; needs -dip or -sip to say which kind")
 	flag.Parse()
-	
+
 	println("\n ADCgo: a modern implementation of ADC \n Authors: Leia Wertebach, Alexander Kuleff \n\n Derived from: \n TheADCcode: A collection of ADC/ISR source codes.\n Contributors: Nikolay Golubev,\n Yasen Velkov (developer of the original version),\n Alexander Kuleff,\n Anthony Dutoi, Nicolas Sisourat, Tsveta Miteva,\n Joerg Breidbach, Imke Mueller, Nayana Vaval,\n Francesco Tarantelli, Soeren Kopelke,\n Sajeev Yesodharan, Kirill Gokhberg, Robin Santra\n\n")
 
 	// Applied before any Matrix is built: the per-device satellite appliers latch the chunk
@@ -272,7 +273,7 @@ func main() {
 			spec:    specCfg,
 			core:    core,
 			moPath:  *moPath, tdm: *doTDM, tdmOsc: *tdmOsc, tdmISR: *tdmISR,
-			sigmaCache: *sigmaCache, fcidumpPath: *path,
+			sigmaCache: *sigmaCache, mainCache: *mainCache, fcidumpPath: *path,
 		}
 		mfMode, err := parseMatFree(*matfree)
 		if err != nil {
@@ -825,7 +826,8 @@ type sipConfig struct {
 	sigmaAkrit    float64                // Σ(∞) resolvent convergence threshold (0 = converge tightly)
 	sigmaMaxIt    int                    // Σ(∞) resolvent iteration cap
 	sigmaCache    string                 // -sigma-cache: auto (beside the FCIDUMP) | off | explicit path
-	fcidumpPath   string                 // the -fcidump argument, for the Σ cache key and path
+	mainCache     string                 // -mainblock-cache: auto (beside the FCIDUMP) | off | explicit path
+	fcidumpPath   string                 // the -fcidump argument, for the Σ/main-block cache keys and paths
 	sig           func(i, j int) float64 // resolved Σ, built once per run (nil = off)
 
 	ckpt      string       // -checkpoint base path (lanczos only; "" = off)

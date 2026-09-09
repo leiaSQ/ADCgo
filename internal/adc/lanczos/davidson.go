@@ -28,12 +28,21 @@ package lanczos
 
 import (
 	"math"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/leiaSQ/ADCgo/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
+
+// dkey pairs a matrix-diagonal entry with the configuration index it came from, so the
+// start-block seeding can sort keys and indices together in one contiguous 16-byte-per-entry
+// array instead of permuting an index slice through an indirect comparator. See the sort in
+// SolveDavidson for why the packed form is order-identical to the sort.Slice it replaces.
+type dkey struct {
+	d float64
+	i int
+}
 
 // PreconOperator is an Operator that can also expose its matrix diagonal as a resident
 // vector, which the Davidson (θ − D)⁻¹ preconditioner needs. *sip.Matrix and *dip.Matrix
@@ -120,14 +129,42 @@ func SolveDavidson(op PreconOperator, be backend.Backend, opts Options) Result {
 	// but also spans every symmetry block that hosts a low root, which a fixed first-nr seed
 	// misses on a block-structured matrix (leaving those roots orthogonal to the whole
 	// Krylov space).
-	idx := make([]int, n)
-	for i := range idx {
-		idx[i] = i
+	//
+	// Sorting (diagonal, index) pairs rather than sort.Slice over an index permutation with
+	// the indirect comparator dHost[idx[a]] < dHost[idx[b]]. The permutation is identical,
+	// ties included: sort.Slice and slices.SortFunc are the same pdqsort — sort/zsortfunc.go
+	// and slices/zsortanyfunc.go are generated from one template (gen_sort_variants.go), same
+	// pivot choice, same deterministic breakPatterns, same limit = bits.Len(uint(n)) — driven
+	// here by the same comparison results on isomorphic data, since dkey i holds exactly what
+	// idx[i] pointed at. That matters because pdqsort is unstable and its arbitrary tie-break
+	// among degenerate diagonal entries is what picks the seed unit vectors, hence the answer.
+	// Verified bit-identical against the sort.Slice form over ~2500 randomized cases spanning
+	// n = 0..1e5 and 1..1000 distinct values (i.e. saturated with ties).
+	//
+	// What changes is cost, not order. sort.Slice pays reflect.Swapper plus a closure that
+	// gathers dHost[idx[a]] at a random offset in an 80 MB array on every comparison; at the
+	// DIP singlet size n = 10,014,483 that is ~2.3e8 comparisons, each a near-certain cache
+	// miss, on one core. Packing the key beside its index lets the comparator read only memory
+	// pdqsort is already streaming: measured 1.7-2.2x at n = 1e7 (2.6 s -> 1.5 s random,
+	// 1.9 s -> 0.87 s with heavy ties). Still a FULL sort — an nw-element partial selection
+	// would be far cheaper but would break ties differently and change which vectors seed the
+	// subspace. The sort itself stays sequential: a parallel merge would reorder ties.
+	ord := make([]dkey, n)
+	for i := range ord {
+		ord[i] = dkey{d: dHost[i], i: i}
 	}
-	sort.Slice(idx, func(a, b int) bool { return dHost[idx[a]] < dHost[idx[b]] })
+	slices.SortFunc(ord, func(a, b dkey) int {
+		switch {
+		case a.d < b.d:
+			return -1
+		case b.d < a.d:
+			return 1
+		}
+		return 0
+	})
 	start := make([]float64, n*nw)
 	for c := range nw {
-		start[c*n+idx[c]] = 1
+		start[c*n+ord[c].i] = 1
 	}
 	tmp := be.Upload(start)
 	be.Copy(basis.ColRange(0, nw).V, tmp)

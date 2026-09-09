@@ -6,6 +6,7 @@ import (
 	"github.com/leiaSQ/ADCgo/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/dip"
 	"github.com/leiaSQ/ADCgo/internal/adc/mo"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // U-transform normalization constants (eqs. 3c, 3d).
@@ -56,41 +57,64 @@ func NewPopEngine(sp *dip.Space, md *mo.Data) *PopEngine {
 	}
 	C := md.C
 
-	// U (eq. 3a-3d): column c is the main config (i,j) = Occ[0],Occ[1].
-	U := backend.NewMat(naopair, main)
-	for c := range main {
-		i, j := sp.Configs[c].Occ[0], sp.Configs[c].Occ[1]
-		for p := range nao {
-			for q := 0; q <= p; q++ {
-				var u float64
-				switch {
-				case i != j && p != q:
-					u = C.At(p, i)*C.At(q, j) + fact1*C.At(q, i)*C.At(p, j)
-				case i != j && p == q:
-					u = C.At(p, i) * C.At(p, j) * fact2
-				case i == j && p != q:
-					u = sqrt2 * C.At(p, i) * C.At(q, i) * fact2
-				default: // i == j && p == q
-					u = sqrt1_2 * C.At(p, i) * C.At(p, i) * fact2
-				}
-				U.Set(triIdx(p, q), c, u)
-			}
+	// pq[k] is the AO pair (p,q), p >= q, that packs to triIdx(p,q) == k. Materialising
+	// it lets both fills below be driven by the packed AO-pair index, so one work item
+	// owns one whole ROW of U or O: contiguous, disjoint, and no false sharing between
+	// workers (a column-per-item split of U would put 8 workers on one cache line).
+	pq := make([][2]int, naopair)
+	for p := range nao {
+		for q := 0; q <= p; q++ {
+			pq[triIdx(p, q)] = [2]int{p, q}
 		}
 	}
 
+	// U (eq. 3a-3d): column c is the main config (i,j) = Occ[0],Occ[1].
+	//
+	// Parallel over the AO-pair rows. Each element is computed from immutable inputs
+	// and written once, with nothing accumulated and the arithmetic per element
+	// untouched, so the result is bit-identical to the serial fill. ~3.8e7 elements
+	// per sector at production scale (naopair 22578 x main ~1700), rebuilt for every
+	// (symmetry, spin) sector on every -mo run — the main production output mode.
+	//
+	// HeavyRows, not Rows: naopair is 300 for h2o and Rows silently runs serially
+	// below 2*GOMAXPROCS (256 on a 128-core node), which would leave the small cases
+	// on one core for no reason.
+	U := backend.NewMat(naopair, main)
+	parallel.HeavyRows(naopair, func(k int) {
+		p, q := pq[k][0], pq[k][1]
+		for c := range main {
+			i, j := sp.Configs[c].Occ[0], sp.Configs[c].Occ[1]
+			var u float64
+			switch {
+			case i != j && p != q:
+				u = C.At(p, i)*C.At(q, j) + fact1*C.At(q, i)*C.At(p, j)
+			case i != j && p == q:
+				u = C.At(p, i) * C.At(p, j) * fact2
+			case i == j && p != q:
+				u = sqrt2 * C.At(p, i) * C.At(q, i) * fact2
+			default: // i == j && p == q
+				u = sqrt1_2 * C.At(p, i) * C.At(p, i) * fact2
+			}
+			U.Set(k, c, u)
+		}
+	})
+
 	// O (eq. 4): symmetric overlap-pair metric.
+	//
+	// The expensive one: naopair^2 is ~5.1e8 elements at the production system's nao=212 (~4 GB
+	// written), again per sector per -mo run. Same argument as U — row kpq is owned by
+	// one work item, every cell written exactly once from immutable S, expression
+	// unchanged, so this is bit-identical to the serial quadruple loop.
 	S := md.S
 	O := backend.NewMat(naopair, naopair)
-	for p := range nao {
-		for q := 0; q <= p; q++ {
-			kpq := triIdx(p, q)
-			for r := range nao {
-				for s := 0; s <= r; s++ {
-					O.Set(kpq, triIdx(r, s), S.At(p, r)*S.At(q, s)+fact1*S.At(p, s)*S.At(q, r))
-				}
+	parallel.HeavyRows(naopair, func(kpq int) {
+		p, q := pq[kpq][0], pq[kpq][1]
+		for r := range nao {
+			for s := 0; s <= r; s++ {
+				O.Set(kpq, triIdx(r, s), S.At(p, r)*S.At(q, s)+fact1*S.At(p, s)*S.At(q, r))
 			}
 		}
-	}
+	})
 
 	return &PopEngine{nao: nao, main: main, U: U, O: O,
 		groupName: md.AtomNames, aoGroup: md.AOAtom}

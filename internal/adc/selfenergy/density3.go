@@ -1,5 +1,7 @@
 package selfenergy
 
+import "github.com/leiaSQ/ADCgo/internal/adc/parallel"
+
 // density3.go — the third-order correlation density ρ⁽³⁾ and the third-order *dynamic*
 // self-energy M⁽³⁾ its hole/particle block needs. Ported from
 // ../ADC/self_energy/original/original_self_energy.cpp (rho_hole_part_3 /
@@ -24,67 +26,93 @@ func (e *engine) rhoHole3(rho *Sigma) {
 	ep := e.eps
 	for sym := range e.nsym {
 		occ := e.occs[sym]
-		for _, k := range occ {
-			for _, k1 := range occ {
-				var fA, fB, fC, fD float64
-				for a := e.nocc; a < e.norb; a++ {
-					for m := range e.nocc {
-						symC := e.so(a) ^ e.so(m) ^ e.so(k)
-						for _, c := range e.virs[symC] {
-							pole := 1. / ((ep[a] + ep[c] - ep[k1] - ep[m]) *
-								(ep[a] + ep[c] - ep[k] - ep[m]))
-							vAcK1m := e.v(a, c, k1, m) * pole
-							vAcMk1 := e.v(a, c, m, k1) * pole
-							exp1 := vAcMk1 - 2*vAcK1m
-							exp2 := vAcK1m - 2*vAcMk1
-							exp3 := -2 * exp1
-							exp4 := -2 * exp2
+		no := len(occ)
+		if no == 0 {
+			continue
+		}
+		// The (k,k1) pairs are the work item: nocc² = 58² = 3364 of them at production scale, each running
+		// a·m·c·(b·d + b·l + j·l + b·l) ≈ 1.4e6·4.5e4 ≈ 6e10 terms — ~1e14 in total, by far the
+		// heaviest block in this file. Four/FourPlus and Density(order=3) only; the production
+		// Σ(∞) path never reaches it.
+		//
+		// The cells are NOT disjoint across pairs, so the schedule cannot be allowed to touch ρ:
+		// this is the full (k,k1) SQUARE (see the doc comment above), and both (k,k1) and (k1,k)
+		// add their own f into BOTH cells, so cell (k,k1) receives f(k,k1) then f(k1,k) in that
+		// order. What IS disjoint is the f value itself, so the parallel pass only computes f
+		// into a private nocc×nocc scratch and a serial second pass replays the two += in the
+		// reference's original enumeration order. Each cell's add sequence — base, then f(k,k1),
+		// then f(k1,k) — is therefore unchanged down to the bit; the only thing that moved is
+		// where the intermediate lives. (Halving the work by using the triangle would change the
+		// arithmetic, so it is deliberately not done.)
+		fmat := make([]float64, no*no)
+		parallel.HeavyRows(no*no, func(idx int) {
+			k, k1 := occ[idx/no], occ[idx%no]
+			var fA, fB, fC, fD float64
+			for a := e.nocc; a < e.norb; a++ {
+				for m := range e.nocc {
+					symC := e.so(a) ^ e.so(m) ^ e.so(k)
+					for _, c := range e.virs[symC] {
+						pole := 1. / ((ep[a] + ep[c] - ep[k1] - ep[m]) *
+							(ep[a] + ep[c] - ep[k] - ep[m]))
+						vAcK1m := e.v(a, c, k1, m) * pole
+						vAcMk1 := e.v(a, c, m, k1) * pole
+						exp1 := vAcMk1 - 2*vAcK1m
+						exp2 := vAcK1m - 2*vAcMk1
+						exp3 := -2 * exp1
+						exp4 := -2 * exp2
 
-							// (A20)
-							for b := e.nocc; b < e.norb; b++ {
-								symD := e.so(b) ^ e.so(k) ^ e.so(m)
-								for _, d := range e.virs[symD] {
-									fA += e.v(d, b, k, m) *
-										(e.v(a, c, d, b)*exp1 + e.v(a, c, b, d)*exp2) /
-										(ep[k] + ep[m] - ep[d] - ep[b])
-								}
+						// (A20)
+						for b := e.nocc; b < e.norb; b++ {
+							symD := e.so(b) ^ e.so(k) ^ e.so(m)
+							for _, d := range e.virs[symD] {
+								fA += e.v(d, b, k, m) *
+									(e.v(a, c, d, b)*exp1 + e.v(a, c, b, d)*exp2) /
+									(ep[k] + ep[m] - ep[d] - ep[b])
 							}
-							// (A21)
-							for b := e.nocc; b < e.norb; b++ {
-								symL := e.so(a) ^ e.so(b) ^ e.so(k)
-								for _, l := range e.occs[symL] {
-									vLcBm := e.v(l, c, b, m)
-									vLcMb := e.v(l, c, m, b)
-									fB += (e.v(a, b, k, l)*(vLcBm*exp3+vLcMb*exp1) +
-										e.v(a, b, l, k)*(vLcBm*exp1+vLcMb*exp2)) /
-										(ep[a] + ep[b] - ep[k] - ep[l])
-								}
+						}
+						// (A21)
+						for b := e.nocc; b < e.norb; b++ {
+							symL := e.so(a) ^ e.so(b) ^ e.so(k)
+							for _, l := range e.occs[symL] {
+								vLcBm := e.v(l, c, b, m)
+								vLcMb := e.v(l, c, m, b)
+								fB += (e.v(a, b, k, l)*(vLcBm*exp3+vLcMb*exp1) +
+									e.v(a, b, l, k)*(vLcBm*exp1+vLcMb*exp2)) /
+									(ep[a] + ep[b] - ep[k] - ep[l])
 							}
-							// (A22)
-							for j := range e.nocc {
-								symL := e.so(a) ^ e.so(c) ^ e.so(j)
-								for _, l := range e.occs[symL] {
-									fC += e.v(a, c, j, l) *
-										(e.v(j, l, m, k)*exp2 + e.v(j, l, k, m)*exp1) /
-										(ep[j] + ep[l] - ep[a] - ep[c])
-								}
+						}
+						// (A22)
+						for j := range e.nocc {
+							symL := e.so(a) ^ e.so(c) ^ e.so(j)
+							for _, l := range e.occs[symL] {
+								fC += e.v(a, c, j, l) *
+									(e.v(j, l, m, k)*exp2 + e.v(j, l, k, m)*exp1) /
+									(ep[j] + ep[l] - ep[a] - ep[c])
 							}
-							// (A23)
-							for b := e.nocc; b < e.norb; b++ {
-								symL := e.so(b) ^ e.so(a) ^ e.so(m)
-								for _, l := range e.occs[symL] {
-									vLcKb := e.v(l, c, k, b)
-									vLcBk := e.v(l, c, b, k)
-									fD += (e.v(b, a, l, m)*(vLcKb*exp2+vLcBk*exp4) +
-										e.v(b, a, m, l)*(vLcKb*exp1+vLcBk*exp2)) /
-										(ep[b] + ep[a] - ep[l] - ep[m])
-								}
+						}
+						// (A23)
+						for b := e.nocc; b < e.norb; b++ {
+							symL := e.so(b) ^ e.so(a) ^ e.so(m)
+							for _, l := range e.occs[symL] {
+								vLcKb := e.v(l, c, k, b)
+								vLcBk := e.v(l, c, b, k)
+								fD += (e.v(b, a, l, m)*(vLcKb*exp2+vLcBk*exp4) +
+									e.v(b, a, m, l)*(vLcKb*exp1+vLcBk*exp2)) /
+									(ep[b] + ep[a] - ep[l] - ep[m])
 							}
 						}
 					}
 				}
-				// (A19) then (A33).
-				fkk := 0.5*(fA+fC) + (fB + fD)
+			}
+			// (A19).
+			fmat[idx] = 0.5*(fA+fC) + (fB + fD)
+		})
+		// (A33), replayed serially in the reference's (k,k1) order so that every ρ cell sees
+		// exactly the += sequence the serial loop gave it.
+		for ki := range no {
+			for k1i := range no {
+				k, k1 := occ[ki], occ[k1i]
+				fkk := fmat[ki*no+k1i]
 				rho.set(k, k1, rho.At(k, k1)+fkk)
 				rho.set(k1, k, rho.At(k1, k)+fkk)
 			}
@@ -120,7 +148,13 @@ func (e *engine) rhoParticle3(rho *Sigma) {
 		f1 := make([]float64, ns*nv)
 		f2 := make([]float64, ns*nv)
 
-		for si, c := range sat {
+		// One satellite row per work item. This build is the expensive half: ~5.1e5
+		// configurations × 154 virtuals at production scale, and each (si,bi) amplitude runs the (A29)-
+		// (A32) g-sums, i·j + cc·d + 2·(j·cc) ≈ 4.5e4 terms — ~3.5e12 in total. Row si owns
+		// f1[si*nv:(si+1)*nv] and f2 likewise; nothing else is written, and every g accumulator
+		// is a local, so the sums keep their order exactly.
+		parallel.HeavyRows(ns, func(si int) {
+			c := sat[si]
 			a, k, l, typ := c.a, c.k, c.l, c.typ
 			for bi, b := range vir {
 				// (A27) — note the k==l and singlet branches use the (ε_k+ε_l−ε_a−ε_b)
@@ -283,10 +317,17 @@ func (e *engine) rhoParticle3(rho *Sigma) {
 
 				f2[si*nv+bi] = (gA + gC + gB + gD + gC1 + gD1) / dVir
 			}
-		}
+		})
 
 		// (A36): ρ_ba += (f1ᵀf2 + f2ᵀf1)_ba.
-		for bi, b := range vir {
+		//
+		// b is the work item: 154² = 23716 cells each reducing over ~5.1e5 satellites is ~1.2e10
+		// multiply-adds at production scale. Row b owns the cells (b,·) — vir holds one irrep's virtuals,
+		// so no other row and no other irrep writes them — and the Σ_s inside each cell is left
+		// exactly as it was. nv = 154 is below 2·GOMAXPROCS on a 96-core node, which is why this
+		// is HeavyRows and not Rows.
+		parallel.HeavyRows(nv, func(bi int) {
+			b := vir[bi]
 			for ai, a := range vir {
 				var s float64
 				for si := range sat {
@@ -294,6 +335,6 @@ func (e *engine) rhoParticle3(rho *Sigma) {
 				}
 				rho.set(b, a, rho.At(b, a)+s)
 			}
-		}
+		})
 	}
 }

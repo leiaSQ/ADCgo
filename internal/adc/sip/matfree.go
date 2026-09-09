@@ -1,6 +1,7 @@
 package sip
 
 import (
+	"math"
 	"unsafe"
 
 	"github.com/leiaSQ/ADCgo/backend"
@@ -260,6 +261,108 @@ func (mx *Matrix) matFreeC22O3(denseBytes int64) bool {
 // r<c — so element(r,c) must be evaluated with the lower-indexed config as the row (lo=min(r,c))
 // to stay bit-for-bit with the dense block. (The ADC(4) newC22MatFree can ignore this because
 // c22elem4 is symmetric under argument swap.)
+// c22Buckets prunes the 2h1p×2h1p candidate columns of a row to those that can be nonzero.
+//
+// c22off(row=(k,l,a), col=(m,n,b)) is nonzero ONLY when the two configs share the particle
+// (a == b) or share a hole ({k,l} ∩ {m,n} ≠ ∅). Every term in the element is gated that way:
+// the four deltaV calls return immediately unless their first two arguments are equal
+// (elements.go), which is k==m, l==n, l==m and k==n respectively, and the only terms outside
+// deltaV sit behind `a == b`. The k==l "akk" row branch is the same condition read with
+// {k,l} = {k}.
+//
+// Without this the applier scans every column for every row: n2² = 518,056² ≈ 2.68e11 element
+// evaluations PER MAT-VEC at production scale, which is hours of legitimate work per Lanczos block
+// and is indistinguishable from a hang because nothing is logged per block. The gate cuts that
+// to ~1/13 of the columns — a row's candidates are the ~2·nocc hole pairs touching k or l, times
+// the virtuals, plus the one hole-pair family sharing its particle.
+//
+// The lists are built in ASCENDING row index and merged that way, which is what keeps the fix
+// bit-exact: the applier already skips g == 0, so walking a superset of the nonzero columns in
+// the original order replays exactly the same sequence of accumulations.
+type c22Buckets struct {
+	byHole [][]int32 // occupied index -> satellite rows holding it as k or l
+	byVir  [][]int32 // virtual position -> satellite rows holding it as the particle
+}
+
+func buildC22Buckets(rows []Config, nocc, nvir int) *c22Buckets {
+	b := &c22Buckets{byHole: make([][]int32, nocc), byVir: make([][]int32, nvir)}
+	nh := make([]int, nocc)
+	nv := make([]int, nvir)
+	for _, c := range rows {
+		nh[c.Occ[0]]++
+		if c.Occ[1] != c.Occ[0] {
+			nh[c.Occ[1]]++
+		}
+		nv[c.Vir]++
+	}
+	for i := range b.byHole {
+		b.byHole[i] = make([]int32, 0, nh[i])
+	}
+	for i := range b.byVir {
+		b.byVir[i] = make([]int32, 0, nv[i])
+	}
+	for r, c := range rows {
+		b.byHole[c.Occ[0]] = append(b.byHole[c.Occ[0]], int32(r))
+		if c.Occ[1] != c.Occ[0] {
+			b.byHole[c.Occ[1]] = append(b.byHole[c.Occ[1]], int32(r))
+		}
+		b.byVir[c.Vir] = append(b.byVir[c.Vir], int32(r))
+	}
+	return b
+}
+
+// candidates merges the ascending lists for row (k,l,a) into dst, deduped and still ascending.
+// Returns the merged slice (dst is reused across rows by the caller).
+//
+// `self` — the row's own index — is merged in as a fourth source so the DIAGONAL keeps its
+// position in the ascending sweep. That is not cosmetic: the dense form accumulates column by
+// column in ascending order, so lifting the diagonal out of the walk reassociates the sum and
+// moves the result (measured at 7.1e-15 on h2o before this was fixed).
+func (b *c22Buckets) candidates(dst []int32, k, l, vir, self int) []int32 {
+	dst = dst[:0]
+	x, y := b.byHole[k], b.byVir[vir]
+	var z []int32
+	if l != k {
+		z = b.byHole[l]
+	}
+	one := [1]int32{int32(self)}
+	w := one[:]
+	i, j, m, q := 0, 0, 0, 0
+	var last int32 = -1
+	for i < len(x) || j < len(y) || m < len(z) || q < len(w) {
+		v := int32(math.MaxInt32)
+		if i < len(x) && x[i] < v {
+			v = x[i]
+		}
+		if j < len(y) && y[j] < v {
+			v = y[j]
+		}
+		if m < len(z) && z[m] < v {
+			v = z[m]
+		}
+		if q < len(w) && w[q] < v {
+			v = w[q]
+		}
+		for i < len(x) && x[i] == v {
+			i++
+		}
+		for j < len(y) && y[j] == v {
+			j++
+		}
+		for m < len(z) && z[m] == v {
+			m++
+		}
+		for q < len(w) && w[q] == v {
+			q++
+		}
+		if v != last {
+			dst = append(dst, v)
+			last = v
+		}
+	}
+	return dst
+}
+
 func (mx *Matrix) newC22MatFreeO3() matFreePart {
 	if dk, ok := mx.be.(backend.DeviceKernels); ok {
 		return mx.newC22MatFreeO3Device(dk)
@@ -270,34 +373,90 @@ func (mx *Matrix) newC22MatFreeO3() matFreePart {
 	n2 := len(rows)
 	el := mx.el
 	hd := mx.be.(backend.HostData)
+	bk := buildC22Buckets(rows, sp.Nocc, sp.Nvir)
 
+	// HeavyRows, not Rows: n2 is large in production but a small sector can fall under Rows'
+	// 2*GOMAXPROCS floor and silently run the whole apply on one core.
 	apply := func(in, out backend.BlockView) {
 		xin := hd.HostSlice(in.V)
 		yout := hd.HostSlice(out.V)
 		b := in.Cols
 		ldi, ldo := in.Ld, out.Ld
-		parallel.Rows(n2, func(r int) {
-			rc := rows[r]
-			for c := 0; c < n2; c++ {
-				var g float64
-				switch {
-				case c == r:
-					g = el.c22diag(rc)
-				case r < c:
-					g = el.c22off(rc, rows[c]) // row = lower index
-				default:
-					g = el.c22off(rows[c], rc) // row = lower index (c < r)
-				}
-				if g == 0 {
-					continue
-				}
-				for j := 0; j < b; j++ {
-					yout[main+r+j*ldo] += g * xin[main+c+j*ldi]
+		W := parallel.ChunkWorkers(n2)
+		parallel.Chunks(n2, W, func(_, lo, hi int) {
+			cand := make([]int32, 0, 1024)
+			for r := lo; r < hi; r++ {
+				rc := rows[r]
+				cand = bk.candidates(cand, rc.Occ[0], rc.Occ[1], rc.Vir, r)
+				for _, c32 := range cand {
+					c := int(c32)
+					var g float64
+					switch {
+					case c == r:
+						g = el.c22diag(rc)
+					case r < c:
+						g = el.c22off(rc, rows[c]) // row = lower index
+					default:
+						g = el.c22off(rows[c], rc) // row = lower index (c < r)
+					}
+					if g == 0 {
+						continue
+					}
+					for j := 0; j < b; j++ {
+						yout[main+r+j*ldo] += g * xin[main+c+j*ldi]
+					}
 				}
 			}
 		})
 	}
 	return matFreePart{apply: apply, release: func() {}}
+}
+
+// deviceERI returns the flat norb⁴ ERI tensor the CUDA kernels index,
+// eri[((p·n+q)·n+r)·n+s] = ints.Eri(p,q,r,s) — the layout of d_eri in adc4_kernels.cu and of
+// dd_eri in adc2dip_kernels.cu. Built once per Matrix and memoized, exactly as dip's
+// buildSatDeviceSoA does.
+//
+// Both matter at the production system's norb=212. The array is 2.02e9 doubles — 16.2 GB — and every
+// device applier constructor (newC22MatFreeO3Device, newWert2MatFreeDevice) filled its own
+// byte-identical copy from scratch with 2.0e9 scalar Eri() calls on ONE core, once per
+// assemble; Release() followed by a fresh ApplyFull pays it again. Memoizing costs the 16 GB
+// of host residency for the life of the Matrix, which is the same trade dip already makes and
+// far cheaper than the rebuild.
+//
+// The p-slabs are disjoint output ranges of a preallocated array, so filling them concurrently
+// is bit-exact — no arithmetic happens here at all, only ordered copies. HeavyRows rather than
+// Rows because norb (212) is barely above Rows' 2*GOMAXPROCS fallback and would drop below it
+// on a larger node, while one slab is norb³ = 9.5e6 loads.
+//
+// Assemble is single-goroutine (assembleStep runs its steps in sequence), so the memo needs no
+// lock; the constructors are never called concurrently.
+//
+// Worth knowing for whoever needs the next 16 GB: this copy is redundant, not merely slow.
+// integrals.Store.Eri forwards straight to fcidump.Data.TwoE, which reads its own dense
+// NORB⁴ array at exactly this index expression, ((p·n+q)·n+r)·n+s — and Space.Norb *is*
+// Data.NORB (cmd/adcgo passes d.NORB to NewSpace). So the loop below is an element-by-element
+// self-copy, and an accessor handing back fcidump's slice would delete both the traversal and
+// the second 16 GB. That accessor belongs in fcidump/integrals, which is why it is not here;
+// dip's buildSatDeviceSoA carries the identical duplicate.
+func (mx *Matrix) deviceERI() []float64 {
+	if mx.flatERI != nil {
+		return mx.flatERI
+	}
+	norb := mx.sp.Norb
+	flat := make([]float64, norb*norb*norb*norb)
+	parallel.HeavyRows(norb, func(p int) {
+		for q := range norb {
+			for r := range norb {
+				base := ((p*norb+q)*norb + r) * norb
+				for s := range norb {
+					flat[base+s] = mx.el.ints.Eri(p, q, r, s)
+				}
+			}
+		}
+	})
+	mx.flatERI = flat
+	return flat
 }
 
 // newC22MatFreeO3Device is the GPU (cuda) applier for the order-3 2h1p×2h1p satellite block:
@@ -320,18 +479,8 @@ func (mx *Matrix) newC22MatFreeO3Device(dk backend.DeviceKernels) matFreePart {
 	}
 
 	// Flat ERI tensor eri[((a·n+c)·n+b)·n+d] = e.v(a,b,c,d) = ints.Eri(a,c,b,d) (== the wert2
-	// layout, d_eri in adc4_kernels.cu).
-	eri := make([]float64, norb*norb*norb*norb)
-	for p := 0; p < norb; p++ {
-		for q := 0; q < norb; q++ {
-			for r := 0; r < norb; r++ {
-				base := ((p*norb+q)*norb + r) * norb
-				for s := 0; s < norb; s++ {
-					eri[base+s] = mx.el.ints.Eri(p, q, r, s)
-				}
-			}
-		}
-	}
+	// layout, d_eri in adc4_kernels.cu). Shared and built in parallel — see deviceERI.
+	eri := mx.deviceERI()
 
 	dK, dL, dVir, dTyp := dk.UploadInts(rK), dk.UploadInts(rL), dk.UploadInts(rVir), dk.UploadInts(rTyp)
 	dERI := dk.DeviceERI(eri)
@@ -377,19 +526,10 @@ func (mx *Matrix) newWert2MatFreeDevice(dk backend.DeviceKernels) matFreePart {
 		cL[c], cM[c], cSpin[c] = int32(cf.L), int32(cf.M), int32(cf.Spin)
 	}
 
-	// Flat ERI tensor eri[((p·n+q)·n+r)·n+s] = ints.Eri(p,q,r,s) (== TwoE), and the spin
-	// table coeff1[3][13][30] flattened to (Typ·13+col2)·30+(n-1).
-	eri := make([]float64, norb*norb*norb*norb)
-	for p := 0; p < norb; p++ {
-		for q := 0; q < norb; q++ {
-			for r := 0; r < norb; r++ {
-				base := ((p*norb+q)*norb + r) * norb
-				for s := 0; s < norb; s++ {
-					eri[base+s] = mx.el.ints.Eri(p, q, r, s)
-				}
-			}
-		}
-	}
+	// Flat ERI tensor eri[((p·n+q)·n+r)·n+s] = ints.Eri(p,q,r,s) (== TwoE) — the very same
+	// bytes the c22 kernel indexes, so both come from deviceERI. The spin table
+	// coeff1[3][13][30] is flattened to (Typ·13+col2)·30+(n-1).
+	eri := mx.deviceERI()
 	coeff1Flat := make([]float64, 3*13*30)
 	for t := 0; t < 3; t++ {
 		for c := 0; c < 13; c++ {

@@ -1,6 +1,10 @@
 package selfenergy
 
-import "math"
+import (
+	"math"
+
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
+)
 
 // coupling.go — the coupling amplitudes U_I(p) between orbital p and the satellite space,
 // through third order. Ported from ../ADC/self_energy/constanti/common/aufbau1.f:
@@ -94,7 +98,25 @@ func (e *engine) kopp2(sp *satSpace, orbs []int, u []float64) {
 	pair := e.pairSet(sp.blk)           // same space as (k,l)
 	single := e.pairSet(sp.blk.other()) // same space as j
 
-	for _, c := range sp.confs {
+	// One satellite configuration per work item. kopp2 is the large serial precursor sitting
+	// directly in front of the already-parallel solveResolvent on the Σ(∞) path, and at production scale
+	// scale it dwarfs it: the 2h1p space of the single C1 irrep holds nocc(nocc+1)/2 · nvir =
+	// 1711 · 154 = 263,494 configurations, and each one runs the ladder over the complementary
+	// space (nvir(nvir+1)/2 = 11,935 (kk,ll) pairs × 212 orbitals ≈ 2.5e6) plus contributions
+	// 2a/2b (nocc · nvir = 8932 pairs × 212 ≈ 1.9e6). That is ~1.2e12 integral evaluations per
+	// block on one core — the bulk of the 78 h Σ(∞) build.
+	//
+	// Disjointness, checked against buildSatSpace (satspace.go): every configuration is appended
+	// with off = sp.dim and sp.dim then advances by maxS, so configuration ci owns exactly the
+	// spin rows [c.off, c.off+c.maxS) of u and no two configurations share one. Each iteration
+	// touches u only through u[(c.off+ms)*nc+np], so the rows are disjoint and the += order
+	// WITHIN a row — kopp1's contribution, then ladder, then 2a, then 2b, in the reference's
+	// enumeration — is untouched. Bit-identical to the serial walk.
+	//
+	// HeavyRows, not Rows: with symmetry an irrep's configuration count collapses, and Rows
+	// would silently serialize the whole thing below 2·GOMAXPROCS configurations.
+	parallel.HeavyRows(len(sp.confs), func(ci int) {
+		c := sp.confs[ci]
 		j, k, l := c.j, c.k, c.l
 		fkl := faktor(c.maxS)
 		sumkl := 1.0 // SUMFAK: 2 when k == l
@@ -205,5 +227,5 @@ func (e *engine) kopp2(sp *satSpace, orbs []int, u []float64) {
 				}
 			}
 		}
-	}
+	})
 }

@@ -94,13 +94,27 @@ func PlanBatches(blocks []Block) []Batch {
 		}
 		slices.Sort(offs)
 
-		for j := range depth {
-			var members []int
-			for _, off := range offs {
-				if idxs := byOff[off]; j < len(idxs) {
-					members = append(members, idxs[j])
-				}
+		// Deal each offset group's blocks across the depth batches in ONE pass over the members,
+		// rather than re-scanning every offset once per batch. The old form was
+		// O(depth × offsets) — it visited every (batch, offset) pair and discarded the ones where
+		// that offset had no j-th block — while the members it actually emits number only
+		// sum(len(idxs)). The two are the same when every offset group is full and diverge badly
+		// when they are not: a bucket with one deep offset group and many shallow ones costs
+		// depth × offsets visits to emit offsets + depth − 1 members. The production system's DIP sectors have
+		// exactly that shape (a few heavily shared write offsets among tens of thousands of
+		// singletons), and the plan is built once per sector on one core before any device work
+		// starts.
+		//
+		// The emitted batches are unchanged, member for member: batch j still takes the j-th
+		// block of every offset group that has one, appended in the same ascending-offset order,
+		// and is then sorted by block index exactly as before.
+		members := make([][]int, depth)
+		for _, off := range offs {
+			for j, idx := range byOff[off] {
+				members[j] = append(members[j], idx)
 			}
+		}
+		for j := range depth {
 			// Members are collected in ascending WRITE-OFFSET order, which for the transposed
 			// half is unrelated to block index. Sort them ascending by block index instead, so
 			// callers that issue a batch restricted to a contiguous block range can find their
@@ -114,8 +128,8 @@ func PlanBatches(blocks []Block) []Batch {
 			// same-bucket blocks share a shape, so their output ranges are disjoint. Each member
 			// computes C_i += A_i·B_i into storage no other member touches, so the order they
 			// appear in the batch cannot change a single bit.
-			slices.Sort(members)
-			out = append(out, Batch{Trans: k.trans, Blocks: members})
+			slices.Sort(members[j])
+			out = append(out, Batch{Trans: k.trans, Blocks: members[j]})
 		}
 	}
 	return out

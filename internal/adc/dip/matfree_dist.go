@@ -20,11 +20,17 @@ import (
 // panels stay partitioned across the devices (distBackend.GemmMat), and the satellite region —
 // the multi-TB memory hog that made -mgpu materialize densely — is recomputed instead of stored.
 //
-// Two appliers live here:
+// Three appliers live here:
 //
-//   - newSatelliteMatFreePerDevice (preferred): each device recomputes ONLY its own output row
-//     band, on-device, with the CUDA kernel. Requires every partition to expose device kernels
-//     and every pair to be peered (backend.PartitionedDevices).
+//   - newSatBatchedPerDevice (production, what -mgpu -matfree on selects): the batched
+//     contraction path — per-device plan split, on-device fill, cuBLAS batched GEMM.
+//   - newSatelliteMatFreePerDevice: the per-SCALAR ancestor of the above — each device recomputes
+//     ONLY its own output row band, on-device, with dip_sat_apply. Currently UNREACHABLE: the two
+//     places that could select it (newSatelliteMatFreeParts, then newSatelliteMatFreePart) are
+//     both guarded by perDeviceSatelliteOK, and newSatelliteMatFreeParts already returns the
+//     batched applier whenever that predicate holds — so by the time newSatelliteMatFreePart
+//     re-tests it, it is false by construction. It is kept as the per-scalar reference the
+//     batched path was derived from; anything that revives it must re-check that guard chain.
 //   - newSatelliteMatFreeDistributed (fallback): gather-apply-scatter through the host. Correct
 //     everywhere — including gonum sub-backends, which have no kernel — but it downloads the
 //     whole panel, contracts on CPU and uploads it back (~137 GB each way for the production system), which is
@@ -233,6 +239,10 @@ func satRowBands(bounds []int, main, n int) (lo, hi []int) {
 // newSatelliteMatFreePerDevice builds the per-device on-device satellite applier: no host
 // round-trip, no scatter. Each device stages a full-height input slab for a chunk of columns
 // (gathered from every partition over NVLink) and runs the kernel over its own output band.
+//
+// UNREACHABLE as wired today — newSatBatchedPerDevice takes every case that would reach it; see
+// the file header for the guard chain. Kept correct and kept concurrent so it is not a trap for
+// whoever re-wires it, not because it runs.
 func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) matFreePart {
 	p := mx.buildSatScalarPlan()
 	s := mx.buildSatDeviceSoA(p)
@@ -255,11 +265,24 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 	}
 
 	// Per-device: the uploaded plan, and the staging slab for one column chunk.
+	//
+	// Concurrent, for exactly the reason the batched twin's construction loop is
+	// (newSatBatchedPerDevice): uploadSatSoA pushes the norb⁴ ERI tensor — 16 GB at the production system's
+	// norb=212 — plus the 21-array config SoA, and Alloc reserves the n×w slab (~5.1 GB on the
+	// production singlet at w=64), and every one of those calls blocks on a round-trip through that
+	// device's owning goroutine. Serially that is eight 16 GB uploads one after another with
+	// seven GPUs idle. goDevices, not parallel.Rows: Rows runs serially below 2*GOMAXPROCS rows
+	// and nd=8 is far under that, and goDevices is what re-raises a failed cudaMalloc on the
+	// caller's goroutine instead of aborting the process from a bare worker.
+	//
+	// Disjoint by construction — device d touches only its own sub-backend, its own kernels and
+	// slot d of bufs/slab — and this is allocation and upload only, no floating-point reduction,
+	// so it cannot move a bit of the result.
 	bufs := make([]*satDeviceBufs, nd)
 	slab := make([]backend.Vector, nd)
-	for d := range nd {
+	goDevices(nd, func(d int) {
 		if !active[d] {
-			continue
+			return
 		}
 		dk, ok := pd.PartKernels(d)
 		if !ok {
@@ -267,7 +290,7 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 		}
 		bufs[d] = uploadSatSoA(dk, s)
 		slab[d] = pd.PartBackend(d).Alloc(n * w)
-	}
+	})
 
 	apply := func(in, out backend.BlockView) {
 		for c0 := 0; c0 < in.Cols; c0 += w {
@@ -392,16 +415,29 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 		}
 	})
 
+	// Each device fills ONLY the applications it will issue. The whole-plan fill this replaces
+	// materialized all 2S blocks on every device and discarded the (nd-1)/nd it did not own —
+	// nd-fold redundant work in the phase that is second-largest after the GEMM.
+	//
+	// Concurrent over devices, for the same reason as the goDevices loop two statements below:
+	// this is ~1.64e8 block applications summed over the pool at production scale (~2.05e7 per
+	// device at nd=8), each one a slot lookup plus a rows·cols multiply, and run serially the
+	// whole pass sat on one core while construction stalled. HeavyRows, not parallel.Rows: Rows
+	// falls back to a serial loop below 2*GOMAXPROCS rows and nd=8 is far below 256, so it would
+	// have changed nothing.
+	//
+	// Disjoint by construction — device d reads only memberOf[d] (the ownership split above gave
+	// each device its own member lists) plus the shared read-only basePlan, and writes only slot
+	// d of appsOf/chunksOf/active. It is enumeration and bookkeeping, no floating-point
+	// reduction, and appChunks walks each device's members in the same ascending order whatever
+	// the schedule, so the emitted apps/chunks are bit-identical to the serial version.
 	active := make([]bool, nd)
 	appsOf := make([][]int32, nd)
 	chunksOf := make([][]jiiChunk, nd)
-	for d := range nd {
-		// Each device fills ONLY the applications it will issue. The whole-plan fill this
-		// replaces materialized all 2S blocks on every device and discarded the (nd-1)/nd it did
-		// not own — nd-fold redundant work in the phase that is second-largest after the GEMM.
+	parallel.HeavyRows(nd, func(d int) {
 		appsOf[d], chunksOf[d] = basePlan.appChunks(memberOf[d], JIIFillBudgetElems)
 		active[d] = len(appsOf[d]) > 0
-	}
+	})
 
 	// Build the per-device state CONCURRENTLY. Each device uploads the norb⁴ ERI tensor (16 GB at
 	// the production system's norb=212), the 21-array config SoA, the plan SoA and its n×w slab, and every one

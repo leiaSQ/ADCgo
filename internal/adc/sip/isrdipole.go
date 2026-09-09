@@ -5,6 +5,7 @@ import (
 	"math"
 
 	"github.com/leiaSQ/ADCgo/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // The intermediate-state representation of a one-electron operator over the SIP
@@ -292,6 +293,34 @@ func (o *ISRDipole) satsat(r, c Config) float64 {
 // all Size()×Cols() pairs it walks the short list of ket configurations a row can possibly
 // reach — same hole pair with any particle, or one hole moved — and asks At for the value.
 // Bra rows in the 3h2p space stay empty.
+//
+// This is where building an ISR dipole spends its time once the corrections' p11 tables are
+// up. Every satellite bra row probes ket.BeginSat main columns plus one byHoles lookup per
+// virtual and per moved hole: for the production system (n_2h1p = 518,056 rows, nvir = 154, nocc = 58)
+// that is ~1.4e8 map lookups and as many At() evaluations, and NewISRDipoleCross runs it once
+// per Cartesian component — three times over. Serially it is the longest single step of the
+// transition-moment pass, and it sits after the solver, where nothing is checkpointed.
+//
+// Both sweeps are parallel over the BRA row, which is the axis that makes them disjoint: row
+// i appends only to rows[i], and no worker reads another's row. Everything the body reads is
+// finished before the sweeps start — byHoles/holesOf are fully built above and never written
+// again, and At is a pure read of d, the spaces, and the already-built corr tables (p11, t8,
+// dnull), which is why isrdipole_corr.go builds them before calling sparsify. Concurrent map
+// READS need no lock. Bit-identical: each element is still o.At(i,j) evaluated once, and each
+// row's entries are still emitted in the same candidate order, so Apply's per-row summation
+// order is unchanged — nothing is reassociated.
+//
+// The 1h sweep uses HeavyRows because bra.BeginSat is nocc (58 for the production system), far below
+// parallel.Rows' 2*GOMAXPROCS serial fallback (128 on a 64-core node) — and with corrections
+// on, one of those rows is a dense 518k-column scan, the definition of a heavy row.
+//
+// The satellite sweep uses Chunks: the rows are uniform in cost (their candidate counts
+// depend on nvir/nocc, not on the row), so a static split needs no stealing, and it gives
+// each worker one reusable buffer. That buffer is what removes the append-growth chain — a
+// row grown from nil reallocates and copies ~log2(len) times, over half a million rows — and
+// the final clone makes each stored row exactly its own length instead of the up-to-2x
+// overshoot append leaves behind, which at 518k rows is the difference between a right-sized
+// operator and a doubled one.
 func (o *ISRDipole) sparsify() [][]dipEntry {
 	bra, ket := o.bra, o.ket
 
@@ -319,56 +348,82 @@ func (o *ISRDipole) sparsify() [][]dipEntry {
 	}
 
 	rows := make([][]dipEntry, bra.Size())
-	push := func(i, j int) {
+
+	// push takes and returns the row under construction rather than closing over it, so no
+	// slice header is shared across goroutines (and none escapes to the heap per row).
+	push := func(dst []dipEntry, i, j int) []dipEntry {
 		if v := o.At(i, j); v != 0 {
-			rows[i] = append(rows[i], dipEntry{j, v})
+			dst = append(dst, dipEntry{j, v})
 		}
+		return dst
 	}
-	for i := range bra.BeginSat {
+
+	parallel.HeavyRows(bra.BeginSat, func(i int) {
 		hole := bra.Configs[i].Occ[0]
+		// Exact candidate count, so the row allocates once and never grows.
+		cand := ket.BeginSat
+		if o.corr != nil {
+			cand = len(ket.Configs)
+		} else {
+			cand += len(holesOf[hole])
+		}
+		row := make([]dipEntry, 0, cand)
 		for j := range ket.BeginSat {
-			push(i, j)
+			row = push(row, i, j)
 		}
 		if o.corr != nil {
 			// (8c) carries no delta between the 1h hole and the satellite's holes, so with
 			// corrections on this block is dense and the zeroth-order reachability below
 			// would silently drop most of it.
 			for j := ket.BeginSat; j < len(ket.Configs); j++ {
-				push(i, j)
+				row = push(row, i, j)
 			}
-			continue
-		}
-		for _, j := range holesOf[hole] {
-			push(i, j)
-		}
-	}
-	for i := bra.BeginSat; i < len(bra.Configs); i++ {
-		r := bra.Configs[i]
-		k, l := r.Occ[0], r.Occ[1]
-		for j := range ket.BeginSat {
-			push(i, j)
-		}
-		for v := range ket.Nvir { // same holes, any particle (includes the diagonal)
-			for _, j := range pair(k, l, v) {
-				push(i, j)
+		} else {
+			for _, j := range holesOf[hole] {
+				row = push(row, i, j)
 			}
 		}
-		// One hole moved, particle fixed. h == k in the first sweep (h == l in the
-		// second) reaches the closed-hole single; the h that would reproduce {k,l} is
-		// skipped, since the sweep above already emitted it.
-		for h := range ket.Nocc {
-			if h != l {
-				for _, j := range pair(k, h, r.Vir) {
-					push(i, j)
+		if len(row) > 0 {
+			rows[i] = row
+		}
+	})
+
+	nsat := len(bra.Configs) - bra.BeginSat
+	parallel.Chunks(nsat, parallel.ChunkWorkers(nsat), func(_, lo, hi int) {
+		buf := make([]dipEntry, 0, ket.BeginSat+ket.Nvir)
+		for ri := lo; ri < hi; ri++ {
+			i := bra.BeginSat + ri
+			r := bra.Configs[i]
+			k, l := r.Occ[0], r.Occ[1]
+			buf = buf[:0]
+			for j := range ket.BeginSat {
+				buf = push(buf, i, j)
+			}
+			for v := range ket.Nvir { // same holes, any particle (includes the diagonal)
+				for _, j := range pair(k, l, v) {
+					buf = push(buf, i, j)
 				}
 			}
-			if l != k && h != k {
-				for _, j := range pair(l, h, r.Vir) {
-					push(i, j)
+			// One hole moved, particle fixed. h == k in the first sweep (h == l in the
+			// second) reaches the closed-hole single; the h that would reproduce {k,l} is
+			// skipped, since the sweep above already emitted it.
+			for h := range ket.Nocc {
+				if h != l {
+					for _, j := range pair(k, h, r.Vir) {
+						buf = push(buf, i, j)
+					}
+				}
+				if l != k && h != k {
+					for _, j := range pair(l, h, r.Vir) {
+						buf = push(buf, i, j)
+					}
 				}
 			}
+			if len(buf) > 0 {
+				rows[i] = append([]dipEntry(nil), buf...)
+			}
 		}
-	}
+	})
 	return rows
 }
 

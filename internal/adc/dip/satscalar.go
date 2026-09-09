@@ -1,6 +1,8 @@
 package dip
 
 import (
+	"sync/atomic"
+
 	"github.com/leiaSQ/ADCgo/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
@@ -122,64 +124,101 @@ func (p *satScalarPlan) apply(in, out backend.BlockView) {
 
 // applyHost is the core per-scalar accumulation on plain host slices (xin read, yout += ),
 // one output scalar at a time — the CPU twin of the CUDA kernel and the shared kernel for both
-// the HostData apply and the distributed gather-apply-scatter path (matfree_dist.go). Rows are
-// chunked across the worker pool; each worker owns a disjoint band of output rows, so there is
-// no reduction or locking. b is the panel column count; ldi/ldo the input/output leading dims.
+// the HostData apply and the distributed gather-apply-scatter path (matfree_dist.go). Each worker
+// owns a disjoint band of output rows, so there is no reduction or locking. b is the panel column
+// count; ldi/ldo the input/output leading dims.
+//
+// The rows are handed out by WORK STEALING over fixed-size tiles, not by the static equal-count
+// split parallel.Chunks gives. A row's cost is O(|candJ| + |candI|) — the column groups sharing an
+// occupied index with it — times nvir times b, and that candidate count varies row to row with how
+// often the row's occupied indices appear in the JII/IJK group lists. An equal-COUNT split is
+// therefore not an equal-WORK split, and this is the per-mat-vec hot loop of the -mgpu fallback
+// applier (newSatelliteMatFreeDistributed, taken whenever the partitions are not fully peered or
+// lack device kernels), over ~1.0e7 satellite rows on the production singlet: whatever the heaviest
+// static band costs extra, every other core spends idle.
+//
+// Pure scheduling, bit-identical either way: rows write disjoint yout rows (row R accumulates only
+// into yout[R + j*ldo]) and read shared immutable data, so there is no floating-point reduction
+// across workers and each output scalar is summed in exactly the same order regardless of which
+// worker draws it. The per-worker newStamp/cand scratch stays per worker — the stamps are a
+// generation-tagged dedup over the candidate lists and sharing them would corrupt the candidates.
 func (p *satScalarPlan) applyHost(xin, yout []float64, b, ldi, ldo int) {
 	main := p.main
 	nsat := len(p.rTyp)
 	njii, nijk := len(p.jCfg), len(p.iCfg)
+	if nsat == 0 {
+		return
+	}
 
-	parallel.Chunks(nsat, parallel.ChunkWorkers(nsat), func(_, lo, hi int) {
+	// Tiles, not single rows: one row is thousands of ops but not millions, so drawing per row
+	// would put an atomic on the inner loop and re-allocate the ~(njii+nijk)-entry stamps every
+	// time. 128 rows per draw keeps the counter cold and still leaves ~78 k tiles for the production system
+	// singlet — three orders of magnitude more scheduling slack than the 128 static bands it
+	// replaces.
+	const rowTile = 128
+	ntile := (nsat + rowTile - 1) / rowTile
+	var nextTile atomic.Int64
+
+	workers := parallel.ChunkWorkers(ntile)
+	parallel.HeavyRows(workers, func(int) {
+		// Per worker, reused across every tile it draws: the generation-tagged dedup stamps and
+		// the candidate buffers. Sharing them between workers would corrupt the candidate lists.
 		stampJ, stampI := newStamp(njii), newStamp(nijk)
 		var candJ, candI []int32
 		gen := int32(0)
-		for ri := lo; ri < hi; ri++ {
-			R := main + ri
-			rTyp, rGrp, rPart, rVir := p.rTyp[ri], p.rGrp[ri], int(p.rPart[ri]), int(p.rVir[ri])
-			var rOcc [3]int
-			var rn int
-			if rTyp == 0 {
-				rOcc, rn = p.jCfg[rGrp].Occ, 2
-			} else {
-				rOcc, rn = p.iCfg[rGrp].Occ, 3
+		for {
+			t := int(nextTile.Add(1)) - 1
+			if t >= ntile {
+				return
 			}
-
-			// Candidate column groups: those sharing an occupied index with R. A fresh
-			// generation per row keeps the dedup stamp valid without clearing it.
-			gen++
-			candJ = gatherCand(rOcc[:rn], p.bk.jii, stampJ, gen, candJ)
-			candI = gatherCand(rOcc[:rn], p.bk.ijk, stampI, gen, candI)
-
-			// JII column groups (single spin part).
-			for _, cg := range candJ {
-				vir := p.jVir[cg]
-				cst := p.jSt[cg]
-				for cb, sb := range vir {
-					g := p.elem(rTyp, rGrp, rPart, rVir, 0, cg, 0, sb)
-					if g == 0 {
-						continue
-					}
-					C := cst + cb
-					for j := range b {
-						yout[R+j*ldo] += g * xin[C+j*ldi]
-					}
+			hi := min((t+1)*rowTile, nsat)
+			for ri := t * rowTile; ri < hi; ri++ {
+				R := main + ri
+				rTyp, rGrp, rPart, rVir := p.rTyp[ri], p.rGrp[ri], int(p.rPart[ri]), int(p.rVir[ri])
+				var rOcc [3]int
+				var rn int
+				if rTyp == 0 {
+					rOcc, rn = p.jCfg[rGrp].Occ, 2
+				} else {
+					rOcc, rn = p.iCfg[rGrp].Occ, 3
 				}
-			}
-			// IJK column groups (parts spin parts).
-			for _, cg := range candI {
-				vir := p.iVir[cg]
-				nv := len(vir)
-				cst := p.iSt[cg]
-				for cpart := range p.parts {
+
+				// Candidate column groups: those sharing an occupied index with R. A fresh
+				// generation per row keeps the dedup stamp valid without clearing it.
+				gen++
+				candJ = gatherCand(rOcc[:rn], p.bk.jii, stampJ, gen, candJ)
+				candI = gatherCand(rOcc[:rn], p.bk.ijk, stampI, gen, candI)
+
+				// JII column groups (single spin part).
+				for _, cg := range candJ {
+					vir := p.jVir[cg]
+					cst := p.jSt[cg]
 					for cb, sb := range vir {
-						g := p.elem(rTyp, rGrp, rPart, rVir, 1, cg, cpart, sb)
+						g := p.elem(rTyp, rGrp, rPart, rVir, 0, cg, 0, sb)
 						if g == 0 {
 							continue
 						}
-						C := cst + cpart*nv + cb
+						C := cst + cb
 						for j := range b {
 							yout[R+j*ldo] += g * xin[C+j*ldi]
+						}
+					}
+				}
+				// IJK column groups (parts spin parts).
+				for _, cg := range candI {
+					vir := p.iVir[cg]
+					nv := len(vir)
+					cst := p.iSt[cg]
+					for cpart := range p.parts {
+						for cb, sb := range vir {
+							g := p.elem(rTyp, rGrp, rPart, rVir, 1, cg, cpart, sb)
+							if g == 0 {
+								continue
+							}
+							C := cst + cpart*nv + cb
+							for j := range b {
+								yout[R+j*ldo] += g * xin[C+j*ldi]
+							}
 						}
 					}
 				}

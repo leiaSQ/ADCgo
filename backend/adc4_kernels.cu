@@ -255,10 +255,29 @@ __global__ void c22_apply(int n2, int b, int ldIn, int ldOut, int mainOff, int n
         double g;
         if (c == r) {
             g = d_c22diag(Kr, Lr, Vr, Tr, eri, eps, norb, nocc);
-        } else if (r < c) {
-            g = d_c22off(Kr, Lr, Vr, Tr, K[c], L[c], Vir[c], Typ[c], eri, norb, nocc);
         } else {
-            g = d_c22off(K[c], L[c], Vir[c], Typ[c], Kr, Lr, Vr, Tr, eri, norb, nocc);
+            // Necessary condition for a nonzero c22off: the two 2h1p configs must share the
+            // PARTICLE or share a HOLE. Every term is gated that way — d_c22off's four deltaV
+            // contributions each require one of k==m, l==n, l==m, k==n, and the only terms
+            // outside them sit behind a==b.
+            //
+            // This is a pure early-out, not an approximation: the loop already discards
+            // g == 0.0 below, so skipping pairs that provably evaluate to zero removes no
+            // accumulation and changes no summation order. It is bit-identical by construction.
+            //
+            // It matters because this loop is O(n2²): at the production system's n2 = 518,056 that is 2.68e11
+            // element evaluations PER MAT-VEC, and roughly 13 in 14 of those pairs are
+            // structurally zero. The gate turns each of them into four integer compares instead
+            // of a full d_c22off. The host applier prunes the same way, with buckets
+            // (sip/matfree.go c22Buckets); a kernel cannot afford the per-thread dedup state a
+            // bucket walk needs, so it tests the condition in place.
+            int Kc = K[c], Lc = L[c], Vc = Vir[c];
+            if (Vc != Vr && Kc != Kr && Kc != Lr && Lc != Kr && Lc != Lr) continue;
+            if (r < c) {
+                g = d_c22off(Kr, Lr, Vr, Tr, Kc, Lc, Vc, Typ[c], eri, norb, nocc);
+            } else {
+                g = d_c22off(Kc, Lc, Vc, Typ[c], Kr, Lr, Vr, Tr, eri, norb, nocc);
+            }
         }
         if (g == 0.0) continue;
         for (int j = 0; j < b; j++) {

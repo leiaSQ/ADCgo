@@ -10,8 +10,10 @@
 package mo
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/leiaSQ/ADCgo/backend"
@@ -56,14 +58,26 @@ type sidecar struct {
 }
 
 // ReadFile parses the sidecar JSON at path.
+//
+// The decode streams off the file rather than going through os.ReadFile: the sidecar
+// carries C, S and three nAO x nAO dipole matrices as JSON number text, so slurping
+// it first held the raw bytes and the decoded [][]float64 at the same time — several
+// times the size of the matrices themselves, at the front of every -mo run. Decoding
+// from the file keeps only the decoder's buffer plus the result. Trailing content is
+// still rejected, which json.Unmarshal did for free.
 func ReadFile(path string) (*Data, error) {
-	raw, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
 	var s sidecar
-	if err := json.Unmarshal(raw, &s); err != nil {
+	dec := json.NewDecoder(bufio.NewReaderSize(f, 1<<20))
+	if err := dec.Decode(&s); err != nil {
 		return nil, fmt.Errorf("mo: %w", err)
+	}
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		return nil, fmt.Errorf("mo: trailing content after the sidecar object")
 	}
 	if len(s.MOCoeff) != s.NAO || len(s.Overlap) != s.NAO || len(s.AOAtom) != s.NAO {
 		return nil, fmt.Errorf("mo: inconsistent dimensions (nao=%d)", s.NAO)

@@ -119,6 +119,7 @@ func solveSIPSpace(ch *chooser, label string, sp *sip.Space, ints *integrals.Sto
 	if cfg.sig != nil {
 		mx.SetStaticSelfEnergy(cfg.sig)
 	}
+	installMainBlockCache(mx, sp, eps, order, cfg)
 
 	// Pre-flight device-memory guard, the SIP twin of solveDIPSector's. It matters more here
 	// than the DIP call site suggests: pickLanczos' own fits() check is skipped whenever a
