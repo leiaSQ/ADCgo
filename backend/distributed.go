@@ -22,7 +22,7 @@ package backend
 // vector is classified as a row-partitioned panel iff its length is a multiple of n; the
 // small orthogonalization scratch (≤ 2·main²) must therefore never reach n in length.
 // NewDistributed enforces n > 2·main² so the two can never alias — trivially true at the
-// production scale this exists for (the production system: n ≈ 14.75M ≫ 2.7M).
+// production scale this exists for (n ≈ 14.75M ≫ 2.7M).
 
 import (
 	"fmt"

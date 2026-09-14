@@ -56,7 +56,7 @@ timer — so it is silently inflating the 96.6% figure that motivated the contra
 
 **4. Davidson's preconditioner stalls the device every iteration.** `lanczos/davidson.go:200-231`
 downloads the full `n×nw` residual, runs a serial host double loop with a per-column
-`make([]float64, n)`, and re-uploads. Davidson is the production DIP driver for the real the production system
+`make([]float64, n)`, and re-uploads. Davidson is the DIP driver for the real production
 runs. `parallel.Rows` applies directly.
 
 **5. `distBackend.GemmMatBatched` un-batches itself.** `backend/distributed.go:516-520` loops

@@ -12,8 +12,7 @@ for large satellite spaces is hundreds of GB to multiple TB — bigger than any
 single GPU, and for the production system bigger than a whole 8×H200 node.
 
 Written 2026-07-20 while sizing the uracil / production DIP runs on bwForCluster
-Helix (see `scripts/HELIX.md`, `scripts/uracil_dip.sbatch`,
-`scripts/production_dip_mgpu.sbatch`).
+Helix (see `scripts/HELIX.md`, `scripts/uracil_dip.sbatch`).
 
 ## The wall in one line
 
@@ -54,7 +53,7 @@ per configuration** across every row above; at the production system's n that gi
 (singlet) / ~13 TB (triplet)** — i.e. ~5–12× past the 1128 GB aggregate of a full
 8×H200 node, *before* the 0.5–0.7 TB of panels. An 8-GPU whole-band production DIP
 therefore cannot fit and would `cudaMalloc`-panic mid-assembly (the `-mgpu` path
-has no pre-flight guard). This is why `production_dip.sbatch` uses block-Davidson
+has no pre-flight guard). This is why the production DIP job uses block-Davidson
 (lowest `-nroots` only) for the real runs, and why the whole band needs the fix
 below.
 
@@ -104,7 +103,7 @@ dodge a resident-memory blowup. The proposal:
    `-maxmem` is applied on the fly; small blocks (2h/2h main) stay materialized.
    Reuse `OperatorResidentBytes()` per block as the switch.
 3. With the satellite block matrix-free, the resident footprint collapses to the
-   panels (+ the tiny main block) — tens of GB, already `-mgpu`-friendly. the production system
+   panels (+ the tiny main block) — tens of GB, already `-mgpu`-friendly. The production
    whole-band DIP then fits a single node, and uracil2W fits without DZ.
 
 **Cost/benefit:** matrix-free adds recompute per mat-vec (×`-blocks` iterations),

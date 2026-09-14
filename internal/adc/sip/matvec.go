@@ -243,8 +243,8 @@ func (mx *Matrix) satBlock() backend.Mat {
 // backend.SectorBytes, whose opFrac·n² operator term is a dense upper bound that checkDeviceFit's
 // own doc calls meaningless at these sizes.
 //
-// Not counted: the norb⁴ ERI tensor a device matrix-free applier uploads (~16 GB at the production system's
-// norb=212, see scripts/production_sip.sbatch) and the Krylov basis. Both are the caller's to add —
+// Not counted: the norb⁴ ERI tensor a device matrix-free applier uploads (~16 GB at the
+// production system's norb=212) and the Krylov basis. Both are the caller's to add —
 // the basis because only the solver knows its subspace dimension.
 func (mx *Matrix) OperatorResidentBytes() uint64 {
 	sp := mx.sp

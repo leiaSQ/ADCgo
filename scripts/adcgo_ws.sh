@@ -1,9 +1,8 @@
 #!/bin/bash
 # Resolve $ADCGO_WS to a real bwForCluster Helix workspace and export it.
 #
-# Generic sibling of production_ws.sh: the workspace *name* (and the per-job subdir)
-# come from $ADCGO_WS_NAME, so one script serves every molecule (uracil1W,
-# uracil2W, ...). See production_ws.sh for the full rationale; the short version:
+# The workspace *name* (and the per-job subdir) come from $ADCGO_WS_NAME, so one
+# script serves every molecule (uracil1W, uracil2W, ...). The rationale:
 #
 # WHY THIS EXISTS: scratch/work roots on Helix are provisioned by the workspace
 # tools (ws_allocate), NOT by mkdir -- /gpfs/bwfor/{scratch,work}/... is

@@ -1,7 +1,7 @@
 #!/bin/bash
 # uracil2W whole-band DIP — the measurement fixture for the satellite batched-GEMM work.
 #
-# WHY URACIL2W AND NOT PRODUCTION. docs/sigma_build_contractions.md:142-147 warns that the bundled
+# WHY URACIL2W AND NOT The production system. docs/sigma_build_contractions.md:142-147 warns that the bundled
 # h2o_dzp fixture has jiiLKK blocks only 2..11 on a side, so "any conclusion drawn from a whole-apply
 # benchmark on a small symmetric test system is an artefact of the test system". The production system is C1 with
 # nvir=154, giving 154x154 blocks — and a 40 h mat-vec, which is unaffordable to iterate on.

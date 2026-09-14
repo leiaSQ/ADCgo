@@ -61,28 +61,28 @@ Verify: `./adcgo-cuda -h` should list `-gpus`, and `-backend cuda` is accepted.
 **Single input** (its independent sectors spread across all visible GPUs):
 
 ```
-sbatch scripts/runADCgo_helix examples/production/production_dip.in ./adcgo-cuda
+sbatch scripts/runADCgo_helix examples/uracil2W_dz/uracil2W_dz_dip.in ./adcgo-cuda
 ```
 
 `runADCgo_helix` reserves a full gpu4 node, loads the modules, and drives the standard
 `scripts/adcgo_run.sh` (dump the FCIDUMP, then solve).
 
-**The production system, split pipeline (recommended):**
+**Split pipeline (recommended at production scale):**
 
 ```
-scripts/submit_production.sh                     # needs ./adcgo-cuda prebuilt
+scripts/submit_uracil.sh                      # needs ./adcgo-cuda prebuilt
 ```
 
-This chains three jobs so each stage runs where it belongs and gets its own 120 h clock:
+This chains the stages so each runs where it belongs and gets its own 120 h clock:
 
-1. `dump_production.sbatch` — builds the shared FCIDUMP on a **`cpu-single`** node (pyscf is
-   CPU-only; no reason to hold GPUs idle for it). Writes `system.fcidump` / `system.mo.json`
-   to `$ADCGO_WS` on the scratch filesystem, not `$HOME` (the FCIDUMP is several GB and `$HOME`
-   has a quota).
-2. `production_dip.sbatch` — DIP-ADC(2) via **block-Davidson**, `--gres=gpu:A100:2` (C1 →
-   singlet+triplet = 2 sectors, one per GPU).
-3. `production_sip.sbatch` — SIP-ADC(3) via **checkpointing block-Lanczos**, `--gres=gpu:H200:1`,
-   a **self-resubmitting daisychain**.
+1. **Dump** (`uracil_dump.sbatch`) — builds the shared FCIDUMP on a **`cpu-single`** node
+   (pyscf is CPU-only; no reason to hold GPUs idle for it). Writes `<mol>.fcidump` /
+   `<mol>.mo.json` to `$ADCGO_WS` on the scratch filesystem, not `$HOME` (the FCIDUMP is
+   several GB and `$HOME` has a quota).
+2. **DIP** (`uracil_dip.sbatch`) — DIP-ADC(2) via **block-Davidson**, `--gres=gpu:A100:2`
+   (C1 → singlet+triplet = 2 sectors, one per GPU).
+3. **SIP** — SIP-ADC(3) via **checkpointing block-Lanczos**, `--gres=gpu:H200:1`, a
+   **self-resubmitting daisychain** (checkpoint/resubmit mechanics below).
 
 DIP and SIP both `--dependency=afterok` on the dump job, then run in parallel. Cores are
 requested proportional to GPUs (16/GPU: DIP 32, SIP 16) so the node stays shareable.
@@ -120,16 +120,13 @@ each job **resubmits its successor** (`afterany`), which resumes from the checkp
 walltime kill. SLURM `--signal=B:USR1@600` triggers a clean checkpoint 10 min before the
 wall; the binary exits 64 ("resume needed") vs 0 (converged), and the wrapper `scancel`s the
 unused successor on convergence. `MAX_GEN` bounds the chain. To use A100-80 instead of H200,
-override the gres: `ADCGO_SIP_GRES=... scripts/submit_production.sh` (confirm the 80 GB
+override the gres: `ADCGO_SIP_GRES=... scripts/submit_uracil.sh` (confirm the 80 GB
 feature/constraint spelling with Helix support — plain `gpu:A100:1` may hit a 40 GB card).
 
 **Workspace** — set `ADCGO_WS` (default `/gpfs/bwfor/scratch/hd_hh323_o05i14/adcgo/system`);
-export it before `submit_production.sh` so the sbatch jobs inherit it. **Python** — set
+export it before the submit script so the sbatch jobs inherit it. **Python** — set
 `ADCGO_PYTHON` if the `adcgo` conda env is not at `$HOME/miniconda3/envs/adcgo/bin/python`.
 **Rebuild** the binary after these notes: the build now also emits `sm_90` for H200.
-
-The older `runADCgo_helix_production` (both solves concurrently on one `--exclusive` node via
-`CUDA_VISIBLE_DEVICES`) still works but is superseded by the split pipeline above.
 
 _Module names on Helix are prefixed: `compiler/gnu/11.3`, `devel/cuda/13.2` (not bare
 `gnu/11.3` / `cuda/13.2`)._
@@ -147,8 +144,7 @@ scripts/submit_uracil.sh uracil2W        # just one
 Per molecule it chains two jobs, `--dependency=afterok`:
 
 1. `uracil_dump.sbatch` — RHF + AO→MO transform (pyscf, CPU) on `cpu-single`, writing
-   `<mol>.fcidump` / `<mol>.mo.json` to a `$MOL` workspace (via `adcgo_ws.sh`, the generic
-   `production_ws.sh`). Active spaces: uracil1W `10 to 165` (156 orbitals), uracil2W `11 to 190`
+   `<mol>.fcidump` / `<mol>.mo.json` to a `$MOL` workspace (via `adcgo_ws.sh`). Active spaces: uracil1W `10 to 165` (156 orbitals), uracil2W `11 to 190`
    (180). SCF is gated on the GAMESS-UK RHF energy (−488.6122606854 / −564.6716874156 Ha).
 2. `uracil_dip.sbatch` — DIP-ADC(2), `--gres=gpu:A100:2` (singlet+triplet → 2 sectors, one
    per GPU).

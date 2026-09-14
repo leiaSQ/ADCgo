@@ -3,7 +3,7 @@ package main
 // sigma_cache.go — persistence for the static self-energy.
 //
 // WHY. Σ(∞) is the all-order resolvent resummation, and at production scale it is the single most
-// expensive phase of a SIP run by a wide margin: the production system's took 3 d 06 h 19 m (job 14134491,
+// expensive phase of a SIP run by a wide margin: the production system's Sigma took 3 d 06 h 19 m (job 14134491,
 // 2026-08-06T09:05 → 2026-08-09T15:24). It is also rebuilt from scratch by every process, so a
 // daisychained run that is walltime-killed before its solver checkpoints pays those 78 h again in
 // the next generation — out of a 120 h allocation, leaving ~42 h for the actual solve, and again

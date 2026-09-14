@@ -33,8 +33,8 @@ import (
 
 // errInterrupted signals that a checkpointing solve stopped early on a SIGUSR1 (walltime
 // warning) after writing its checkpoint. main turns it into exit code 64 so a daisychain
-// wrapper knows to resume rather than treat it as a hard failure (see runADCgo_helix_production
-// family). exit 0 means the solve completed.
+// wrapper knows to resume rather than treat it as a hard failure (see the daisychain
+// wrappers under scripts/). exit 0 means the solve completed.
 var errInterrupted = errors.New("solve interrupted; checkpoint written")
 
 const exitResumeNeeded = 64
@@ -378,7 +378,7 @@ func dipLanczosOpts(cfg dipConfig, spin dip.Spin, targetSym int) lanczos.Options
 			Stop:  cfg.stop,
 		}
 	}
-	// A Mode B block at production scale costs hours and the driver is otherwise silent: the production system
+	// A Mode B block at production scale costs hours and the driver is otherwise silent:
 	// job 14040960 ran 1 d 15 h and emitted nothing, and only its panic frame (lowmem.go's
 	// pre-gate ApplyBlock arm) revealed it had not finished two blocks. Without this there is no
 	// way to know whether a checkpoint interval is ever reached.

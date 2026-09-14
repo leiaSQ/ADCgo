@@ -1,5 +1,6 @@
 # Go
 /adcgo
+/adcgo-cuda
 /bin/
 *.test
 *.out.tmp
@@ -22,8 +23,7 @@ testdata/pyridine_N.*
 #   python scripts/dump_fcidump.py --input examples/h2o_augccpvtz.in
 testdata/h2o_augccpvtz.*
 
-# the production system / uracil geometries — kept local-only for possible publication
-examples/production/zmat
+# uracil geometries — kept local-only for possible publication
 examples/uracil1W/zmat
 examples/uracil2W/zmat
 examples/uracil2W.zmat

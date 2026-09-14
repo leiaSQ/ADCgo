@@ -255,7 +255,7 @@ func SolveDavidson(op PreconOperator, be backend.Backend, opts Options) Result {
 		// Chunks, NOT Rows: nunc <= nw = nroots + max(4, nroots/4), i.e. a few dozen at the
 		// -nroots values production runs use (20 by default, 64 at the largest), while
 		// parallel.Rows falls back to a serial walk below 2*GOMAXPROCS rows — 64 to 128 on the
-		// 32/64-core nodes scripts/production_dip*.sbatch request. Under Rows this loop therefore
+		// 32/64-core nodes the production DIP jobs request. Under Rows this loop therefore
 		// never once ran in parallel: it did n (10-15M) divides plus a normalization sweep per
 		// column on a single core, every Davidson iteration. Chunks has no such threshold — it
 		// spawns min(GOMAXPROCS, nunc) workers — and its static partition keeps each column

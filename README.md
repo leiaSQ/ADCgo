@@ -235,8 +235,8 @@ adcgo-cuda -fcidump system.fcidump -dip -order 2 \
     -backend cuda -spin both -sym all -blocks 200
 ```
 
-See [`scripts/production_dip_mgpu.sbatch`](scripts/production_dip_mgpu.sbatch) for a complete
-SLURM job (`--gres=gpu:H200:8`).
+See [`scripts/HELIX.md`](scripts/HELIX.md) for a complete SLURM job
+(`--gres=gpu:H200:8`).
 
 ### Matrix-free operator — `-matfree`
 
@@ -257,7 +257,7 @@ DIP or SIP run of a large system on a single node without dropping polarization 
 orbitals.
 
 ```sh
-# whole-band DIP the production system: matrix-free satellite region, row-partitioned across 8 GPUs
+# whole-band DIP at production scale: matrix-free satellite region, row-partitioned across 8 GPUs
 adcgo-cuda -fcidump system.fcidump -dip -order 2 \
     -solver lanczos-lowmem -lowmem-block 0 -mgpu 8 -matfree on \
     -backend cuda -spin both -sym all -blocks 200

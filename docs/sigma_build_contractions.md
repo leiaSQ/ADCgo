@@ -105,8 +105,8 @@ cuTENSOR only if permutation overhead then shows up in a profile.
 > 424 GB (job 14026481) — but chunking per column-chunk also adds refill cost.
 >
 > **What is NOT yet known:** whether the production system's b=1653 crosses the amortization over (the crossover
-> argument in "A measurement-validity trap", below, says larger blocks favour BLAS). The production system
-> whole-band DIP run (job 14040960, `-matfree on`) is the first real test. Until it reports, the
+> argument in "A measurement-validity trap", below, says larger blocks favour BLAS). The
+> production whole-band DIP run (job 14040960, `-matfree on`) is the first real test. Until it reports, the
 > contraction path should not be assumed faster, and it should NOT be an unconditional default —
 > the per-scalar path wins on every measurement so far.
 
@@ -122,7 +122,7 @@ Job `14015067`, uracil2W_dz singlet, 4×H200, per-device NVLink path (i.e. *afte
 | **fraction of fp64 peak** | **0.58% vector** / 0.29% tensor-core |
 
 That is an order of magnitude below the ≲5% branch below, so **the case is strong**. It also
-reframes the work: the production system whole-band DIP extrapolates to singlet 113 h + triplet 236 h = **349 h
+reframes the work: the production whole-band DIP extrapolates to singlet 113 h + triplet 236 h = **349 h
 against a 120 h walltime**, so contractions are plausibly what make the run feasible at all, not
 merely faster.
 

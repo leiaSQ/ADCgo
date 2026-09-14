@@ -1,4 +1,4 @@
-# H200 optimization plan — SIP-ADC(3) / DIP-ADC(2) at production scale/uracil scale
+# H200 optimization plan — SIP-ADC(3) / DIP-ADC(2) at production and uracil scale
 
 **Status:** plan, 2026-07-23. Supersedes/operationalizes [`gpu_perf_backlog.md`](gpu_perf_backlog.md)
 into ordered, verifiable work. Companions: [`dip_operator_memory.md`](dip_operator_memory.md),
@@ -65,7 +65,7 @@ per-element verifiability `sigma_build_contractions.md` warned a contraction rew
 What remains is **performance**, not correctness: both nodes were A40 with `SYS` (PCIe +
 cross-socket) between every GPU pair, so neither says anything about H200 or an NVLink/NVSwitch
 fabric. Re-run the timing job pinned with `--gres=gpu:H200:4` (the script has no model pin;
-`production_sip.sbatch:35` shows the syntax) and take the `nsys`/`ncu` traces above on it.
+pin the model explicitly in the `--gres` line) and take the `nsys`/`ncu` traces above on it.
 
 - **Verify:** already green above; re-confirm on H200 alongside the timing run.
 - **Effort:** none (submit + wait), but blocking — Phase F should not be scoped before real H200 numbers land.
