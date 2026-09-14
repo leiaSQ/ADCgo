@@ -441,6 +441,13 @@ int adc2_dip_fill_sat(int nslot, int spin, int norb, int parts, int maxElems,
     if (gx < 1) gx = 1;
     if (gx > 256) gx = 256;
     dim3 grid(gx, nslot);
+    // Clear any error still pending from an earlier, unrelated CUDA call before launching, so
+    // the status returned below describes THIS launch and nothing else. cudaGetLastError both
+    // reads and RESETS the per-thread error state, and several statuses are deliberately
+    // tolerated elsewhere without being cleared (EnablePeerAccess treats
+    // cudaErrorPeerAccessAlreadyEnabled, 704, as benign) — without this reset the next launcher
+    // to look would report that stale status as its own launch failure.
+    cudaGetLastError();
     dip_fill_sat<<<grid, T>>>(nslot, spin, norb, parts, kind,
                               rowO0, rowO1, rowO2, colO0, colO1, colO2,
                               rowVOff, rowNv, colVOff, colNv, bufOff, virs,
@@ -470,6 +477,13 @@ int adc2_dip_sat_apply(int nsat, int njii, int nijk, int b, int ldIn, int ldOut,
     JGroups jg = {jO0, jO1, jSt, jVoff, jNv, jVir};
     IGroups ig = {iO0, iO1, iO2, iSt, iVoff, iNv, iVir};
     int T = 128;
+    // Clear any error still pending from an earlier, unrelated CUDA call before launching, so
+    // the status returned below describes THIS launch and nothing else. cudaGetLastError both
+    // reads and RESETS the per-thread error state, and several statuses are deliberately
+    // tolerated elsewhere without being cleared (EnablePeerAccess treats
+    // cudaErrorPeerAccessAlreadyEnabled, 704, as benign) — without this reset the next launcher
+    // to look would report that stale status as its own launch failure.
+    cudaGetLastError();
     dip_sat_apply<<<(rows + T - 1) / T, T>>>(nsat, njii, nijk, b, ldIn, ldOut, mainOff, norb, parts, spin,
                                              rowLo, rowHi, outRowOff,
                                              rw, jg, ig, eri, eps, osym, xin, yout);

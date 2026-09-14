@@ -301,6 +301,13 @@ int adc4_c22_apply(int n2, int b, int ldIn, int ldOut, int mainOff, int norb, in
                    const int *K, const int *L, const int *Vir, const int *Typ,
                    const double *eri, const double *eps, const double *xin, double *yout) {
     int T = 256;
+    // Clear any error still pending from an earlier, unrelated CUDA call before launching, so
+    // the status returned below describes THIS launch and nothing else. cudaGetLastError both
+    // reads and RESETS the per-thread error state, and several statuses are deliberately
+    // tolerated elsewhere without being cleared (EnablePeerAccess treats
+    // cudaErrorPeerAccessAlreadyEnabled, 704, as benign) — without this reset the next launcher
+    // to look would report that stale status as its own launch failure.
+    cudaGetLastError();
     c22_apply<<<(n2 + T - 1) / T, T>>>(n2, b, ldIn, ldOut, mainOff, norb, nocc,
                                        K, L, Vir, Typ, eri, eps, xin, yout);
     return (int)cudaGetLastError();
@@ -317,6 +324,13 @@ int adc4_wert2_apply(int n2, int n3, int b, int ldIn, int ldOut, int mainOff, in
     RowSoA rw = {rVir, rK, rL, rTyp};
     ColSoA cl = {cI, cJ, cK, cL, cM, cSpin};
     int T = 256;
+    // Clear any error still pending from an earlier, unrelated CUDA call before launching, so
+    // the status returned below describes THIS launch and nothing else. cudaGetLastError both
+    // reads and RESETS the per-thread error state, and several statuses are deliberately
+    // tolerated elsewhere without being cleared (EnablePeerAccess treats
+    // cudaErrorPeerAccessAlreadyEnabled, 704, as benign) — without this reset the next launcher
+    // to look would report that stale status as its own launch failure.
+    cudaGetLastError();
     wert2_fwd<<<(n2 + T - 1) / T, T>>>(n2, n3, b, ldIn, ldOut, mainOff, off3, norb, nocc, rw, cl,
                                        xin, yout, eri);
     wert2_trans<<<(n3 + T - 1) / T, T>>>(n2, n3, b, ldIn, ldOut, mainOff, off3, norb, nocc, rw, cl,

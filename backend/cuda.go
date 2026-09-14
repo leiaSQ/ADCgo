@@ -32,7 +32,8 @@ static int  dev_sync(void)                             { return (int)cudaDeviceS
 static int  dev_count(void)                            { int n = 0; cudaGetDeviceCount(&n); return n; }
 static int  dev_set(int dev)                           { return (int)cudaSetDevice(dev); }
 static void* dev_malloc(size_t bytes)                  { void* p = NULL; cudaMalloc(&p, bytes); return p; }
-static void  dev_free(void* p)                         { cudaFree(p); }
+static int   dev_free(void* p)                         { return (int)cudaFree(p); }
+static void  dev_clear_error(void)                     { cudaGetLastError(); }
 static int   dev_zero(void* p, size_t bytes)           { return (int)cudaMemset(p, 0, bytes); }
 static int   dev_h2d(void* d, const void* s, size_t b) { return (int)cudaMemcpy(d, s, b, cudaMemcpyHostToDevice); }
 static int   dev_d2h(void* d, const void* s, size_t b) { return (int)cudaMemcpy(d, s, b, cudaMemcpyDeviceToHost); }
@@ -150,6 +151,7 @@ import "C"
 
 import (
 	"fmt"
+	"os"
 	"unsafe"
 )
 
@@ -210,7 +212,51 @@ func devMalloc(n int) unsafe.Pointer {
 	return p
 }
 
-func devFree(p unsafe.Pointer)        { C.dev_free(p) }
+// devFree releases a device allocation.
+//
+// It reports a failure rather than swallowing it. cudaFree implicitly synchronizes the device,
+// so it is one of the first calls to observe a STICKY asynchronous fault from an earlier kernel
+// — and because this used to discard its status entirely, such a fault stayed invisible here and
+// resurfaced later at an unrelated cudaDeviceSynchronize, which is how job 14561251's
+// cudaError_t 719 came to be reported from distBackend.gemmMatOne rather than from whatever
+// actually faulted.
+//
+// A free during panic unwinding must not mask the original panic, so a failure here is reported
+// on stderr instead of panicking when one is already in flight.
+func devFree(p unsafe.Pointer) {
+	if st := C.dev_free(p); st != 0 {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "backend: cuda cudaFree failed (cudaError_t %d) while unwinding\n", int(st))
+			panic(r)
+		}
+		panic(fmt.Sprintf("backend: cuda cudaFree failed (cudaError_t %d) — this is usually a "+
+			"STICKY error from an earlier kernel launch, not from the free itself; re-run with "+
+			"ADCGO_CUDA_STRICT=1 to attribute it to the launch that caused it", int(st)))
+	}
+}
+
+// cudaStrict makes every kernel launch synchronize and check for asynchronous faults at its
+// origin. Off by default because it serializes the device and destroys throughput; on, it is
+// the tool that turns "cudaError_t 719 somewhere" into "719 in this launch".
+//
+// A launch reports two different classes of error. cudaGetLastError immediately after the launch
+// catches CONFIGURATION faults (bad grid, too many resources), which ckLaunch always checks. An
+// ILLEGAL MEMORY ACCESS inside the kernel is asynchronous: it is only observable at the next
+// synchronizing call, which in a matrix-free apply can be thousands of launches later and in an
+// unrelated function. Draining it here costs a device sync per launch, hence the opt-in.
+var cudaStrict = os.Getenv("ADCGO_CUDA_STRICT") == "1"
+
+// ckLaunch checks a kernel launcher's returned cudaError_t.
+//
+// Every launcher in adc2dip_kernels.cu / adc4_kernels.cu returns cudaGetLastError(), and every
+// one of those return values used to be discarded at the call site — so a launch that failed
+// outright did so silently and only announced itself later as a sticky error somewhere else.
+func ckLaunch(st C.int, op string) {
+	ckCuda(st, op+" launch")
+	if cudaStrict {
+		ckCuda(C.dev_sync(), op+" (ADCGO_CUDA_STRICT device sync)")
+	}
+}
 func devZero(p unsafe.Pointer, n int) { ckCuda(C.dev_zero(p, C.size_t(n*elemSize)), "cudaMemset") }
 
 func devH2D(dst unsafe.Pointer, src []float64) {
@@ -232,6 +278,15 @@ func devCanPeer(dev, peer int) bool { return int(C.dev_can_peer(C.int(dev), C.in
 // returning the cudaError_t (0 = enabled, 704 = already enabled). Must run on the
 // enabling device's owning thread.
 func devEnablePeer(peer int) int { return int(C.dev_enable_peer(C.int(peer))) }
+
+// devClearError discards the per-thread CUDA error state.
+//
+// cudaGetLastError both reads and RESETS that state, so a status the code deliberately tolerates
+// stays pending until something reads it — and then gets reported as that reader's failure.
+// EnablePeerAccess is exactly such a caller: cudaErrorPeerAccessAlreadyEnabled (704) is benign
+// there, but leaving it pending made the next kernel launcher's cudaGetLastError() return 704 as
+// if the launch had failed. Anywhere a non-zero status is knowingly ignored, clear it here.
+func devClearError() { C.dev_clear_error() }
 
 // devMemcpy2D copies a strided rectangle peer-to-peer (or intra-device). Pitches and
 // width are byte counts, height is a row count; cudaMemcpyDefault resolves the direction

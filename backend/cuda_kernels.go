@@ -58,7 +58,7 @@ import "unsafe"
 
 // SetCoeff1 uploads the flattened [3][13][30] spin table to constant memory.
 func (b *gpuBackend) SetCoeff1(coeff1 []float64) {
-	b.do(func() { C.adc4_set_coeff1((*C.double)(unsafe.Pointer(&coeff1[0]))) })
+	b.do(func() { ckLaunch(C.adc4_set_coeff1((*C.double)(unsafe.Pointer(&coeff1[0]))), "adc4_set_coeff1") })
 }
 
 // DeviceERI uploads the flat norb⁴ ERI tensor; returned pointer is freed via FreeDev.
@@ -103,11 +103,11 @@ func (b *gpuBackend) Wert2Apply(a Wert2Args) {
 	xin := (*C.double)(a.In.(devVec).ptr())
 	yout := (*C.double)(a.Out.(devVec).ptr())
 	b.do(func() {
-		C.adc4_wert2_apply(C.int(a.N2), C.int(a.N3), C.int(a.B), C.int(a.LdIn), C.int(a.LdOut),
+		ckLaunch(C.adc4_wert2_apply(C.int(a.N2), C.int(a.N3), C.int(a.B), C.int(a.LdIn), C.int(a.LdOut),
 			C.int(a.MainOff), C.int(a.Off3), C.int(a.Norb), C.int(a.Nocc),
 			(*C.int)(a.RVir), (*C.int)(a.RK), (*C.int)(a.RL), (*C.int)(a.RTyp),
 			(*C.int)(a.CI), (*C.int)(a.CJ), (*C.int)(a.CK), (*C.int)(a.CL), (*C.int)(a.CM), (*C.int)(a.CSpin),
-			(*C.double)(a.ERI), xin, yout)
+			(*C.double)(a.ERI), xin, yout), "adc4_wert2_apply")
 	})
 }
 
@@ -137,14 +137,14 @@ func (b *gpuBackend) DipSatFillJII(a DipFillJIIArgs) []DeviceMat {
 			b.jiiBuf = devMalloc(a.ChunkElems)
 			b.jiiCap = a.ChunkElems
 		}
-		C.adc2_dip_fill_sat(C.int(n), C.int(a.Spin), C.int(a.Norb), C.int(a.Parts),
+		ckLaunch(C.adc2_dip_fill_sat(C.int(n), C.int(a.Spin), C.int(a.Norb), C.int(a.Parts),
 			C.int(a.MaxElems), off32(a.Kind),
 			off32(a.RowO0), off32(a.RowO1), off32(a.RowO2),
 			off32(a.ColO0), off32(a.ColO1), off32(a.ColO2),
 			off32(a.RowVOff), off32(a.RowNv), off32(a.ColVOff), off32(a.ColNv),
 			off32(a.BufOff), (*C.int)(a.Virs),
 			(*C.double)(a.ERI), (*C.double)(a.Eps), (*C.int)(a.OrbSym),
-			(*C.double)(b.jiiBuf))
+			(*C.double)(b.jiiBuf)), "adc2_dip_fill_sat")
 	})
 
 	// Handles for [lo,hi): handle k is global slot lo+k, placed at the same chunk-local prefix
@@ -176,10 +176,10 @@ func (b *gpuBackend) C22Apply(a C22Args) {
 	xin := (*C.double)(a.In.(devVec).ptr())
 	yout := (*C.double)(a.Out.(devVec).ptr())
 	b.do(func() {
-		C.adc4_c22_apply(C.int(a.N2), C.int(a.B), C.int(a.LdIn), C.int(a.LdOut),
+		ckLaunch(C.adc4_c22_apply(C.int(a.N2), C.int(a.B), C.int(a.LdIn), C.int(a.LdOut),
 			C.int(a.MainOff), C.int(a.Norb), C.int(a.Nocc),
 			(*C.int)(a.K), (*C.int)(a.L), (*C.int)(a.Vir), (*C.int)(a.Typ),
-			(*C.double)(a.ERI), (*C.double)(a.Eps), xin, yout)
+			(*C.double)(a.ERI), (*C.double)(a.Eps), xin, yout), "adc4_c22_apply")
 	})
 }
 
@@ -189,12 +189,12 @@ func (b *gpuBackend) DipSatApply(a DipSatArgs) {
 	xin := (*C.double)(a.In.(devVec).ptr())
 	yout := (*C.double)(a.Out.(devVec).ptr())
 	b.do(func() {
-		C.adc2_dip_sat_apply(C.int(a.Nsat), C.int(a.Njii), C.int(a.Nijk), C.int(a.B),
+		ckLaunch(C.adc2_dip_sat_apply(C.int(a.Nsat), C.int(a.Njii), C.int(a.Nijk), C.int(a.B),
 			C.int(a.LdIn), C.int(a.LdOut), C.int(a.MainOff), C.int(a.Norb), C.int(a.Parts), C.int(a.Spin),
 			C.int(a.RowLo), C.int(a.RowHi), C.int(a.OutRowOff),
 			(*C.int)(a.RTyp), (*C.int)(a.RGrp), (*C.int)(a.RPart), (*C.int)(a.RVir),
 			(*C.int)(a.JO0), (*C.int)(a.JO1), (*C.int)(a.JSt), (*C.int)(a.JVoff), (*C.int)(a.JNv), (*C.int)(a.JVir),
 			(*C.int)(a.IO0), (*C.int)(a.IO1), (*C.int)(a.IO2), (*C.int)(a.ISt), (*C.int)(a.IVoff), (*C.int)(a.INv), (*C.int)(a.IVir),
-			(*C.double)(a.ERI), (*C.double)(a.Eps), (*C.int)(a.OrbSym), xin, yout)
+			(*C.double)(a.ERI), (*C.double)(a.Eps), (*C.int)(a.OrbSym), xin, yout), "adc2_dip_sat_apply")
 	})
 }

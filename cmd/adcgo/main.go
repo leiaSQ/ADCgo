@@ -92,6 +92,7 @@ func main() {
 	sigma := flag.String("sigma", "auto", "static self-energy added to the SIP main block: auto | off | three | four | fplus | infinite. The ADC matrix code does not build Σ (theADCcode keeps it in a separate &self-energy module and subtracts it); omitting it shifts every main line by ~0.2-0.35 eV. auto = infinite, the all-order resolvent resummation, bit-exact vs theADCcode.")
 	sigmaAkrit := flag.Float64("sigma-akrit", 0, "Σ(∞) resolvent convergence threshold on Σ(Δx)² (0 = converge tightly; theADCcode's own default is 1e-9)")
 	sigmaMaxIt := flag.Int("sigma-maxit", 0, "Σ(∞) resolvent iteration cap (0 = 200; theADCcode's own default is 30)")
+	mgpuDevSymEig := flag.Bool("mgpu-device-symeig", false, "run the -mgpu Rayleigh-Ritz eigensolve on a GPU instead of the host. distBackend embeds the host backend and inherits its SymEig, so by default the O(dim^3) projected eigensolve runs on one CPU while all 8 GPUs idle (dim reaches 11,600 for production SIP). OFF by default because cuSOLVER's dsyevd and the host LAPACK path agree only to rounding, not bit for bit: turning this on moves every line in the last digits, so re-validate against the reference spectra before trusting a run that used it")
 	mainCache := flag.String("mainblock-cache", "auto", "where to cache the assembled SIP 1h/1h main block so a later run skips rebuilding it: auto = <fcidump>.mainblock.o<order>.i<irrep>.cache | off | an explicit path prefix. The block is 26 KB at production scale but took 8h16m to build (job 14551670) because every element is an O(nvir^4*nocc) sum, and -checkpoint covers only the Krylov state, so each daisychain generation rebuilt it. The cached copy is rejected unless the ADC order, sector irrep and multiplicity, orbital-space dimensions, WERT3 flag, a hash of the orbital energies, a hash of the static self-energy, and the FCIDUMP size/mtime all match")
 	sigmaCache := flag.String("sigma-cache", "auto", "where to cache the static self-energy so a later run skips rebuilding it: auto = <fcidump>.sigma-<scheme>.cache | off | an explicit path. Σ(∞) dominates a large SIP run (78 h for the production system) and is only n² floats (351 KB at norb=212), so a daisychain that is walltime-killed before its solver checkpoints would otherwise pay those hours again every generation. The cached copy is rejected unless the scheme, its tuning, the orbital-space dimensions, a hash of the orbital energies, and the FCIDUMP size/mtime all match")
 	out := flag.String("out", "", "write JSON to this file (default stdout)")
@@ -129,6 +130,15 @@ func main() {
 		os.Exit(2)
 	}
 	dip.SatChunkCols = *satChunk
+
+	// Same "before any Matrix is built" reason: the chooser hands out backends immediately after
+	// this, and distBackend reads the switch on every SymEig call thereafter.
+	backend.DistDeviceSymEig = *mgpuDevSymEig
+	if *mgpuDevSymEig {
+		fmt.Fprintf(os.Stderr, "adcgo: -mgpu-device-symeig: the projected eigensolve runs on a GPU; "+
+			"cuSOLVER and host LAPACK agree only to rounding, so this run's lines will differ from "+
+			"a host solve in the last digits\n")
+	}
 	dip.SatTrace = *satTrace
 
 	// -convert post-processes an existing output file; it re-solves nothing and so

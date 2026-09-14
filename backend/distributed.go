@@ -31,6 +31,31 @@ import (
 	"sync"
 )
 
+// DistDeviceSymEig routes the -mgpu Rayleigh-Ritz eigensolve to a GPU instead of the host.
+//
+// distBackend embeds Gonum and, by default, inherits its SymEig — so under -mgpu the O(dim^3)
+// projected eigensolve runs on the CPU while all eight GPUs sit idle. At production SIP's Krylov
+// width (dim reaches 11,600, MaxBlocks*main = 200*58) that is ~1.9e12 flops on the host, and
+// every sub-backend already carries a cuSOLVER SymEig that is never reached.
+//
+// It is OPT-IN, and deliberately so: cuSOLVER's dsyevd and the host LAPACK path are different
+// implementations, so the eigenvalues agree only to rounding, not bit for bit. Flipping it
+// silently would move every published line in the last digits with no record of why. Enable it
+// with -mgpu-device-symeig when that trade is wanted and the run is re-validated.
+//
+// The projected matrix is small and replicated, not row-partitioned, so delegating to ONE
+// sub-backend is the whole change: no reduction, no cross-device ordering question.
+var DistDeviceSymEig bool
+
+// SymEig runs the projected eigensolve on the first partition's device when DistDeviceSymEig is
+// set, and otherwise on the host exactly as before (the embedded Gonum). See DistDeviceSymEig.
+func (b *distBackend) SymEig(a Mat) ([]float64, Mat) {
+	if !DistDeviceSymEig || len(b.subs) == 0 {
+		return b.Gonum.SymEig(a)
+	}
+	return b.subs[0].SymEig(a)
+}
+
 // distBackend spreads the row dimension across subs. bound holds the G+1 partition
 // boundaries (bound[0]=0, bound[G]=n); device d owns global rows [bound[d], bound[d+1]).
 type distBackend struct {
@@ -59,6 +84,63 @@ type distBackend struct {
 	// neighbour's staging.
 	stage   [][]float64
 	stageMu sync.Mutex
+
+	// band holds one reusable DEVICE scratch per device for the remote-input path of
+	// gemmMatOne, which compacts a peer's row band onto the output device before the GEMM.
+	//
+	// It used to Alloc and Free that band per BLOCK. Both ends are expensive on the hot path:
+	// Alloc is a cudaMalloc plus a devZero of the whole band, and cudaFree implicitly
+	// synchronizes the device — so every remote-input block paid two whole-device drains (that
+	// free, plus the source Sync above it) and an allocator round-trip, serially, on the dense
+	// main/coupling path that the production DIP trace (job 14561251) put at ~1h52m of block 0's
+	// 2h09m07s apply.
+	//
+	// Not zeroed on reuse, deliberately: PeerCopy2D writes the full rows×cols compact band
+	// (dst pitch = rows, width = rows, height = cols), so every element read by the GEMM is
+	// overwritten first. The non-peer host-staging fallback still allocates through Upload —
+	// it is the slow path by construction and not worth a second mechanism.
+	band   []Vector
+	bandN  []int
+	bandMu sync.Mutex
+}
+
+// ensureBand returns device dev's reusable remote-input scratch, at least n elements long.
+// Caller must hold bandMu.
+func (b *distBackend) ensureBand(dev, n int) Vector {
+	if b.bandN[dev] < n {
+		if b.band[dev] != nil {
+			b.subs[dev].Free(b.band[dev])
+		}
+		b.band[dev] = b.subs[dev].Alloc(n)
+		b.bandN[dev] = n
+	}
+	return b.band[dev]
+}
+
+// remoteCtx lets one GemmMatBatched call drain a source device once instead of once per
+// remote-input block.
+//
+// The drain exists because a peer read does not synchronize the source stream. Repeating it
+// per block is only necessary if something between two reads can dirty that source — and
+// inside this call the only writes are the GEMMs, which land on OUTPUT bands. So a source
+// device that is NOT also an output device in this call cannot be dirtied here and needs
+// exactly one drain; a source that IS also an output device keeps the per-block drain, which
+// costs nothing extra versus the old behaviour and needs no assumption about whether the
+// caller's input and output panels alias.
+type remoteCtx struct {
+	synced []bool
+	outDev []bool
+}
+
+func (r *remoteCtx) needSync(di int) bool {
+	if r == nil {
+		return true // single GemmMat: no call-level state, always drain
+	}
+	if r.outDev[di] || !r.synced[di] {
+		r.synced[di] = true
+		return true
+	}
+	return false
 }
 
 // NewDistributed builds a row-partitioned backend over subs (one per device), splitting n
@@ -86,6 +168,8 @@ func NewDistributed(subs []Backend, n, main int, bounds []int) (Backend, error) 
 		subs: subs, n: n, main: main,
 		bound: append([]int(nil), bounds...),
 		stage: make([][]float64, len(subs)),
+		band:  make([]Vector, len(subs)),
+		bandN: make([]int, len(subs)),
 	}, nil
 }
 
@@ -759,7 +843,7 @@ func (b *distBackend) FreeMat(m DeviceMat) {
 // gemmMatOne applies one operator block: c += op(a)·b, on the device owning c's row band.
 // If b's row band lives on another device it is gathered there first (NVLink peer copy when
 // available, else host-staged). a is uploaded to the output device on first use.
-func (b *distBackend) gemmMatOne(transA bool, alpha float64, a DeviceMat, bb, c BlockView, beta float64) {
+func (b *distBackend) gemmMatOne(transA bool, alpha float64, a DeviceMat, bb, c BlockView, beta float64, rc *remoteCtx) {
 	dm := a.(*distMat)
 	cdv := c.V.(distVec)
 	if cdv.loc == nil {
@@ -784,14 +868,20 @@ func (b *distBackend) gemmMatOne(transA bool, alpha float64, a DeviceMat, bb, c 
 	di := bdv.loc.dev
 	rows, cols, ld := bdv.loc.rows, bb.Cols, bdv.loc.ld
 	var band Vector
+	reused := false
 	if pc, ok := b.subs[do].(PeerCopier); ok && pc.PeerAvailable(b.subs[di]) {
-		// Drain the source device first: a peer read does not synchronize the source stream,
-		// and the band may still be mid-write from an async panel kernel (unlike the host
-		// path below, whose Download drains it implicitly). subs[di] is a *gpuBackend here
-		// (PeerAvailable proved it), so it implements PeerCopier.Sync.
-		b.subs[di].(PeerCopier).Sync()
-		band = b.subs[do].Alloc(rows * cols)
+		// Drain the source device: a peer read does not synchronize the source stream, and the
+		// band may still be mid-write from an async panel kernel (unlike the host path below,
+		// whose Download drains it implicitly). subs[di] is a *gpuBackend here (PeerAvailable
+		// proved it), so it implements PeerCopier.Sync. remoteCtx collapses this to once per
+		// source device per batched call where that is provably sufficient — see needSync.
+		if rc.needSync(di) {
+			b.subs[di].(PeerCopier).Sync()
+		}
+		b.bandMu.Lock()
+		band = b.ensureBand(do, rows*cols)
 		pc.PeerCopy2D(band, bdv.part[di], b.subs[di], rows, cols, rows, ld) // compact dst
+		reused = true
 	} else {
 		span := b.subs[di].Download(bdv.part[di])
 		compact := make([]float64, rows*cols)
@@ -802,11 +892,19 @@ func (b *distBackend) gemmMatOne(transA bool, alpha float64, a DeviceMat, bb, c 
 	}
 	bLocal = BlockView{V: band, Rows: rows, Cols: cols, Ld: rows}
 	b.subs[do].GemmMat(transA, alpha, dm.on(do), bLocal, beta, cLocal)
-	b.subs[do].Free(band)
+	if reused {
+		// The GEMM has consumed the band by the time GemmMat returns (every sub-backend call is
+		// a blocking round-trip through that device's owning goroutine), so the scratch is free
+		// to be overwritten by the next remote block. It is NOT freed: that cudaFree was one of
+		// the two whole-device drains this path used to pay per block.
+		b.bandMu.Unlock()
+	} else {
+		b.subs[do].Free(band)
+	}
 }
 
 func (b *distBackend) GemmMat(transA bool, alpha float64, a DeviceMat, bb BlockView, beta float64, c BlockView) {
-	b.gemmMatOne(transA, alpha, a, bb, c, beta)
+	b.gemmMatOne(transA, alpha, a, bb, c, beta, nil)
 }
 
 // GemmMatBatched groups the batch by the device owning each output band and issues one real
@@ -834,6 +932,17 @@ func (b *distBackend) GemmMatBatched(transA bool, alpha float64, a []DeviceMat, 
 	lb := make([][]BlockView, nd)
 	lc := make([][]BlockView, nd)
 
+	// Which devices receive output here. A remote block's SOURCE device only needs re-draining
+	// between reads if something can dirty it, and inside this call the only writes are the
+	// GEMMs, which land on output bands — so a source that is not also an output device is
+	// drained once instead of once per block. See remoteCtx.needSync.
+	rc := &remoteCtx{synced: make([]bool, nd), outDev: make([]bool, nd)}
+	for i := range c {
+		if cdv, ok := c[i].V.(distVec); ok && cdv.loc != nil {
+			rc.outDev[cdv.loc.dev] = true
+		}
+	}
+
 	for i := range a {
 		cdv := c[i].V.(distVec)
 		if cdv.loc == nil {
@@ -845,7 +954,7 @@ func (b *distBackend) GemmMatBatched(transA bool, alpha float64, a []DeviceMat, 
 		}
 		do := cdv.loc.dev
 		if bdv.loc.dev != do {
-			b.gemmMatOne(transA, alpha, a[i], bb[i], c[i], beta) // remote input: see above
+			b.gemmMatOne(transA, alpha, a[i], bb[i], c[i], beta, rc) // remote input: see above
 			continue
 		}
 		la[do] = append(la[do], a[i].(*distMat).on(do))

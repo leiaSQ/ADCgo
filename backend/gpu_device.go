@@ -632,8 +632,15 @@ func (b *gpuBackend) EnablePeerAccess(peers []Backend) {
 		}
 		peerDev := pg.dev
 		b.do(func() {
-			if st := devEnablePeer(peerDev); st == 0 || st == peerAccessAlreadyEnabled {
+			st := devEnablePeer(peerDev)
+			if st == 0 || st == peerAccessAlreadyEnabled {
 				b.peers[peerDev] = true
+			}
+			// Whatever the outcome, do not leave it pending: a tolerated status here would
+			// otherwise be picked up by the next cudaGetLastError() — a kernel launcher's —
+			// and reported as that launch failing. See devClearError.
+			if st != 0 {
+				devClearError()
 			}
 		})
 	}
