@@ -21,6 +21,7 @@
 //	plotspec -in spec.json -out spectrum.png -xrange 30-100
 //	plotspec -in sip.json  -out sip.png            # SIP: one curve per orbital
 //	plotspec -mode tdm -in tdm.json -out tdm.png -stick -overlay-broadened -stick-height 0.6
+//	plotspec -mode stack -stack-manifest sip_manifest.json -stack-dir specs -stack-group 1 -out conformers.pdf
 //
 // The same renderer handles DIP, SIP and TDM JSON (meta.kind): SIP channels are
 // orbitals, and the axis/title switch to single-ionization wording.
@@ -33,6 +34,11 @@
 //
 // The Y axis defaults to relative intensity (tallest displayed peak = 1); pass
 // -absolute to plot the raw broadened intensity instead.
+//
+// -mode stack is the exception to all of the above: it plots one broadened
+// envelope per *conformer* rather than per channel, each on a baseline set by
+// that conformer's relative energy, so a whole structure search reads as one
+// figure. See stack.go.
 package main
 
 import (
@@ -94,7 +100,7 @@ func main() {
 
 func run() error {
 	var (
-		mode        = flag.String("mode", "spectrum", "plot mode: \"spectrum\" (single DIP/SIP JSON via -in), \"tdm\" (transition-dipole spectrum from an adcgo -tdm JSON via -in), \"ees\" (electron-emission spectrum from -sip + -dip), or \"panel\"")
+		mode        = flag.String("mode", "spectrum", "plot mode: \"spectrum\" (single DIP/SIP JSON via -in), \"tdm\" (transition-dipole spectrum from an adcgo -tdm JSON via -in), \"ees\" (electron-emission spectrum from -sip + -dip), \"panel\", or \"stack\" (energy-offset waterfall of several conformers' spectra)")
 		sipPath     = flag.String("sip", "", "ees mode: single-ionization spectrum JSON (S_in)")
 		dipPath     = flag.String("dip", "", "ees mode: double-ionization spectrum JSON (S_fin)")
 		fwhmSIP     = flag.Float64("fwhm-sip", 0, "ees mode: Gaussian FWHM (eV) for the SIP envelope; 0 = use -fwhm")
@@ -125,7 +131,28 @@ func run() error {
 		sipGroupI   bool
 		overlay     = flag.Bool("overlay-broadened", false, "overlay the Gaussian-broadened curves on the -stick spectrum (spectrum/tdm mode: one curve per channel; panel mode: one total envelope on the (a)/(b) sticks)")
 		stickHeight = flag.Float64("stick-height", 1, "scale factor for the normalised stick heights (the broadened curves stay at 1); use <1 so the sticks sit below the -overlay-broadened curve")
+
+		// stack mode: the energy-offset waterfall (see stack.go).
+		stackEntries   = multiFlag{}
+		stackManifest  = flag.String("stack-manifest", "", "stack mode: run manifest JSON mapping each run name to its metadata; one trace per run whose spectrum exists")
+		stackDir       = flag.String("stack-dir", "", "stack mode: directory holding the per-run spectrum JSONs (default: the manifest's directory)")
+		stackSuffix    = flag.String("stack-suffix", ".sip.json", "stack mode: spectrum filename suffix appended to each manifest run name")
+		stackEnergyKey = flag.String("stack-energy-key", "relaxed_energy", "stack mode: manifest field holding each run's total energy")
+		stackGroupKey  = flag.String("stack-group-key", "n_waters", "stack mode: manifest field used by -stack-group to select a subset")
+		stackGroup     = flag.String("stack-group", "", "stack mode: plot only runs whose -stack-group-key equals this value (e.g. \"1\" for one hydration level); empty = all")
+		manifestUnit   = flag.String("manifest-unit", "hartree", "stack mode: unit of the manifest energies (hartree|ev|kcal|kj)")
+		offsetUnit     = flag.String("offset-unit", "kcal", "stack mode: unit for the plotted energy offsets (hartree|ev|kcal|kj)")
+		stackNorm      = flag.String("stack-norm", "each", "stack mode: normalise \"each\" trace to its own maximum (shape comparison) or to a \"common\" scale (also shows relative yield)")
+		stackScale     = flag.Float64("stack-trace-scale", 2, "stack mode: trace height, in units of the mean baseline spacing; >1 lets neighbouring traces overlap")
+		stackMinSep    = flag.Float64("stack-min-sep", 0.12, "stack mode: minimum baseline separation, as a fraction of the mean spacing, so isoenergetic basins do not draw on top of one another")
+		stackDedupTol  = flag.Float64("stack-dedup", 0, "stack mode: fold traces whose normalised curves agree to within this tolerance into one representative (0 = keep every basin)")
+		stackGeomSuf   = flag.String("stack-geom-suffix", ".zmat", "stack mode: geometry filename suffix, looked for beside each spectrum (a GAMESS-UK Z-matrix or an XYZ); empty disables the structure insets")
+		stackInsetH    = flag.Float64("stack-inset-height", 0.5, "stack mode: structure-inset height, in units of the trace amplitude")
+		stackInsetY    = flag.Float64("stack-inset-lift", 0.05, "stack mode: height of the inset's bottom edge above its trace's baseline, in units of the trace amplitude")
+		stackInset     = flag.Float64("stack-inset", 0.2, "stack mode: structure-inset width as a fraction of the energy axis; 0 draws no insets")
+		stackTitle     = flag.String("stack-title", "Conformer-resolved single-ionization spectra", "stack mode: figure title")
 	)
+	flag.Var(&stackEntries, "stack", "stack mode: add one trace as LABEL=PATH[@OFFSET], the offset in -offset-unit (repeatable); combines with -stack-manifest")
 	flag.Var(sipGroupFlag{specs: &sipGroups, interactive: &sipGroupI}, "sip-group", "panel mode: group panel (a) MOs. Bare \"-sip-group\" opens an interactive dialogue listing every MO; or pass a spec \"-sip-group=core=1,2\" (MO numbers, or symN for a whole symmetry), append #RRGGBB to the label for a custom colour, e.g. \"-sip-group=core#e41a1c=1,2\" (repeatable)")
 	flag.Parse()
 
@@ -143,6 +170,20 @@ func run() error {
 			absolute: *absolute, spinWeight: *spinWeight,
 			width: *width, height: *height, dpi: *dpi, stick: *stick,
 		})
+	case "stack":
+		return runStack(stackParams{
+			entries: stackEntries, manifest: *stackManifest, specDir: *stackDir,
+			specSuffix: *stackSuffix, energyKey: *stackEnergyKey,
+			groupKey: *stackGroupKey, group: *stackGroup,
+			manifestUnit: *manifestUnit, offsetUnit: *offsetUnit,
+			out: *outPath, title: *stackTitle,
+			fwhm: *fwhm, points: *points, pad: *pad, xRange: *xRange,
+			norm: *stackNorm, traceScale: *stackScale, minSep: *stackMinSep,
+			dedup:      *stackDedupTol,
+			geomSuffix: *stackGeomSuf, insetWidth: *stackInset,
+			insetHeight: *stackInsetH, insetLift: *stackInsetY,
+			width: *width, height: *height, dpi: *dpi,
+		})
 	case "panel":
 		return runPanel(panelParams{
 			sip: *sipPath, dip: *dipPath, out: *outPath,
@@ -159,7 +200,7 @@ func run() error {
 		// fall through: the transition-dipole document is flattened into the same
 		// (energy, intensity, channel) spectrum below, then rendered identically.
 	default:
-		return fmt.Errorf("-mode must be \"spectrum\", \"tdm\", \"ees\" or \"panel\", got %q", *mode)
+		return fmt.Errorf("-mode must be \"spectrum\", \"tdm\", \"ees\", \"panel\" or \"stack\", got %q", *mode)
 	}
 
 	var spec *spectrum
