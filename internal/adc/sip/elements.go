@@ -2,6 +2,7 @@ package sip
 
 import (
 	"math"
+	"sync"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
 )
@@ -26,6 +27,19 @@ type elements struct {
 	order int
 	nocc  int
 	norb  int
+
+	// variant selects the ADC(2,2) scheme when order == 22; ignored otherwise.
+	// See elements22.go.
+	variant Variant
+
+	// Second-order 2h1p/2h1p tables (pt2.go), built once on first use. Eq. (A10)'s
+	// inner sum depends on nothing but the hole pair (l,l') once its deltas are
+	// imposed, and Eq. (A11)'s on nothing but the particle pair (a,a'), so both are
+	// tables rather than sums repeated for every one of the block's n2² elements.
+	// Built lazily rather than in newElements because only ADC(2,2) has this block.
+	pt2  sync.Once
+	tblA []float64 // (2·nocc)²: Eq. (A10), indexed by occupied spin orbital
+	tblB []float64 // (2·nvir)²: Eq. (A11), indexed by virtual spin orbital
 }
 
 func newElements(sp *Space, ints *integrals.Store, eps []float64, order int) *elements {
@@ -49,7 +63,7 @@ func (e *elements) c11(i, j int) float64 {
 	if i == j {
 		val -= e.eps[i] // k1: 0th order
 	}
-	if e.order >= 3 {
+	if e.order >= 3 && !e.isADC22() {
 		val -= e.c11_3(i, j) // calc_c11_3: c_matrix -= c_ij (non-affinity)
 	}
 	return val
@@ -368,6 +382,9 @@ func (e *elements) c11_3sums(i, j int) (cij, fij, fji float64) {
 // c12 returns the coupling between main orbital j (absolute occupied index of the
 // target irrep) and satellite config cfg.
 func (e *elements) c12(j int, cfg Config) float64 {
+	if e.isADC22() {
+		return e.c12_22(j, cfg)
+	}
 	val := e.c12_1(j, cfg)
 	if e.order >= 3 {
 		val += e.c12_2(j, cfg)

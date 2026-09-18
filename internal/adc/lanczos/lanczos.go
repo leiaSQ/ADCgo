@@ -17,6 +17,7 @@
 package lanczos
 
 import (
+	"fmt"
 	"math"
 	"time"
 
@@ -87,16 +88,50 @@ type Options struct {
 	// LowMemCheckpointable). SolveDense and SolveDavidson ignore it.
 	Checkpoint *Checkpoint
 
-	// Progress, when non-nil, is called once per accepted block with the 0-based block index,
-	// the subspace dimension reached, the block's surviving column count and the timings so
-	// far. Only SolveLowMem calls it.
+	// Progress, when non-nil, is called once per block with the 0-based block index, the
+	// subspace dimension reached, the block's surviving column count and the timings so far.
+	// Solve and SolveLowMem both call it; SolveDense and SolveDavidson build no blocks and
+	// do not.
 	//
-	// It exists because a Mode B block at production scale costs hours and the driver otherwise
-	// emits nothing: production DIP job 14040960 ran 1 d 15 h and produced no output at all, and
+	// It exists because a block at production scale costs minutes to hours and the drivers
+	// otherwise emit nothing. DIP job 14040960 ran 1 d 15 h and produced no output at all, and
 	// the only reason we know it never finished two blocks is that its panic frame landed on
-	// lowmem.go:151 — the `else` arm of the `iter >= 2` gate. Without this there is no way to
-	// tell whether a checkpoint interval is ever reached. nil keeps the package free of I/O.
+	// lowmem.go:151 — the `else` arm of the `iter >= 2` gate. SIP job 14717237 ran its whole
+	// 200-block solve in 11 h in silence, and the block count had to be recovered afterwards by
+	// matching Slurm's recorded write volume against saveKrylov's per-checkpoint size. Without
+	// this there is no way to tell whether a checkpoint interval is ever reached, let alone how
+	// a block's cost is trending. nil keeps the package free of I/O.
 	Progress func(iter, dim, blockSize int, tm Timing)
+
+	// Block overrides the Krylov block width, which is MainBlockSize() by default.
+	// 0 (the default) keeps every existing path unchanged, including its checkpoints.
+	//
+	// It exists for the Fano pseudo-continuum solve, where the operator's main block is a
+	// poor choice of width in both directions. Under a scheme A partition the P subspace
+	// often retains only one or two main-class configurations — a Krylov block of 1, which
+	// needs hundreds of iterations to span anything. And the width is nearly free when the
+	// operator is matrix-free: an element recomputed once is applied to every column of the
+	// block, so a width-32 block costs one recompute pass instead of 32.
+	//
+	// Separating this from MainBlockSize also keeps the pole-strength contract intact:
+	// Result.MainVecs and PS still describe the operator's own main block, whatever the
+	// Krylov width is.
+	Block int
+
+	// StartRows names the configurations whose Cartesian unit vectors form the start
+	// block, replacing the default e_0..e_{b-1} for the block width b in force. It must
+	// hold exactly b distinct rows in [0, Size()) — the width is set by Block or
+	// MainBlockSize(), not by this. nil (the default) keeps every existing path unchanged.
+	//
+	// A Fano width calculation needs this: the pseudo-continuum solve wants the block
+	// seeded with the P configurations most strongly coupled to the discrete state, and
+	// those are not in general the first rows of the P space. It is the reference's
+	// stvc_lbl (fill_stvc, ../ADC/adc2_pol/fspace.f90:714), which sorts the coupling
+	// vector by |g|² descending and takes the top lmain indices.
+	//
+	// Honored by Solve and SolveLowMem. SolveDense diagonalizes the whole matrix so it
+	// has no start block; SolveDavidson seeds from the lowest diagonal elements.
+	StartRows []int
 
 	// LowMemBlock selects the block width for the limited-memory driver (SolveLowMem);
 	// other drivers ignore it. It is the memory knob: the driver keeps only three n×block
@@ -156,12 +191,57 @@ func (o Options) normalize(n int) Options {
 // The basis holds MaxBlocks blocks of at most `main` columns each (the start block is one
 // of them), capped at MaxDim. Deflation can stop it earlier, so this is an upper bound.
 // MaxBlocks·main is the reference's "Size of Lanczos space" for `iter MaxBlocks`.
+//
+// Options.Block, when set, replaces `main` as the block width.
 func SubspaceDim(n, main int, opts Options) int {
 	if n == 0 || main == 0 {
 		return 0
 	}
 	o := opts.normalize(n)
-	return min(o.MaxDim, o.MaxBlocks*main)
+	return min(o.MaxDim, o.MaxBlocks*blockWidth(n, main, opts))
+}
+
+// blockWidth resolves the Krylov block width: Options.Block when set and in range, else
+// the operator's main block size.
+func blockWidth(n, main int, opts Options) int {
+	if opts.Block > 0 {
+		return min(opts.Block, n)
+	}
+	return main
+}
+
+// startBlock builds the host n×b start panel: the Cartesian unit vectors e_0..e_{b-1}
+// by default, or e_{rows[c]} when the caller named the rows via Options.StartRows.
+// Shared by Solve and SolveLowMem so the two seeds cannot drift.
+//
+// A bad StartRows panics rather than being repaired. A row out of range, a repeat, or a
+// wrong count each produce a rank-deficient or invalid start block, which does not fail
+// — it silently shrinks the Krylov space the run then reports spectra from.
+func startBlock(n, b int, rows []int) []float64 {
+	start := make([]float64, n*b)
+	if rows == nil {
+		for c := range b {
+			start[c*n+c] = 1
+		}
+		return start
+	}
+	if len(rows) != b {
+		panic(fmt.Sprintf("lanczos: Options.StartRows has %d entries, want the block width %d",
+			len(rows), b))
+	}
+	seen := make(map[int]bool, b)
+	for c, r := range rows {
+		if r < 0 || r >= n {
+			panic(fmt.Sprintf("lanczos: Options.StartRows[%d] = %d is outside [0,%d)", c, r, n))
+		}
+		if seen[r] {
+			panic(fmt.Sprintf("lanczos: Options.StartRows[%d] = %d repeats an earlier row; "+
+				"the start block would be rank deficient", c, r))
+		}
+		seen[r] = true
+		start[c*n+r] = 1
+	}
+	return start
 }
 
 // DenseOperator additionally exposes the densely-built matrix for the exact
@@ -375,6 +455,9 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 	if n == 0 || main == 0 {
 		return Result{MainVecs: backend.NewMat(main, 0), Timing: tm}
 	}
+	// b is the KRYLOV block width; main stays the operator's own main block, which the
+	// pole strengths and MainVecs are defined over.
+	b := blockWidth(n, main, opts)
 
 	maxdim := SubspaceDim(n, main, opts)
 
@@ -382,17 +465,17 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 	defer be.Free(bbuf)
 	basis := backend.BlockView{V: bbuf, Rows: n, Cols: maxdim, Ld: n}
 
-	wbuf := be.Alloc(n * main) // M·Q_j
-	vbuf := be.Alloc(n * main) // the candidate next block
-	pbuf := be.Alloc(maxdim * main)
-	gbuf := be.Alloc(main * main)
+	wbuf := be.Alloc(n * b) // M·Q_j
+	vbuf := be.Alloc(n * b) // the candidate next block
+	pbuf := be.Alloc(maxdim * b)
+	gbuf := be.Alloc(b * b)
 	defer be.Free(wbuf)
 	defer be.Free(vbuf)
 	defer be.Free(pbuf)
 	defer be.Free(gbuf)
 
 	t := backend.NewMat(maxdim, maxdim)
-	dim, blkStart, blkSize := main, 0, main
+	dim, blkStart, blkSize := b, 0, b
 	iter0 := 0
 
 	// Resume from a checkpoint if one is present and matches this problem; otherwise start
@@ -401,7 +484,7 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 	cp := opts.Checkpoint
 	resumed := false
 	if cp != nil && cp.Path != "" {
-		if st := loadResumable(cp.Path, n, main, maxdim, opts.MaxBlocks); st != nil {
+		if st := loadResumable(cp.Path, n, b, maxdim, opts.MaxBlocks); st != nil {
 			up := be.Upload(st.Basis)
 			be.Copy(basis.ColRange(0, st.Dim).V, up)
 			be.Free(up)
@@ -413,18 +496,32 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 		}
 	}
 	if !resumed {
-		// Start block: the main-space Cartesian unit vectors e_0..e_{main-1}, already
-		// orthonormal. Same start vectors as theADCcode, so pole strengths converge first.
-		start := make([]float64, n*main)
-		for c := range main {
-			start[c*n+c] = 1
-		}
+		// Start block: the main-space Cartesian unit vectors e_0..e_{b-1}, already
+		// orthonormal. With b == main (the default) these are theADCcode's own start
+		// vectors, so pole strengths converge first. Options.StartRows replaces which rows
+		// they are, not how many.
+		start := startBlock(n, b, opts.StartRows)
 		tmp := be.Upload(start)
-		be.Copy(basis.ColRange(0, main).V, tmp)
+		be.Copy(basis.ColRange(0, b).V, tmp)
 		be.Free(tmp)
 	}
 
 	var rNext backend.Mat // R factor of the block after the last accepted one
+
+	// report fires Options.Progress at the end of every iteration, including the two that
+	// break out of the loop — the truncating one is the block a production run most wants to
+	// see logged, since it is what confirms the block budget was actually reached. tm is
+	// captured by reference, so the callback always sees the run's current cumulative timings.
+	//
+	// dim is the basis size after the iteration and blockSize the columns it contributed, the
+	// same pair SolveLowMem reports. On the final, truncating iteration the basis does not
+	// grow — its candidate block is orthogonalized only for R_{j+1} and discarded — so that
+	// line repeats the previous dim and carries the width of the block it just projected.
+	report := func(iter, dim, blockSize int) {
+		if opts.Progress != nil {
+			opts.Progress(iter, dim, blockSize, tm)
+		}
+	}
 
 	// project accumulates T's block-column for the current block and returns the
 	// candidate V = W projected out of the existing basis, plus its rank/R factor.
@@ -437,7 +534,7 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 			stop := cp.stopRequested()
 			due := cp.Every > 0 && iter != iter0 && iter%cp.Every == 0
 			if stop || due {
-				_ = saveKrylov(be, cp.Path, basis, t, n, main, maxdim, opts.MaxBlocks,
+				_ = saveKrylov(be, cp.Path, basis, t, n, b, maxdim, opts.MaxBlocks,
 					dim, blkStart, blkSize, iter)
 				if stop {
 					return Result{Interrupted: true, Timing: tm}
@@ -487,6 +584,7 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 			be.Copy(vbuf, wbuf)
 			_, rNext = orthBlock(be, basis.Cut(dim), v, pbuf, maxdim, gbuf, opts.DeflTol)
 			tm.Orth += time.Since(t0)
+			report(iter, dim, blkSize)
 			break
 		}
 
@@ -500,6 +598,7 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 
 		if rank == 0 {
 			rNext = r // zero rows: the subspace is M-invariant, residuals vanish
+			report(iter, dim, 0)
 			break
 		}
 		if dim+rank > opts.MaxDim {
@@ -509,6 +608,7 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 		rNext = r
 		blkStart, blkSize = dim, rank
 		dim += rank
+		report(iter, dim, rank)
 	}
 
 	// Rayleigh–Ritz on the projected matrix.

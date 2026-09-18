@@ -36,7 +36,11 @@ export CGO_CFLAGS="-I$CUDA_HOME/include"
 export CGO_LDFLAGS="-L$CUDA_HOME/lib64 -lcudart -lcublas -lcusolver"
 export PATH=/home/hd/hd_hd/hd_hh323/opt/go/bin:$PATH
 fail=0
+# ADCGO lets a candidate build be smoked without overwriting $root/adcgo-cuda, which other queued
+# jobs resolve by default and would otherwise silently pick up.
+ADCGO="${ADCGO:-$root/adcgo-cuda}"
 LOG=$root/cuda-smoke-$SLURM_JOB_ID.log
+LOG2=$root/cuda-smoke-$SLURM_JOB_ID.mgpu.log
 echo "host=$(hostname)  date=$(date -Is)"
 nvidia-smi --query-gpu=index,name --format=csv,noheader
 
@@ -54,13 +58,27 @@ if [ "$rc" != 0 ]; then
 fi
 
 echo; echo "#### 2. one DIP -mgpu block under ADCGO_CUDA_STRICT=1 (remote-band path + every launch checked) ####"
-ADCGO_CUDA_STRICT=1 timeout 500 ./adcgo-cuda \
+# Full output to a log, never through a pipe: `| grep … | tail -6` kept the panic LINE and threw
+# away the stack under it, which is why run 14787917's "index out of range [-1]" could not be
+# located at all — the one thing the run existed to find. Same shape as step 1.
+echo "binary=$ADCGO"
+ADCGO_CUDA_STRICT=1 timeout 500 "$ADCGO" \
   -fcidump /gpfs/bwfor/work/ws/hd_hh323-uracil2W_dz/adcgo/uracil2W_dz/uracil2W_dz.fcidump \
   -dip -order 2 -solver lanczos-lowmem -lowmem-block 0 -mgpu 4 \
   -spin singlet -blocks 1 -backend cuda -sym all -profile -matfree on \
-  -out /dev/null 2>&1 | grep -E "dispatch|progress|profile|panic|cudaError" | tail -6
-rc=${PIPESTATUS[0]}
-[ "$rc" = 0 ] || { echo "FAIL: strict -mgpu rc=$rc"; fail=1; }
+  -out /dev/null > "$LOG2" 2>&1
+rc=$?
+grep -E "dispatch|progress|profile" "$LOG2" | tail -6
+if [ "$rc" != 0 ]; then
+  fail=1; echo "FAIL: strict -mgpu rc=$rc"
+  echo "---- failure message with stack (full output: $LOG2) ----"
+  first=$(grep -nE "panic:|fatal error:|cudaError|dip: partition" "$LOG2" | head -1 | cut -d: -f1)
+  if [ -n "$first" ]; then
+    sed -n "$((first>5?first-5:1)),$((first+60))p" "$LOG2"
+  else
+    tail -60 "$LOG2"
+  fi
+fi
 
 echo; echo "#### RESULT ####"
 echo "host=$(hostname)"

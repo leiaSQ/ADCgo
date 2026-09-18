@@ -8,6 +8,9 @@
 package analyze
 
 import (
+	"bufio"
+	"fmt"
+	"io"
 	"sort"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/dip"
@@ -53,6 +56,11 @@ type State struct {
 	Residue float64   `json:"residue"`
 	Leading []Leading `json:"leading"`
 	Pop     *Pop      `json:"pop,omitempty"`
+	// Root is this state's position among the NON-SPURIOUS Ritz roots in energy order,
+	// which is the number theADCcode prints and WriteRef reproduces. It is not Index:
+	// Index renumbers the surviving states 1..N, while Root keeps the gaps left by roots
+	// dropped for weak pole strength — adcdip1.out's last two states are 105 and 107.
+	Root int `json:"root"`
 }
 
 // Sector is all states of one (irrep, spin) block.
@@ -89,8 +97,16 @@ func BuildSector(sp *dip.Space, res lanczos.Result, opts Options, pe *PopEngine)
 	sort.Slice(order, func(a, b int) bool { return res.Values[order[a]] < res.Values[order[b]] })
 
 	var states []State
+	// root counts the non-spurious roots, incremented BEFORE the pole-strength test so the
+	// gaps left by weak states survive into it. That is theADCcode's own numbering — see
+	// State.Root — and the reason the two filters cannot be collapsed back into one test.
+	root := 0
 	for _, k := range order {
-		if res.Spurious(k, spurThresh) || res.PS[k] < opts.PSThresh {
+		if res.Spurious(k, spurThresh) {
+			continue
+		}
+		root++
+		if res.PS[k] < opts.PSThresh {
 			continue
 		}
 		var leading []Leading
@@ -115,6 +131,7 @@ func BuildSector(sp *dip.Space, res lanczos.Result, opts Options, pe *PopEngine)
 		}
 		st := State{
 			Index:     len(states) + 1,
+			Root:      root,
 			EnergyEV:  res.Values[k] * au2eV,
 			PSPercent: res.PS[k],
 			Leading:   leading,
@@ -133,4 +150,80 @@ func abs(x float64) float64 {
 		return -x
 	}
 	return x
+}
+
+// theADCcode's state-list format (adc_analyzer.cpp). Every constant here is load-bearing:
+// the block is diffed against reference output byte for byte, so a changed width silently
+// turns a passing comparison into a wall of noise.
+//
+//   - refRule is 34 dashes under a one-space-indented title.
+//   - refLabelCols right-aligns the configuration label, which with the colon and the
+//     9-column coefficient makes every entry exactly 17 wide, so columns line up whether
+//     the label is "<4,4|" or "<21,19|". Labels wider than 7 (three-digit orbitals) push
+//     their own line out rather than being truncated, as the Fortran does.
+//   - refPerLine is how many entries share a line before it wraps.
+const (
+	refTitle     = " Eigenvalue (eV), ps (%), residue"
+	refRule      = " ----------------------------------"
+	refLabelCols = 7
+	refPerLine   = 6
+)
+
+// writeRefHeader writes the block title, its rule and the two blank lines under it.
+func writeRefHeader(bw *bufio.Writer) {
+	bw.WriteString(refTitle + "\n")
+	bw.WriteString(refRule + "\n\n\n")
+}
+
+// writeRefState writes one state: its scalar line, the overlap heading, the coefficient
+// list wrapped at refPerLine, and the blank line that separates it from the next.
+//
+// residueEV is converted BACK to atomic units here, because that is the unit theADCcode
+// prints in the residue column (adc_analyzer.cpp:48) while State.Residue holds eV.
+//
+// Only main-space overlaps are written. theADCcode additionally prints an "Overlaps with
+// satellite-space configurations:" list when it has the satellite amplitudes; ADCgo keeps
+// only the main block of each Ritz vector unless Options.WantFull was set, so there is
+// nothing to print and inventing the heading with an empty list would be worse than
+// omitting it.
+func writeRefState(bw *bufio.Writer, root int, energyEV, psPercent, residueEV float64,
+	labels []string, coeffs []float64) {
+	fmt.Fprintf(bw, " %d: %.6f, %.2f, %.6f\n", root, energyEV, psPercent, residueEV/au2eV)
+	bw.WriteString(" Overlaps with main-space configurations:\n")
+	for i, lab := range labels {
+		fmt.Fprintf(bw, "%*s:%9.6f", refLabelCols, lab, coeffs[i])
+		if (i+1)%refPerLine == 0 || i == len(labels)-1 {
+			bw.WriteByte('\n')
+		}
+	}
+	bw.WriteByte('\n')
+}
+
+// WriteRef writes the sector's states in theADCcode's own "Eigenvalue (eV), ps (%),
+// residue" format, so an ADCgo run can be diffed straight against adcdip*.out instead of
+// being compared through a hand-written converter.
+//
+// The two-hole labels are "<i,j|" with i >= j in 1-based MO numbering, matching Leading.
+//
+// Diffing against a reference file: expect whole states to differ by a GLOBAL SIGN. An
+// eigenvector's sign is arbitrary and neither code fixes a gauge — reproducing
+// testdata/reference/adcdip1.out gives 60/60 state lines byte-identical and all 228 overlap
+// magnitudes equal, with 34 of the 60 states sign-flipped. Compare |coeff|, not coeff.
+// That run is `-dip -solver lanczos -blocks 100 -sym 0 -spin singlet -ps-thresh 0.5
+// -coeff-thresh 0.01` against testdata/reference/h2o_dzp.matched.fcidump: theADCcode's own
+// thresholds there are 0.5 and 0.01, not ADCgo's 1.0 and 0.1 defaults, and a mismatched
+// threshold shows up as missing states or missing overlaps rather than as wrong numbers.
+func (s Sector) WriteRef(w io.Writer) error {
+	bw := bufio.NewWriter(w)
+	writeRefHeader(bw)
+	for _, st := range s.States {
+		labels := make([]string, len(st.Leading))
+		coeffs := make([]float64, len(st.Leading))
+		for i, c := range st.Leading {
+			labels[i] = fmt.Sprintf("<%d,%d|", c.I, c.J)
+			coeffs[i] = c.Coeff
+		}
+		writeRefState(bw, st.Root, st.EnergyEV, st.PSPercent, st.Residue, labels, coeffs)
+	}
+	return bw.Flush()
 }

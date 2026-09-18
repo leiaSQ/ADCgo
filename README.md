@@ -93,6 +93,56 @@ go run ./cmd/adcgo -fcidump testdata/h2o_dzp.fcidump -dip -mo testdata/h2o_dzp.m
     -solver dense -sym all -spectrum -group "wat=O,~H1,~H2" -init-atom wat
 ```
 
+### Decay widths and lifetimes — Fano-ADC(2,2) `-fano`
+
+Electronic decay *rates*, not just channels: Γ and τ = ℏ/Γ for a chosen vacancy, by the
+Fano/Feshbach method with Stieltjes imaging
+([Kolorenč & Averbukh, *J. Chem. Phys.* **152**, 214107 (2020)](https://doi.org/10.1063/5.0007912)).
+Works over any SIP secular matrix: `-order 2` is Fano-ADC(2)x, `-order 22` the new ADC(2,2)
+scheme, whose explicit 3h2p class is what makes second-order decay (double Auger, double ICD)
+describable at all. `-adc22 m|x|f` selects the variant; `f` is the paper's recommendation.
+
+```sh
+# Ne+ (1s^-1) Auger width. The vacancy fixes the target irrep, so -sym is determined.
+go run ./cmd/adcgo -fcidump ne.fcidump -sip -order 22 -adc22 f     -fano -fano-init 0 -sym all -solver lanczos -matfree on
+
+# interatomic decay: Q is every configuration with ALL holes on the donor subunit
+go run ./cmd/adcgo -fcidump dimer.fcidump -sip -order 22 -fano     -fano-init 2 -fano-q 2,3,4 -fano-rule all -mo dimer.mo.json -init-atom A
+```
+
+`-mo` adds approximate partial widths per channel (Auger@A, ICD:A→B, ETMD, and `double` for
+the 3h2p/second-order channel), each imaged separately.
+
+**Basis requirement — the thing that decides whether a run is possible at all.** Imaging can
+only evaluate Γ(E_Φ) if the 2h1p pseudo-continuum brackets E_Φ, and a 2h1p state sits at
+ε_a − ε_k − ε_l. So what matters is the *energy span and level density of the virtual space*
+near E_Φ, not diffuseness. For the Ne 1s vacancy (E_Φ ≈ 32 E_h) aug-cc-pVTZ tops out at
+14.6 E_h and cannot describe the decay at all; aug-cc-pVQZ reaches 68.9 E_h. The run log
+reports how many P configurations actually carry coupling and warns when there are too few
+for the imaging to settle:
+
+| Ne⁺(1s⁻¹), Fano-ADC(2)x | coupled channels | Γ (meV) |
+|---|---|---|
+| aug-cc-pVQZ | 77 | 642 ± 269 |
+| aug-cc-pV5Z | 96 | 316 ± 8 |
+| aug-cc-pV5Z + 4s4p4d | 165 | 227 ± 10 |
+| published (Table VI) | | 244 ± 4 |
+
+Two diagnostics decide whether a width is trustworthy, and both are printed:
+
+- **coupled channels** — how many P configurations carry any coupling at all. Imaging
+  reconstructs a density from these alone, so a few tens gives a large Stieltjes spread
+  however well the rest of the pipeline works.
+- **sum-rule residual** — the pseudo-continuum's total strength against the exact
+  2π‖g‖². It is zero for a complete basis, so a large value means the Krylov space was
+  truncated before it captured the coupling. An unconverged width can still look
+  reasonable with a *small* error bar, because the Stieltjes orders agree with each other
+  about the wrong density — so raise `-fano-blocks` until the residual closes.
+
+`scripts/gen_fano_atoms.py` generates the atomic fixtures and
+`scripts/fano_table6.sbatch` runs the comparison on a compute node (necessary: the login
+node's user slice caps CPU at 4 cores, so `GOMAXPROCS` is 4 there whatever `nproc` says).
+
 ### Bare eigenvalue spectrum — `-bare`
 
 The plain solver output is just eigenvalues (energies + pole strengths), like legacy ADC.

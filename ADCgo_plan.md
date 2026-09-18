@@ -115,22 +115,33 @@ schema; the 4th-order exchange blocks for SIP and DIP (+ a CVS filter).
 
 ## Track W — Decay widths (Fano-Stieltjes primary, CAP validator; SIP + DIP)
 
-**W1 — Feshbach–Fano partition & decaying-state selection (generic over SIP & DIP).**
-P (bound/decaying) / Q (continuum) partition over a config space, generic across `dip.Space`
-and the SIP space. Select |Φ_d⟩ — the inner-valence 1h (SIP) or 2h (DIP) main configuration —
-via a bound-subspace-projected diagonalization (reuse `MainBlockSize` + Lanczos on the
-P-block). New `internal/adc/fano`. Mirror `adc2_pol/select_fano.f90`. *Verify:* bound-projected
-energy reproduces the inner-valence main line; |Φ_d⟩ has the expected hole character; dense
-oracle; both spaces.
+**W1–W4 are DONE for SIP scheme A.** `internal/adc/fano`, `internal/adc/stieltjes` and
+`adcgo -fano`, over ADC(2)x, ADC(3) and the new ADC(2,2)m/x/f secular matrices. See
+`.claude/plans/read-the-pdf-in-woolly-goblet.md` for the full record. Note the naming below
+had **P and Q swapped** relative to Kolorenč & Averbukh (2020), whose convention the code
+follows: **Q is bound** (it contains the discrete state |Φ⟩) and **P is the continuum**.
+Still open: scheme B (adapted intermediate states), DIP wiring (the `fano.Space` interface is
+already shaped for it), and W5.
 
-**W2 — Per-channel continuum-coupling spectrum (on the GPU engine).**
+**W1 — Feshbach–Fano partition & decaying-state selection (generic over SIP & DIP).** ✅
+Q (bound/decaying) / P (continuum) partition over a config space, generic across `dip.Space`
+and the SIP space. Select |Φ_d⟩ — the inner-valence 1h (SIP) or 2h (DIP) main configuration —
+via a bound-subspace-projected diagonalization. New `internal/adc/fano`. Mirror
+`adc2_pol/select_fano.f90`.
+*Done differently, and better:* no projected operator. Under scheme A the partition is of the
+CONFIGURATION INDICES, so `sip.Space.Restrict` turns Q and P into ordinary ADC spaces over
+which `sip.New` builds ordinary ADC matrices — every solver, the matrix-free appliers and the
+GPU backends work on them unchanged, which is the cost-neutrality the paper claims for
+scheme A. Gated at **exactly 0** deviation against the parent sub-block.
+
+**W2 — Per-channel continuum-coupling spectrum (on the GPU engine).** ✅
 Compute {E_j, γ_j = 2π|⟨Φ_d|Ĥ−E_d|Ψ_j⟩|²} over the Q-space pseudo-continuum eigenstates
 (2h1p for SIP-ICD; 3h1p for DIP) — the projection of (Ĥ−E_d)Φ_d onto the Q-eigenbasis,
 reusing the existing matvec + block-Lanczos band sweep. Split the coupling per decay channel
 with the existing `spectrum` Site/Regroup/Classify routing. Mirror `adc2_pol/partgammas.f90`.
 *Verify:* sum rule Σγ_j = 2π‖Q(Ĥ−E_d)Φ_d‖²; dense vs Lanczos; per-irrep union; both spaces.
 
-**W3 — Stieltjes imaging engine.**
+**W3 — Stieltjes imaging engine.** ✅
 Port `adc2_pol/stieltjes_phi1.f`: spectral moments S₋ₖ = Σ γ_j E_j⁻ᵏ → orthogonal-polynomial
 3-term recurrence → tridiagonal → eigen (Gauss nodes/weights) → cumulative γ(E) → numerical
 derivative → Γ at E_d, with order-convergence. `math/big.Float` for the moment recurrence,
@@ -138,7 +149,10 @@ float64 for the small tridiagonal eig. New `internal/adc/stieltjes`, wired live 
 *Verify:* analytic Lorentzian-coupling model with known Γ; order-convergence curve; a published
 ICD Γ (Ne dimer literature).
 
-**W4 — Widths / lifetimes / branching ratios → JSON (tied to classify).**
+**W4 — Widths / lifetimes / branching ratios → JSON (tied to classify).** ✅ (as `-fano`,
+emitting its own document rather than per-line width fields: a width is computed for one
+selected vacancy, so `spectrum.Line.width_ev` would be a schema with nothing to populate it
+until per-state widths exist.)
 Per-channel Stieltjes → partial Γ_channel; Γ_total = Σ; τ = ℏ/Γ (0.6582 fs·eV / Γ[eV]);
 branching = Γ_channel/Γ_total. Extend `analyze.State` and `spectrum.Line`/`Meta` with
 `width_ev`, `lifetime_fs`, and per-channel partial widths. New `cmd/adcgo -widths` flow.

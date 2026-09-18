@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -95,7 +96,8 @@ func main() {
 	mgpuDevSymEig := flag.Bool("mgpu-device-symeig", false, "run the -mgpu Rayleigh-Ritz eigensolve on a GPU instead of the host. distBackend embeds the host backend and inherits its SymEig, so by default the O(dim^3) projected eigensolve runs on one CPU while all 8 GPUs idle (dim reaches 11,600 for production SIP). OFF by default because cuSOLVER's dsyevd and the host LAPACK path agree only to rounding, not bit for bit: turning this on moves every line in the last digits, so re-validate against the reference spectra before trusting a run that used it")
 	mainCache := flag.String("mainblock-cache", "auto", "where to cache the assembled SIP 1h/1h main block so a later run skips rebuilding it: auto = <fcidump>.mainblock.o<order>.i<irrep>.cache | off | an explicit path prefix. The block is 26 KB at production scale but took 8h16m to build (job 14551670) because every element is an O(nvir^4*nocc) sum, and -checkpoint covers only the Krylov state, so each daisychain generation rebuilt it. The cached copy is rejected unless the ADC order, sector irrep and multiplicity, orbital-space dimensions, WERT3 flag, a hash of the orbital energies, a hash of the static self-energy, and the FCIDUMP size/mtime all match")
 	sigmaCache := flag.String("sigma-cache", "auto", "where to cache the static self-energy so a later run skips rebuilding it: auto = <fcidump>.sigma-<scheme>.cache | off | an explicit path. Σ(∞) dominates a large SIP run (78 h for the production system) and is only n² floats (351 KB at norb=212), so a daisychain that is walltime-killed before its solver checkpoints would otherwise pay those hours again every generation. The cached copy is rejected unless the scheme, its tuning, the orbital-space dimensions, a hash of the orbital energies, and the FCIDUMP size/mtime all match")
-	out := flag.String("out", "", "write JSON to this file (default stdout)")
+	out := flag.String("out", "", "write the output to this file (default stdout)")
+	format := flag.String("format", "json", "output format for the -dip/-sip solver document: json = ADCgo's native document | ref = theADCcode's own \"Eigenvalue (eV), ps (%), residue\" state list, byte-compatible with adcdip*.out so a run can be diffed straight against the reference implementation (main-space overlaps only, and the residue column in a.u. as the reference prints it). ref covers the solver document alone — -spectrum, -tdm and -convert have no reference format and reject it")
 	profile := flag.Bool("profile", false, "print per-sector solver phase timings to stderr")
 	checkpoint := flag.String("checkpoint", "", "base path for Krylov checkpoints, so a solve can resume in a later process after a walltime kill or a crash. Supported by -solver lanczos (SIP and DIP) and by -solver lanczos-lowmem with -lowmem-block 0 (DIP Mode B only — Mode A retains the whole basis on the host and is not resumable). Each sector appends a suffix: SIP .i<irrep>, DIP .s<spin>.i<irrep>. A SIGUSR1 (SLURM --signal=B:USR1@<grace>) makes the run checkpoint and exit 64 (\"resume needed\"); exit 0 means done. Empty = no checkpointing")
 	checkpointEvery := flag.Int("checkpoint-every", 25, "-checkpoint only: also save every N blocks for crash resilience (<=0 = save only on the stop signal)")
@@ -119,6 +121,29 @@ func main() {
 	var groups groupFlag
 	flag.Var(&groups, "group", "decay-site grouping NAME=col1,col2 (repeatable; ~col makes a column passive); a bare -group prompts interactively; default each population column is its own site")
 	convert := flag.String("convert", "", "read a previously emitted solver document JSON (the default -dip/-sip output) and emit its bare stick spectrum without re-solving; needs -dip or -sip to say which kind")
+
+	adc22 := flag.String("adc22", "f", "-order 22 variant (Kolorenc & Averbukh, JCP 152, 214107 (2020), Table I): f = full, the paper's recommendation and the only variant that gets double Auger right; x = drops the second-order 1h/2h1p coupling; m = also drops the first-order 3h2p/3h2p block, leaving it diagonal. m and x are documented to overshoot decay widths by ~14% and ~24%, so they are diagnostics rather than production settings")
+	doFano := flag.Bool("fano", false, "compute an electronic decay width (Auger, ICD, ETMD and their double counterparts) by the Fano/Feshbach method with Stieltjes imaging, instead of a spectrum. Needs -sip, -fano-init, and an -order of 2 (Fano-ADC(2)x), 3, or 22 (Fano-ADC(2,2)). The vacancy fixes the target irrep, so -sym is determined rather than chosen")
+	fanoInit := flag.Int("fano-init", -1, "-fano: the initially ionized orbital, a 0-based occupied index. It defines both the discrete state |Phi> (selected from the QMQ spectrum by its weight on this orbital's 1h configuration) and, by default, the Q subspace")
+	fanoQ := flag.String("fano-q", "", "-fano: the Q (bound) orbital set as comma-separated 0-based occupied indices. Empty = just -fano-init, which with the default -fano-rule any is the Auger criterion: Q is every configuration still carrying the initial hole, P every one that has filled it. For interatomic decay name the whole donor subunit's orbitals and use -fano-rule all")
+	fanoRule := flag.String("fano-rule", "any", "-fano: which reading of the scheme A predicate puts a configuration in Q. any = at least one hole in the Q set (retains the initial vacancy), right for local decay such as atomic Auger. all = every hole in the set (all holes localized on subunit A), right for ICD/ETMD between subunits, where it is a hole OUTSIDE the donor that marks a decay channel. The two are not interchangeable")
+	fanoNth := flag.Int("fano-nth", 0, "-fano: which qualifying QMQ root to take as |Phi>, 0-based in ascending energy (the reference's ninista-1). Only roots whose weight on the vacancy configuration reaches -fano-qmin are counted")
+	fanoQP := flag.String("fano-qp", "", "-fano: a Q/P partition stated PER EXCITATION CLASS, which -fano-q cannot express. Grammar: clauses separated by ';', each prefixed q: or p:, each a conjunction of terms joined by '&', each term [class/]orbitals:min[:max] with orbitals a comma-separated list of 0-based occupied indices and a-b ranges, class an excitation class as a hole count (omitted = every class), and max omitted = unbounded. A configuration is bound if some q clause matches, or if p clauses were given and none matches. Two of the four atoms in the paper's Table V need this: Mg(2s^-1) is 'q:0:1;p:2/4:1;p:3/4:2' — 2s vacancies bound, continuum is 2h1p with a 3s hole and 3h2p with TWO of them, which is what keeps the CLOSED 2p^-2 channel out of P — and Kr(3d^-1) is 'q:0-4:1;q:3/5:2:2&3/6-8:1', a 3d any-hole rule plus the 4s^-2 4p^-1 shake-up family in Q. Supersedes -fano-q and -fano-rule")
+	fanoQMin := flag.Float64("fano-qmin", 0.1, "-fano: minimum weight of |Phi> on the vacancy's 1h configuration (the reference's mspacewi). A root below this is not the state that was ionized")
+	fanoQSolver := flag.String("fano-qsolver", "", "-fano: eigensolver for the QMQ (bound) half, which wants a different one from the PMP half that -solver governs. Empty = davidson, or dense when -solver is dense. Only a few of QMQ's LOWEST roots are wanted — |Phi> is the bottom of that spectrum, since every Q configuration past the 1h class carries an extra hole — and under this partition Q's main block is often a single configuration, so a block-Lanczos seeded from it would be one column wide")
+	fanoQRoots := flag.Int("fano-qroots", 8, "-fano -solver davidson: QMQ roots to converge. The lowest are the right ones: every Q configuration carries the initial vacancy and every one past the 1h class carries an extra hole, so |Phi> is the bottom of the QMQ spectrum even for a deep core hole")
+	fanoEMax := flag.Float64("fano-emax", 0, "-fano: drop pseudo-continuum states above this energy in hartree. 0 (the default) = no ceiling. The reference hard-codes 4 hartree, and that constant does NOT transfer: it is a polarization-propagator scale, where the energies are neutral excitations of a few tenths of a hartree. An ionization potential is an order of magnitude larger and a core vacancy two (Ne 1s sits at 32 hartree), so 4 hartree would discard the entire decay continuum")
+	fanoEMaxRel := flag.Float64("fano-emax-rel", 3.0, "-fano: energy ceiling as a MULTIPLE of E_Phi, used when -fano-emax is not given absolutely. This is the transferable form of the reference's hard-coded 4 hartree: the cut exists to drop states far ABOVE the decaying state, which contribute nothing to Gamma(E_Phi) but dominate the moments the Stieltjes reconstruction is built from, and that only means anything relative to E_Phi. Without it a basis with tight augmentation functions spans tens of keV and puts E_Phi in the bottom 1% of the sampled range, where imaging is extrapolating: for Ar 2p that alone moved the width from 108 to 82 meV against a published 114. Scanning it is the honest convergence check - Gamma plateaus over roughly 3-10x with the order spread minimized near 3x. 0 disables the ceiling")
+	fanoWMin := flag.Float64("fano-wmin", 0.05, "-fano: drop pseudo-continuum states whose weight on P's decay class (2h1p for single ionization) is at or below this (the reference's cntr > 0.05; its ADC(2)-extended variant used 0.2). NOTE this is the 2h1p weight, not the 1h weight — the polarization-propagator reference tests its own lowest class, which is 1h1p. Negative disables the cut")
+	fanoGMin := flag.Float64("fano-gmin", 1e-16, "-fano: drop pseudo-continuum states with gamma_i at or below this, in hartree squared (the reference's 1e-16 floor). Negative disables the cut")
+	fanoAt := flag.Float64("fano-at", 0, "-fano: evaluate Gamma at this energy in eV instead of at E_Phi. 0 = at E_Phi, which is the physical answer. Pinning it is how two schemes are compared at FIXED energy: a scheme that moves E_Phi changes Gamma twice over, once through the coupling density it produces and once by evaluating that density somewhere else, and only separating the two attributes a difference to the physics")
+	fanoBlock := flag.Int("fano-block", 0, "-fano -solver lanczos: Krylov block width for the PMP pseudo-continuum solve, seeded with the most strongly coupled P configurations (the reference's fill_stvc). 0 = min(64, |P|). P's own main block is a poor width here — under this partition it holds only the few 1h configurations Q did not claim — and the width is nearly free with -matfree, since one element recompute serves every column of the block")
+	fanoBlocks := flag.Int("fano-blocks", 0, "-fano -solver lanczos: block count for the PMP solve (0 = -blocks). The pseudo-continuum needs only enough states to sample the coupling density; a few hundred is ample, and Stieltjes imaging reports its own convergence")
+	stOrders := flag.String("stieltjes-orders", "", "-fano: Stieltjes order range as lo-hi (e.g. 5-40, or 8- for no upper bound). Empty = 5 to the largest order whose orthogonal polynomials survive, which is discovered rather than fixed")
+	stPrec := flag.Uint("stieltjes-prec", 256, "-fano: mantissa bits for the Stieltjes moment recurrence. The maximum usable order is set purely by this: on a Lorentzian model, 53 bits (float64) reaches order 17 with a 21% density error, 113 bits (the reference's REAL*16) order 34 with 2.9%, and 256 bits order 72 with 0.37%")
+	stAverage := flag.String("stieltjes-average", "paper", "-fano: how the per-order widths are combined. paper = the mean over -stieltjes-window consecutive orders in the region of best convergence, with that window's standard deviation as the error bar (Kolorenc & Averbukh's own protocol, and what their tabulated uncertainties are). reference = stieltjes_phi1.f's mean of the three highest orders with its relaxing convergence search")
+	stWindow := flag.Int("stieltjes-window", 9, "-fano -stieltjes-average paper: consecutive orders per averaging window (the paper uses nine)")
+
 	flag.Parse()
 
 	println("\n ADCgo: a modern implementation of ADC \n Authors: Leia Wertebach, Alexander Kuleff \n\n Derived from: \n TheADCcode: A collection of ADC/ISR source codes.\n Contributors: Nikolay Golubev,\n Yasen Velkov (developer of the original version),\n Alexander Kuleff,\n Anthony Dutoi, Nicolas Sisourat, Tsveta Miteva,\n Joerg Breidbach, Imke Mueller, Nayana Vaval,\n Francesco Tarantelli, Soeren Kopelke,\n Sajeev Yesodharan, Kirill Gokhberg, Robin Santra\n\n")
@@ -240,7 +265,7 @@ func main() {
 		cfg := dipConfig{
 			solver: *solver, spinSel: *spinSel, moPath: *moPath, out: *out, sym: *sym,
 			backend: *backendName, gpus: *gpus, mgpu: *mgpu,
-			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks,
+			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks, format: *format,
 			nroots: *nroots, maxdavsp: *maxdavsp, maxdavit: *maxdavit, convthr: *convthr,
 			lowmemBlock: *lowmemBlock,
 			profile:     *profile,
@@ -269,6 +294,21 @@ func main() {
 		return
 	}
 
+	if *doFano {
+		if !*doSIP {
+			fmt.Fprintln(os.Stderr, "adcgo: -fano needs -sip")
+			os.Exit(2)
+		}
+		if doSpec || *doTDM {
+			fmt.Fprintln(os.Stderr, "adcgo: -fano is exclusive with -spectrum/-bare and -tdm")
+			os.Exit(2)
+		}
+		if *fanoInit < 0 {
+			fmt.Fprintln(os.Stderr, "adcgo: -fano needs -fano-init <0-based occupied orbital>")
+			os.Exit(2)
+		}
+	}
+
 	if *doSIP {
 		core, err := parseCoreOrbitals(*coreOrb)
 		if err != nil {
@@ -277,7 +317,7 @@ func main() {
 		}
 		cfg := sipConfig{
 			solver: *solver, out: *out, sym: *sym, backend: *backendName, gpus: *gpus, order: *order,
-			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks,
+			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks, format: *format,
 			nroots: *nroots, maxdavsp: *maxdavsp, maxdavit: *maxdavit, convthr: *convthr,
 			profile: *profile,
 			spec:    specCfg,
@@ -301,6 +341,50 @@ func main() {
 		if cfg.ckpt != "" {
 			cfg.stop = stopSig
 		}
+		variant, ok := sip.ParseVariant(*adc22)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "adcgo: bad -adc22 %q (want m, x or f)\n", *adc22)
+			os.Exit(2)
+		}
+		cfg.variant = variant
+
+		if *doFano {
+			rule, err := parseHoleRule(*fanoRule)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "adcgo:", err)
+				os.Exit(2)
+			}
+			qOrbs, err := parseOrbitalList("-fano-q", *fanoQ)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "adcgo:", err)
+				os.Exit(2)
+			}
+			lo, hi, err := parseStieltjesOrders(*stOrders)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "adcgo:", err)
+				os.Exit(2)
+			}
+			avg, err := parseAverageMode(*stAverage)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "adcgo:", err)
+				os.Exit(2)
+			}
+			fcfg := fanoConfig{
+				sip: cfg, variant: variant, vacancy: *fanoInit, qOrbs: qOrbs, rule: rule,
+				nth: *fanoNth, qMin: *fanoQMin, qRoots: *fanoQRoots, qSolver: *fanoQSolver,
+				qpSpec: *fanoQP,
+				emax:   *fanoEMax, emaxRel: *fanoEMaxRel, wmin: *fanoWMin, gmin: *fanoGMin,
+				pBlock: *fanoBlock, pBlocks: *fanoBlocks, atEV: *fanoAt,
+				stOrderLo: lo, stOrderHi: hi, stPrec: *stPrec, stAverage: avg, stWindow: *stWindow,
+				initSite: *initAtom, sites: groups.sites, specOpts: specCfg.classify,
+			}
+			if err := runFano(d, fcfg); err != nil {
+				fmt.Fprintln(os.Stderr, "adcgo:", err)
+				os.Exit(1)
+			}
+			return
+		}
+
 		if err := runSIP(d, cfg); err != nil {
 			if errors.Is(err, errInterrupted) {
 				fmt.Fprintln(os.Stderr, "adcgo: checkpoint written; resume needed")
@@ -343,6 +427,7 @@ type dipConfig struct {
 	gpus                                       int // -gpus: cap on concurrent per-sector GPUs (0 = all)
 	mgpu                                       int // -mgpu: row-partition ONE sector across this many GPUs (0 = off)
 	psThresh, coeffThresh                      float64
+	format                                     string // -format: json | ref
 	blocks                                     int
 	nroots, maxdavsp, maxdavit                 int     // -solver davidson
 	convthr                                    float64 // -solver davidson
@@ -383,13 +468,37 @@ func dipLanczosOpts(cfg dipConfig, spin dip.Spin, targetSym int) lanczos.Options
 	// pre-gate ApplyBlock arm) revealed it had not finished two blocks. Without this there is no
 	// way to know whether a checkpoint interval is ever reached.
 	if cfg.profile || cfg.ckpt != "" {
-		o.Progress = func(iter, dim, blockSize int, tm lanczos.Timing) {
-			fmt.Fprintf(os.Stderr, "progress dip spin=%d irrep=%d block=%d dim=%d size=%d apply=%s orth=%s\n",
-				spin, targetSym+1, iter, dim, blockSize,
-				tm.Apply.Round(time.Second), tm.Orth.Round(time.Second))
-		}
+		o.Progress = progressReporter(fmt.Sprintf("dip spin=%d irrep=%d", spin, targetSym+1))
 	}
 	return o
+}
+
+// progressReporter builds the per-block Progress callback both solve families install. It
+// prints one line per block to stderr: the cumulative phase times first — the DIP line's
+// original fields, in their original order, so scripts/uracil2W_dip_measure.sbatch's
+// `grep -c "^progress dip"` and anything else reading them still match — then this block's
+// own deltas.
+//
+// The deltas are the half that diagnoses a production run. Cumulative times answer "where has
+// the solve spent itself"; only the per-block difference shows a block getting slower, which is
+// what distinguishes a solve that is merely long from one whose apply cost is growing. Progress
+// is handed lanczos.Timing, which is cumulative, so the previous value is kept here.
+//
+// The cumulative fields keep the original second resolution; the deltas are milliseconds,
+// because a per-block difference rounded to the second reads as a column of "0s" on every
+// sector small enough to debug on.
+func progressReporter(prefix string) func(iter, dim, blockSize int, tm lanczos.Timing) {
+	var prev lanczos.Timing
+	return func(iter, dim, blockSize int, tm lanczos.Timing) {
+		fmt.Fprintf(os.Stderr,
+			"progress %s block=%d dim=%d size=%d apply=%s orth=%s | block apply=%s orth=%s proj=%s\n",
+			prefix, iter, dim, blockSize,
+			tm.Apply.Round(time.Second), tm.Orth.Round(time.Second),
+			(tm.Apply - prev.Apply).Round(time.Millisecond),
+			(tm.Orth - prev.Orth).Round(time.Millisecond),
+			(tm.Proj - prev.Proj).Round(time.Millisecond))
+		prev = tm
+	}
 }
 
 // reportTiming prints one solver's phase breakdown to stderr. The percentages are
@@ -616,6 +725,9 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 	if err != nil {
 		return err
 	}
+	if err := validateFormat(cfg.format, !cfg.spec.enabled, "a stick spectrum"); err != nil {
+		return err
+	}
 	if err := validateSolver(cfg.solver); err != nil {
 		return err
 	}
@@ -729,6 +841,13 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 		return emitJSON(spec, cfg.out)
 	}
 
+	if cfg.format == formatRef {
+		secs := make([]refSector, len(doc.Sectors))
+		for i := range doc.Sectors {
+			secs[i] = doc.Sectors[i]
+		}
+		return emitRef(secs, cfg.out)
+	}
 	return emitJSON(doc, cfg.out)
 }
 
@@ -790,6 +909,63 @@ func runDIPGroupedConvert(path string, md *mo.Data, cfg specConfig, out string) 
 }
 
 // emitJSON writes v as indented JSON to out (stdout when out == "").
+// -format values. json is ADCgo's native document; ref is theADCcode's own state list.
+const (
+	formatJSON = "json"
+	formatRef  = "ref"
+)
+
+// refSector is the shared behaviour of analyze.Sector and analyze.SIPSector: writing itself
+// as one of theADCcode's "Eigenvalue (eV), ps (%), residue" blocks.
+type refSector interface{ WriteRef(io.Writer) error }
+
+// emitRef writes each sector as one reference block, concatenated in solve order. The
+// reference puts one symmetry per file; a multi-symmetry ADCgo run writes them in sequence,
+// which is what concatenating those files would give.
+func emitRef(secs []refSector, out string) error {
+	write := func(w io.Writer) error {
+		for _, s := range secs {
+			if err := s.WriteRef(w); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if out == "" {
+		return write(os.Stdout)
+	}
+	f, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	// Report the write error in preference to the close error, but never skip the close.
+	werr := write(f)
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
+}
+
+// validateFormat rejects an unknown -format, and rejects "ref" for the outputs that have no
+// reference counterpart. It is called BEFORE the solve, not at the emit site: a production
+// run is hours long and discovering a bad output flag at the end of it would throw the whole
+// thing away. refOK says whether this invocation ends in a solver document.
+func validateFormat(format string, refOK bool, what string) error {
+	switch format {
+	case formatJSON:
+		return nil
+	case formatRef:
+		if !refOK {
+			return fmt.Errorf("-format ref is defined only for the -dip/-sip solver document, "+
+				"and this run emits %s; drop -format or drop %s", what, what)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown -format %q (want %q or %q)", format, formatJSON, formatRef)
+	}
+}
+
 func emitJSON(v any, out string) error {
 	enc, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -816,7 +992,9 @@ type sipConfig struct {
 	solver, out, sym, backend  string
 	gpus                       int // -gpus: cap on concurrent per-sector GPUs (0 = all)
 	order                      int
+	variant                    sip.Variant // -adc22 m|x|f; only used when order == sip.Order22
 	psThresh, coeffThresh      float64
+	format                     string // -format: json | ref
 	blocks                     int
 	nroots, maxdavsp, maxdavit int     // -solver davidson
 	convthr                    float64 // -solver davidson
@@ -880,11 +1058,19 @@ func parseCoreOrbitals(s string) ([]int, error) {
 }
 
 func runSIP(d *fcidump.Data, cfg sipConfig) error {
-	if cfg.order < 2 || cfg.order > 4 {
-		return fmt.Errorf("unknown -order %d (want 2, 3, or 4)", cfg.order)
+	if (cfg.order < 2 || cfg.order > 4) && cfg.order != sip.Order22 {
+		return fmt.Errorf("unknown -order %d (want 2, 3, 4, or %d for ADC(2,2))", cfg.order, sip.Order22)
 	}
 	if cfg.order == 4 && len(cfg.core) == 0 {
 		return fmt.Errorf("-order 4 is CVS Dyson ADC(4) and requires -core (e.g. -core 0)")
+	}
+	refOK := !cfg.spec.enabled && !cfg.tdm
+	what := "a stick spectrum"
+	if cfg.tdm {
+		what = "transition dipole moments"
+	}
+	if err := validateFormat(cfg.format, refOK, what); err != nil {
+		return err
 	}
 	if err := validateSolver(cfg.solver); err != nil {
 		return err
@@ -934,9 +1120,12 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 	var items []sipItem
 	for _, targetSym := range syms {
 		var sp *sip.Space
-		if cfg.order == 4 {
+		switch cfg.order {
+		case 4:
 			sp = sip.NewSpace4(nocc, d.NORB, orbSym, targetSym, cfg.core)
-		} else {
+		case sip.Order22:
+			sp = sip.NewSpace22(nocc, d.NORB, orbSym, targetSym)
+		default:
 			sp = sip.NewSpace(nocc, d.NORB, orbSym, targetSym)
 		}
 		if sp.MainBlockSize() == 0 {
@@ -1007,6 +1196,13 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 		return emitJSON(spec, cfg.out)
 	}
 
+	if cfg.format == formatRef {
+		secs := make([]refSector, len(doc.Sectors))
+		for i := range doc.Sectors {
+			secs[i] = doc.Sectors[i]
+		}
+		return emitRef(secs, cfg.out)
+	}
 	return emitJSON(doc, cfg.out)
 }
 

@@ -94,6 +94,14 @@ func solveSIPSpace(ch *chooser, label string, sp *sip.Space, ints *integrals.Sto
 			Stop:  cfg.stop,
 		}
 	}
+	// Same trigger as the DIP twin (dipLanczosOpts), and for the same reason, which this path
+	// learned the hard way: production job 14717237 ran a full 200-block melanin solve in 11 h
+	// and printed not one line between "entering the solver" and the final JSON, so whether it
+	// had reached its block budget could only be established afterwards by matching Slurm's
+	// recorded 4.9 TB of checkpoint writes against saveKrylov's per-block size.
+	if cfg.profile || cfg.ckpt != "" {
+		lopts.Progress = progressReporter(fmt.Sprintf("sip irrep=%d", sp.Sym+1))
+	}
 	davOpts := davidsonOpts(cfg.nroots, cfg.maxdavsp, cfg.maxdavit, cfg.convthr, wantFull)
 	n, b := sp.Size(), sp.MainBlockSize()
 	subspace := lanczos.SubspaceDim(n, b, lopts)
@@ -115,6 +123,7 @@ func solveSIPSpace(ch *chooser, label string, sp *sip.Space, ints *integrals.Sto
 	}
 	mx := sip.New(sp, ints, eps, order, be)
 	mx.SetMatFree(cfg.matFree, cfg.matFreeBudget)
+	mx.SetVariant(cfg.variant) // -adc22; a no-op at any order but sip.Order22
 	mx.SetWert3(cfg.wert3)
 	if cfg.sig != nil {
 		mx.SetStaticSelfEnergy(cfg.sig)

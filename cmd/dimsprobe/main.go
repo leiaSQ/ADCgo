@@ -6,6 +6,7 @@
 // calibration front-end for backend dispatch.
 //
 //	go run ./cmd/dimsprobe <file.fcidump> [label] [-nnz] [-blocks N]
+//	go run ./cmd/dimsprobe <file.fcidump> -sip -order 22 -fano-init 0
 //
 // -nnz assembles each sector's operator, which is expensive for large cases.
 package main
@@ -19,6 +20,7 @@ import (
 
 	"github.com/leiaSQ/ADCgo/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/dip"
+	"github.com/leiaSQ/ADCgo/internal/adc/fano"
 	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
 	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
 	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
@@ -50,13 +52,16 @@ func parseCore(s string) []int {
 // its 1h/2h1p/3h2p space, so the block-Lanczos memory of a `-sip -order 4 -core …`
 // run can be gated before committing. Lanczos never forms the dense n×n operator,
 // so only the Krylov basis B (n·dim·8) and projected T (dim²·8) are reported.
-func probeSIP(d *fcidump.Data, nocc, order, nblocks int, core []int) {
+func probeSIP(d *fcidump.Data, nocc, order, nblocks int, core []int, vacancy int) {
 	total, maxDim := 0, 0
 	for sym := 0; sym < 8; sym++ {
 		var sp *sip.Space
-		if order == 4 {
+		switch order {
+		case 4:
 			sp = sip.NewSpace4(nocc, d.NORB, d.OrbSym, sym, core)
-		} else {
+		case sip.Order22:
+			sp = sip.NewSpace22(nocc, d.NORB, d.OrbSym, sym)
+		default:
 			sp = sip.NewSpace(nocc, d.NORB, d.OrbSym, sym)
 		}
 		if sp.MainBlockSize() == 0 {
@@ -79,17 +84,39 @@ func probeSIP(d *fcidump.Data, nocc, order, nblocks int, core []int) {
 		coupling := float64(n2h1p) * float64(n3h2p) * 8 / gb
 		sat2 := float64(n2h1p) * float64(n2h1p) * 8 / gb
 		diag3 := float64(n3h2p) * 8 / gb
+		sat3 := float64(n3h2p) * float64(n3h2p) * 8 / gb
 		var opGB, opMF float64
-		if order == 4 {
+		switch order {
+		case 4:
 			opGB = coupling + diag3 + sat2
 			opMF = diag3 // both coupling blocks matrix-free
-		} else {
+		case sip.Order22:
+			// ADC(2,2): the 3h2p/3h2p block is n3² for variants x and f (diagonal for m),
+			// and the 2h1p/3h2p coupling n2·n3. Both go matrix-free, leaving the dense
+			// 2h1p/2h1p block and, for variant m, the 3h2p diagonal vector.
+			opGB = sat2 + coupling + sat3
+			opMF = sat2 + diag3
+		default:
 			opGB = sat2
 			opMF = sat2
 		}
-		fmt.Printf("   irrep=%d  dim=%-8d 1h=%-3d 2h1p=%-6d 3h2p=%-8d krylov=%-5d (%3.0f%% of n)  B=%6.3f GB  T=%6.3f GB  op~%6.3f GB (matfree %.3f)\n",
+		fmt.Printf("   irrep=%d  dim=%-9d 1h=%-3d 2h1p=%-6d 3h2p=%-9d krylov=%-6d (%3.0f%% of n)  B=%7.3f GB  T=%6.3f GB  op~%8.3f GB (matfree %.3f)\n",
 			sym, n, b, n2h1p, n3h2p, dim, 100*float64(dim)/float64(n),
 			float64(n)*float64(dim)*8/gb, float64(dim)*float64(dim)*8/gb, opGB, opMF)
+
+		// The Fano Q/P split, when a vacancy is named: it is what actually gets solved,
+		// and each half is a fraction of the sector above.
+		if vacancy >= 0 && vacancy < nocc && (d.OrbSym == nil || d.OrbSym[vacancy]-1 == sym) {
+			sel, err := fano.NewHoleLocalization(fano.AnyHole, []int{vacancy}, "")
+			if err == nil {
+				part := fano.NewPartition(sp, sel)
+				fmt.Printf("     fano vacancy %d: Q=%-9d P=%-9d (Q main %d); dense P = %.3g GB, "+
+					"P krylov at %d blocks x %d = %.3g GB\n",
+					vacancy, part.QSize(), part.PSize(), part.QMain,
+					float64(part.PSize())*float64(part.PSize())*8/gb,
+					nblocks, 64, float64(part.PSize())*float64(nblocks*64)*8/gb)
+			}
+		}
 	}
 	fmt.Printf("   TOTAL dim=%d  largest sector=%d\n\n", total, maxDim)
 }
@@ -98,8 +125,9 @@ func main() {
 	withNNZ := flag.Bool("nnz", false, "assemble each sector's operator and report its nnz (slow)")
 	nblocks := flag.Int("blocks", 200, "block-Lanczos iteration count, for the subspace-size estimate")
 	doSIP := flag.Bool("sip", false, "size SIP (single-ionization) sectors instead of DIP")
-	order := flag.Int("order", 3, "SIP ADC order (2, 3, or 4=CVS Dyson ADC(4))")
+	order := flag.Int("order", 3, "SIP ADC order (2, 3, 4=CVS Dyson ADC(4), or 22=ADC(2,2))")
 	coreFlag := flag.String("core", "", "CVS core orbitals for -order 4 (comma-separated 0-based)")
+	vacancy := flag.Int("fano-init", -1, "also report the Fano Q/P split for this vacancy orbital (0-based occupied); -1 = skip")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -128,7 +156,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "dimsprobe: -order 4 (CVS) requires -core (e.g. -core 0)")
 			os.Exit(2)
 		}
-		probeSIP(d, nocc, *order, *nblocks, core)
+		probeSIP(d, nocc, *order, *nblocks, core, *vacancy)
 		return
 	}
 

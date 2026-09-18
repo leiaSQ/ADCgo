@@ -276,6 +276,32 @@ func (mx *Matrix) OperatorResidentBytes() uint64 {
 		return bytes
 	}
 
+	if mx.isADC22() {
+		n2 := sp.Begin3h2p - main // 2h1p
+		n3 := len(sp.Sat3)        // 3h2p
+		if main > 0 {
+			bytes += uint64(main) * uint64(main) * w
+			if n2 > 0 {
+				bytes += uint64(main) * uint64(n2) * w
+			}
+		}
+		if n2 > 0 {
+			bytes += uint64(n2) * uint64(n2) * w // 2h1p/2h1p: always dense today
+		}
+		if n3 > 0 {
+			switch {
+			case mx.el.variant == VariantM:
+				bytes += uint64(n3) * w // A18 only: a diagonal vector, not a block
+			case !mx.matFreeSat3(blockBytes(n3, n3)):
+				bytes += uint64(n3) * uint64(n3) * w
+			}
+			if n2 > 0 && !mx.matFreeC23(blockBytes(n2, n3)) {
+				bytes += uint64(n2) * uint64(n3) * w
+			}
+		}
+		return bytes
+	}
+
 	nSat := sp.Size() - main
 	if main > 0 {
 		bytes += uint64(main) * uint64(main) * w
@@ -331,6 +357,9 @@ func (mx *Matrix) assembleStep(what string, run func()) {
 func (mx *Matrix) assemble() *assembledOp {
 	if mx.isADC4() {
 		return mx.assemble4()
+	}
+	if mx.isADC22() {
+		return mx.assemble22()
 	}
 	sp := mx.sp
 	main := sp.BeginSat
@@ -400,6 +429,11 @@ func (mx *Matrix) MainBlockSize() int { return mx.sp.MainBlockSize() }
 // Space returns the underlying configuration space.
 func (mx *Matrix) Space() *Space { return mx.sp }
 
+// Backend returns the backend this matrix was built on, so a caller that had the backend
+// chosen for it (the Fano driver, which builds several sub-matrices through one chooser)
+// can allocate vectors on the same one rather than tracking it separately.
+func (mx *Matrix) Backend() backend.Backend { return mx.be }
+
 // Diagonal returns the resident diagonal of the secular matrix, assembled directly from
 // the per-block element functions — never from BuildMatrix, which is terabytes for a
 // large matrix-free order-4 sector. Only the block-diagonal blocks (1h, 2h1p, 3h2p)
@@ -409,6 +443,10 @@ func (mx *Matrix) Diagonal(be backend.Backend) backend.Vector {
 	sp := mx.sp
 	d := make([]float64, sp.Size())
 	main := sp.BeginSat
+	if mx.isADC22() {
+		mx.diagonal22(d)
+		return be.Upload(d)
+	}
 	if mx.isADC4() {
 		// 1h: −ε_P − Σ_PP (mainBlock4).
 		for r := range main {
@@ -451,6 +489,9 @@ func (mx *Matrix) Diagonal(be backend.Backend) backend.Vector {
 func (mx *Matrix) BuildMatrix() backend.Mat {
 	if mx.isADC4() {
 		return mx.buildMatrix4()
+	}
+	if mx.isADC22() {
+		return mx.buildMatrix22()
 	}
 	sp := mx.sp
 	main := sp.BeginSat

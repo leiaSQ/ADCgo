@@ -137,17 +137,31 @@ func ParseFile(path string) (*File, error) {
 			} else {
 				s.Residue, _ = strconv.ParseFloat(m[4], 64)
 			}
-			// Leading overlaps are on the next line(s) beginning with "<".
-			for j := i + 1; j < len(lines) && j <= i+3; j++ {
-				if strings.Contains(lines[j], "<") {
-					for _, c := range reConfig.FindAllStringSubmatch(lines[j], -1) {
-						cfg := Config{}
-						cfg.I, _ = strconv.Atoi(c[1])
-						cfg.J, _ = strconv.Atoi(c[2])
-						cfg.Coeff, _ = strconv.ParseFloat(c[3], 64)
-						s.Leading = append(s.Leading, cfg)
+			// Leading overlaps are the "<i,j|: coeff" lines under the "Overlaps with
+			// main-space configurations:" heading. Collect ALL of them, not just the first
+			// line: theADCcode wraps at six entries per line, so any sector whose main
+			// block exceeds six — production runs have tens — continues onto further
+			// lines, and the old "first line containing < , then break" silently truncated
+			// every such state. Stop at the blank line before the next state, and at any
+			// other heading, which keeps Leading main-space-only (the SIP files follow with
+			// an "Overlaps with satellite-space configurations:" list).
+			for j := i + 1; j < len(lines); j++ {
+				t := strings.TrimSpace(lines[j])
+				if t == "" {
+					break
+				}
+				if !strings.HasPrefix(t, "<") {
+					if strings.Contains(lines[j], "Overlaps with main-space") {
+						continue
 					}
 					break
+				}
+				for _, c := range reConfig.FindAllStringSubmatch(lines[j], -1) {
+					cfg := Config{}
+					cfg.I, _ = strconv.Atoi(c[1])
+					cfg.J, _ = strconv.Atoi(c[2])
+					cfg.Coeff, _ = strconv.ParseFloat(c[3], 64)
+					s.Leading = append(s.Leading, cfg)
 				}
 			}
 			getBlock(curSpin).states = append(getBlock(curSpin).states, s)

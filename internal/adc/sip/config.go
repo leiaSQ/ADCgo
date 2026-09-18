@@ -50,6 +50,7 @@ type Space struct {
 	Group3    []int
 	core      []int // absolute occupied core-orbital indices (CVS); nil for order 2/3
 	adc4      bool  // true when built by NewSpace4 (CVS ADC(4) 1h|2h1p|3h2p space)
+	adc22     bool  // true when built by NewSpace22 (ADC(2,2) 1h|2h1p|3h2p space, non-CVS)
 
 	Sym  int // target cation irrep (0-based)
 	nSym int // number of point-group irreps (power of two spanning the labels)
@@ -202,4 +203,116 @@ func (s *Space) addSat() {
 		}
 	}
 	s.Group = s.Group[:len(s.Group)-1] // drop trailing boundary → Group[g] = group g start
+}
+
+// ---------------------------------------------------------------------------
+// Sub-spaces (Fano/Feshbach partitioning).
+// ---------------------------------------------------------------------------
+
+// Holes appends the occupied orbitals of row's configuration to dst and returns the
+// extended slice: one orbital for a 1h row, two for 2h1p, three for 3h2p. dst may be
+// nil; passing a reused buffer with dst[:0] keeps this allocation-free.
+//
+// It exists so a Fano Q/P selector can be written against the configuration's holes
+// without importing this package's config types — the paper's scheme A predicate
+// ("all holes localized on subunit A", "retains the initial vacancy") is a function
+// of exactly this list. Rows are indexed globally, as Size() counts them: below
+// BeginSat they are 1h, below Begin3h2p 2h1p, above it 3h2p.
+func (s *Space) Holes(row int, dst []int) []int {
+	switch {
+	case row < s.BeginSat:
+		// A 1h config stores its single hole duplicated (addMain).
+		return append(dst, s.Configs[row].Occ[0])
+	case row < len(s.Configs):
+		c := s.Configs[row]
+		return append(dst, c.Occ[0], c.Occ[1])
+	default:
+		c := s.Sat3[row-len(s.Configs)]
+		return append(dst, c.Core, c.L, c.M)
+	}
+}
+
+// begin3h2p is the global row index at which the 3h2p class starts. It is
+// len(Configs) by the field's own contract, and NOT Begin3h2p: that field is left
+// zero for an order-2/3 space, which has no 3h2p class at all, so reading it would
+// send every 2h1p row of such a space down the 3h2p branch.
+func (s *Space) begin3h2p() int { return len(s.Configs) }
+
+// Restrict returns the sub-space spanned by the given global rows, which must be
+// ascending and distinct. The result is a Space in its own right: New over it
+// assembles exactly the corresponding sub-block of the parent's secular matrix, so
+// the Fano QMQ and PMP operators are ordinary ADC matrices and every solver, the
+// matrix-free paths and the GPU backends all work on them unchanged. That is the
+// whole reason this exists rather than a projected operator — and it is what the
+// paper means by scheme A leaving the cost unchanged.
+//
+// The parent's orbital data (Nocc, Norb, symmetry labels, the CVS core set) and its
+// scheme flags carry over untouched, because the matrix elements depend on the
+// orbitals and not on which configurations were kept: an element function sums over
+// all orbitals either way. Only the row set shrinks.
+//
+// Filtering preserves the parent's order, so the 1h | 2h1p | 3h2p class bands stay
+// contiguous and the class boundaries are just recounted. The group boundaries are
+// recomputed from the retained configurations rather than inherited, since a
+// restricted space's groups are not the parent's.
+//
+// The caller keeps rows as the map back to the parent, which is what Fano needs to
+// embed a Q eigenvector into the parent index space and read the coupling off.
+func (s *Space) Restrict(rows []int) *Space {
+	out := &Space{
+		Sym: s.Sym, nSym: s.nSym,
+		Nocc: s.Nocc, Nvir: s.Nvir, Norb: s.Norb,
+		orbSym: s.orbSym,
+		core:   s.core,
+		adc4:   s.adc4, adc22: s.adc22,
+	}
+	split := s.begin3h2p()
+	for _, r := range rows {
+		switch {
+		case r < s.BeginSat:
+			out.Configs = append(out.Configs, s.Configs[r])
+			out.BeginSat = len(out.Configs)
+		case r < split:
+			out.Configs = append(out.Configs, s.Configs[r])
+		default:
+			out.Sat3 = append(out.Sat3, s.Sat3[r-split])
+		}
+	}
+	// Begin3h2p stays zero for a space with no 3h2p class, as the constructors leave
+	// it, so a restricted order-2/3 space is indistinguishable from a freshly built one.
+	if len(s.Sat3) > 0 {
+		out.Begin3h2p = len(out.Configs)
+	}
+	out.regroup()
+	return out
+}
+
+// regroup rebuilds Group and Group3 for a space whose configurations were filtered.
+//
+// Group's contract is one entry per (k,l) satellite group; Group3's is one entry per
+// 3h2p symmetry block. Both are recovered by scanning for a change in the defining
+// key — the hole pair for Group, the irrep tuple for Group3 — which reproduces the
+// constructors' boundaries exactly when nothing was filtered out, because the
+// enumeration emits each group contiguously.
+func (s *Space) regroup() {
+	s.Group = nil
+	s.Group3 = nil
+	prev := [2]int{-1, -1}
+	for i := s.BeginSat; i < len(s.Configs); i++ {
+		if key := s.Configs[i].Occ; key != prev {
+			s.Group = append(s.Group, i)
+			prev = key
+		}
+	}
+	prevSym := [5]int{-1, -1, -1, -1, -1}
+	for i, c := range s.Sat3 {
+		key := [5]int{
+			s.irrep(c.Core), s.irrep(c.L), s.irrep(c.M),
+			s.irrep(s.Nocc + c.I), s.irrep(s.Nocc + c.J),
+		}
+		if key != prevSym {
+			s.Group3 = append(s.Group3, len(s.Configs)+i)
+			prevSym = key
+		}
+	}
 }

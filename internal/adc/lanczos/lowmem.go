@@ -154,11 +154,9 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 	}
 	if !resumed {
 		// Start block: main-space Cartesian units e_0..e_{b-1} (same seed as Solve; for Mode B
-		// b = main so the start block spans the whole main space).
-		start := make([]float64, n*b)
-		for c := range b {
-			start[c*n+c] = 1
-		}
+		// b = main so the start block spans the whole main space), or the rows
+		// Options.StartRows names.
+		start := startBlock(n, b, opts.StartRows)
 		up := be.Upload(start)
 		be.Copy(pc.ColRange(0, b).V, up)
 		be.Free(up)

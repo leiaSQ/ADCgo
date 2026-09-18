@@ -141,3 +141,55 @@ func spinCode(s dip.Spin) int {
 	}
 	return 1
 }
+
+// TestSolveReportsProgressPerBlock pins the contract the production logs depend on: Solve
+// calls Options.Progress exactly once per block, with ascending 0-based block indices, so
+// counting "progress" lines in a job's stderr counts the blocks it actually built. Job
+// 14717237 had to have its 200 blocks reconstructed from Slurm's recorded checkpoint write
+// volume because Solve reported nothing at all; this is what replaces that arithmetic.
+func TestSolveReportsProgressPerBlock(t *testing.T) {
+	be := backend.Gonum{}
+	mx := buildH2O(t, dip.Singlet)
+	n, main := mx.Size(), mx.MainBlockSize()
+
+	type call struct{ iter, dim, size int }
+	for _, blocks := range []int{1, 2, 5} {
+		if blocks*main >= n {
+			t.Fatalf("blocks=%d saturates the %d-dim sector; test needs a truncated run", blocks, n)
+		}
+		var got []call
+		res := Solve(mx, be, Options{
+			MaxBlocks: blocks,
+			Progress: func(iter, dim, size int, _ Timing) {
+				got = append(got, call{iter, dim, size})
+			},
+		})
+		if len(got) != blocks {
+			t.Fatalf("blocks=%d: Progress fired %d times, want %d (once per block)",
+				blocks, len(got), blocks)
+		}
+		for i, c := range got {
+			if c.iter != i {
+				t.Errorf("blocks=%d: call %d reported block=%d, want %d", blocks, i, c.iter, i)
+			}
+			if c.size != main {
+				t.Errorf("blocks=%d: call %d reported size=%d, want the undeflated block %d",
+					blocks, i, c.size, main)
+			}
+		}
+		// The last line's dim is the subspace the run ends with, which is what makes a
+		// truncated log readable without waiting for the result.
+		if last := got[len(got)-1].dim; last != len(res.Values) {
+			t.Errorf("blocks=%d: final reported dim=%d, but Solve returned %d Ritz values",
+				blocks, last, len(res.Values))
+		}
+		// The trailing iteration only builds the discarded R_{j+1}, so it repeats the
+		// previous dim rather than growing the basis.
+		if blocks > 1 {
+			if a, b := got[len(got)-2].dim, got[len(got)-1].dim; a != b {
+				t.Errorf("blocks=%d: truncating block moved dim %d -> %d, want it unchanged",
+					blocks, a, b)
+			}
+		}
+	}
+}
