@@ -223,6 +223,19 @@ func devMalloc(n int) unsafe.Pointer {
 //
 // A free during panic unwinding must not mask the original panic, so a failure here is reported
 // on stderr instead of panicking when one is already in flight.
+// ckDevAlloc reports a failed device allocation instead of returning a NULL that only faults
+// later, somewhere else. k_malloc (cuda_kernels.go) swallows cudaMalloc's status and returns the
+// pointer, so NULL is the only signal there is — and these are the big ones: DeviceERI uploads
+// norb⁴ doubles, 16 GB at melanin's norb=212.
+func ckDevAlloc(p unsafe.Pointer, bytes int, what string) unsafe.Pointer {
+	if p == nil && bytes > 0 {
+		st := C.dev_last_error()
+		panic(fmt.Sprintf("backend: cuda %s: allocation of %d bytes returned NULL (cudaError_t %d)",
+			what, bytes, int(st)))
+	}
+	return p
+}
+
 func devFree(p unsafe.Pointer) {
 	if st := C.dev_free(p); st != 0 {
 		if r := recover(); r != nil {

@@ -51,8 +51,53 @@ def build_mol(cfg):
         basis = gamess_basis.load_gamess_basis(cfg.resolve(cfg.basis_file))
     else:
         basis = cfg.basis_name
+    if cfg.ghost:
+        atoms, basis = _apply_ghosts(atoms, basis, cfg.ghost)
     return gto.M(atom=atoms, basis=basis, charge=cfg.charge, spin=cfg.spin,
                  cart=cfg.cartesian, symmetry=cfg.symmetry, unit=unit)
+
+
+def _apply_ghosts(atoms, basis, spec):
+    """Turn the atoms named by `spec` into ghost centres: basis functions, no nucleus.
+
+    The counterpoise construction. Ghosting one fragment of a complex leaves the other
+    fragment sitting in the FULL complex basis, so its energy carries the same basis-set
+    superposition error the complex does; subtracting the two is then meaningful, where
+    subtracting a bare-basis monomer is not.
+
+    pyscf marks a centre as a ghost by its LABEL, so the basis dict needs a matching
+    "GHOST-<E>" key for every element that gets ghosted. A dict basis is copied rather than
+    mutated, since the caller's copy is shared with the manifest.
+
+    Symmetry is deliberately left to the caller: ghosting half of a complex usually lowers
+    the point group, and `symmetry auto` finds the right one from the surviving nuclei.
+    """
+    idx = set(orbital_select.parse_index_list(spec))
+    if max(idx) > len(atoms):
+        raise SystemExit(f"&geometry ghost names atom {max(idx)} but the geometry has "
+                         f"{len(atoms)}")
+    if len(idx) == len(atoms):
+        raise SystemExit("&geometry ghost names every atom; nothing would be left")
+    out = []
+    ghosted = set()
+    for i, (sym, xyz) in enumerate(atoms, start=1):
+        if i in idx:
+            out.append(["GHOST-" + sym.upper(), xyz])
+            ghosted.add(sym.upper())
+        else:
+            out.append([sym, xyz])
+    if isinstance(basis, dict):
+        basis = dict(basis)
+        for e in ghosted:
+            for key in (e, e.capitalize(), e.upper(), e.lower()):
+                if key in basis:
+                    basis["GHOST-" + e] = basis[key]
+                    break
+            else:
+                raise SystemExit(f"no basis entry for ghosted element {e!r}")
+    print(f"ghosting {len(idx)} of {len(atoms)} atoms (counterpoise): "
+          f"{sorted(ghosted)} become basis-only centres", file=sys.stderr)
+    return out, basis
 
 
 def run_scf(cfg, mol):
@@ -61,7 +106,26 @@ def run_scf(cfg, mol):
     mf.conv_tol = cfg.conv_tol
     mf.conv_tol_grad = cfg.conv_tol_grad
     mf.max_cycle = cfg.max_cycle
+    # Convergence aids for non-covalent systems (see Config.init_guess). All default to
+    # pyscf's own behaviour, so a deck that sets none of them runs exactly as before.
+    if cfg.init_guess:
+        mf.init_guess = cfg.init_guess
+    if cfg.level_shift:
+        mf.level_shift = cfg.level_shift
+    if cfg.damp:
+        mf.damp = cfg.damp
     mf.run()
+    # Second-order fallback. DIIS on a stacked dimer can leave the gradient on a plateau well
+    # above conv_tol_grad; newton() starts from those orbitals and converges quadratically.
+    # Applied only after DIIS has actually failed, so a converged run is bit-for-bit unchanged.
+    if cfg.soscf and not mf.converged:
+        print(f"SCF: DIIS did not converge (E={mf.e_tot:.10f} Ha); retrying with soscf",
+              file=sys.stderr)
+        mf = mf.newton()
+        mf.conv_tol = cfg.conv_tol
+        mf.conv_tol_grad = cfg.conv_tol_grad
+        mf.max_cycle = cfg.max_cycle
+        mf.run()
     # An unconverged reference silently poisons every downstream ADC number, and the
     # energy can still look right to ~1e-6 Ha while the orbitals are not stationary.
     if not mf.converged:

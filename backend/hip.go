@@ -141,6 +141,14 @@ import (
 const backendName = "hip"
 
 // devCount returns the number of visible HIP devices, or 0 if none / on error.
+// ckHip panics on a non-zero hipError_t. The cuda backend's ckCuda twin; see
+// cgo_status_test.go for why an ignored status is treated as a defect.
+func ckHip(st C.int, op string) {
+	if st != 0 {
+		panic(fmt.Sprintf("backend: hip %s failed (hipError_t %d)", op, int(st)))
+	}
+}
+
 func devCount() int {
 	n := int(C.dev_count())
 	if n < 0 {
@@ -151,7 +159,7 @@ func devCount() int {
 
 // devSet binds the calling thread's HIP context to device dev. Must run on the
 // backend's owning thread before blasCreate (see newGPUOn).
-func devSet(dev int) { C.dev_set(C.int(dev)) }
+func devSet(dev int) { ckHip(C.dev_set(C.int(dev)), "hipSetDevice") }
 
 func blasCreate() unsafe.Pointer { return unsafe.Pointer(C.blas_create()) }
 
@@ -211,7 +219,7 @@ func devEnablePeer(peer int) int { return int(C.dev_enable_peer(C.int(peer))) }
 // devMemcpy2D copies a strided rectangle peer-to-peer. Pitches and width are byte counts,
 // height a row count; hipMemcpyDefault resolves the direction from the pointers.
 func devMemcpy2D(dst unsafe.Pointer, dpitch int, src unsafe.Pointer, spitch, width, height int) {
-	C.dev_memcpy2d(dst, C.size_t(dpitch), src, C.size_t(spitch), C.size_t(width), C.size_t(height))
+	ckHip(C.dev_memcpy2d(dst, C.size_t(dpitch), src, C.size_t(spitch), C.size_t(width), C.size_t(height)), "hipMemcpy2D peer")
 }
 
 func handle(h unsafe.Pointer) C.hipblasHandle_t { return C.hipblasHandle_t(h) }
@@ -304,7 +312,7 @@ func devH2DPtrs(dst unsafe.Pointer, src []unsafe.Pointer) {
 // devMemInfo reports free and total device memory in bytes.
 func devMemInfo() (free, total uint64) {
 	var f, t C.size_t
-	C.dev_mem_info(&f, &t)
+	ckHip(C.dev_mem_info(&f, &t), "hipMemGetInfo")
 	return uint64(f), uint64(t)
 }
 

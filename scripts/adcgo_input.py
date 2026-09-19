@@ -48,6 +48,11 @@ class Config:
     unit: str = None                # optional override
     # basis
     basis_file: str = None
+    # ghost: 1-based atom indices (GAMESS "A to B" syntax) kept as BASIS CENTRES ONLY -- no
+    # nucleus, no electrons. This is the counterpoise construction: ghosting one fragment of a
+    # complex leaves the other in the FULL complex basis, so its energy carries the same basis
+    # set superposition error the complex does and the two are comparable.
+    ghost: str = None
     basis_name: str = None
     cartesian: bool = False
     # scf
@@ -58,6 +63,15 @@ class Config:
     conv_tol: float = 1e-12
     conv_tol_grad: float = 1e-9
     max_cycle: int = 50             # pyscf's default; raise it for slow-converging SCF
+    # Convergence aids. They exist for NON-COVALENT systems: on a pi-stacked dimer the two
+    # fragments contribute near-degenerate frontier orbitals, so plain DIIS from a minao guess
+    # oscillates between them, and can settle on a charge-transfer solution that looks
+    # converged and is physically wrong. Defaults are pyscf's, so every existing deck is
+    # unchanged.
+    init_guess: str = None          # minao (pyscf default) | atom | huckel | 1e | chkfile
+    level_shift: float = 0.0        # Ha added to the virtual diagonal; decays as it converges
+    damp: float = 0.0               # Fock damping factor for the early cycles
+    soscf: bool = False             # second-order (Newton) SCF after DIIS stalls
     # orbital selection
     frozen_core: int = None
     frozen_list: str = None
@@ -133,6 +147,8 @@ def _apply(cfg, section, key, val):
             cfg.geom_file = val
         elif key == "unit":
             cfg.unit = val
+        elif key == "ghost":
+            cfg.ghost = val
         else:
             raise ValueError(f"unknown &geometry key {key!r}")
     elif section == "basis":
@@ -159,6 +175,17 @@ def _apply(cfg, section, key, val):
             cfg.conv_tol_grad = float(val)
         elif key in ("max_cycle", "max-cycle", "maxcycle"):
             cfg.max_cycle = int(val)
+        elif key in ("init_guess", "init-guess", "guess"):
+            allowed = ("minao", "atom", "huckel", "1e", "chkfile")
+            if val not in allowed:
+                raise ValueError(f"&scf init_guess {val!r} not one of {allowed}")
+            cfg.init_guess = val
+        elif key in ("level_shift", "level-shift", "levelshift"):
+            cfg.level_shift = float(val)
+        elif key == "damp":
+            cfg.damp = float(val)
+        elif key == "soscf":
+            cfg.soscf = _to_bool(val)
         else:
             raise ValueError(f"unknown &scf key {key!r}")
     elif section == "active":

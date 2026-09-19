@@ -153,3 +153,48 @@ func matchMainLines(t *testing.T, label string, res Result, ref []denseState, to
 		}
 	}
 }
+
+// TestSolveLowMemModeB_SingleBlock pins the degenerate Krylov width: MaxBlocks = 1.
+//
+// Mode B's banded solver returns only the first and last `band` rows of each eigenvector, with
+// band = min(2b-1, dim-1). With two or more accepted blocks band >= last.size and the Ritz
+// residual reads its last-block components from the bottom slice. With exactly ONE block the
+// dim-1 cap bites — dim == last.size == main — so the bottom slice is one row short and the old
+// code indexed it at -1. The mgpu smoke (job 14787917) hit this at -blocks 1; nothing in the
+// suite covered it because every other test uses several blocks.
+//
+// The assertion is deliberately weak on spectroscopy and strong on well-formedness: one block
+// cannot converge the spectrum, so this checks the call completes and returns internally
+// consistent, finite arrays of the right length.
+func TestSolveLowMemModeB_SingleBlock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping heavy low-memory Lanczos test in -short mode")
+	}
+	be := backend.Gonum{}
+	for _, spin := range []dip.Spin{dip.Singlet, dip.Triplet} {
+		for _, nb := range []int{1, 2} {
+			mx := buildH2O(t, spin)
+			res := SolveLowMem(mx, be, Options{MaxBlocks: nb})
+
+			n := len(res.Values)
+			if n == 0 {
+				t.Fatalf("spin=%v blocks=%d: no Ritz values returned", spinName(spin), nb)
+			}
+			if len(res.PS) != n || len(res.Residual) != n {
+				t.Fatalf("spin=%v blocks=%d: ragged result: %d values, %d PS, %d residual",
+					spinName(spin), nb, n, len(res.PS), len(res.Residual))
+			}
+			for i := range n {
+				if math.IsNaN(res.Values[i]) || math.IsInf(res.Values[i], 0) {
+					t.Fatalf("spin=%v blocks=%d: Ritz value %d is %v", spinName(spin), nb, i, res.Values[i])
+				}
+				if math.IsNaN(res.Residual[i]) || res.Residual[i] < 0 {
+					t.Fatalf("spin=%v blocks=%d: residual %d is %v", spinName(spin), nb, i, res.Residual[i])
+				}
+				if math.IsNaN(res.PS[i]) || res.PS[i] < -1e-9 {
+					t.Fatalf("spin=%v blocks=%d: pole strength %d is %v", spinName(spin), nb, i, res.PS[i])
+				}
+			}
+		}
+	}
+}

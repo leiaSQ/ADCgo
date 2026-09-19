@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"math/rand"
+	"strconv"
 	"testing"
 
 	"github.com/leiaSQ/ADCgo/backend"
@@ -113,8 +114,31 @@ func applyOnce(be backend.Backend, mx *dip.Matrix, in []float64, n, blk int, sat
 // TestDistributedSolveLowMemMatchesSingle runs Mode B (lowmem-block 0) on the distributed
 // backend and requires the same spectrum and pole strengths as the single backend.
 func TestDistributedSolveLowMemMatchesSingle(t *testing.T) {
+	testDistributedSolveLowMem(t, 12)
+}
+
+// TestDistributedSolveLowMemBlockSweep runs the same single-vs-distributed comparison at the
+// DEGENERATE Krylov widths.
+//
+// Every -mgpu bug this code has shipped lived at a boundary, not in the interior. MaxBlocks = 1
+// is the sharpest one: Mode B's banded solver keeps only the first and last `band` rows of each
+// eigenvector with band = min(2b-1, dim-1), so with a single accepted block the dim-1 cap makes
+// the bottom slice one row shorter than the last block and the Ritz residual indexed it at -1.
+// That shipped, reached a GPU, and cost a job (the -blocks 1 smoke, 14787917) — while this very
+// test sat one constant away from catching it, pinned at MaxBlocks = 12.
+//
+// Kept separate from the 12-block case so a failure says which regime broke, and so the cheap
+// edges run even when someone shortens the main test.
+func TestDistributedSolveLowMemBlockSweep(t *testing.T) {
+	for _, nb := range []int{1, 2, 3} {
+		t.Run("MaxBlocks="+strconv.Itoa(nb), func(t *testing.T) { testDistributedSolveLowMem(t, nb) })
+	}
+}
+
+func testDistributedSolveLowMem(t *testing.T, maxBlocks int) {
+	t.Helper()
 	d, nocc, eps, ints := distFixture(t)
-	opts := lanczos.Options{MaxBlocks: 12, LowMemBlock: 0}
+	opts := lanczos.Options{MaxBlocks: maxBlocks, LowMemBlock: 0}
 	tested := 0
 	for _, spin := range []dip.Spin{dip.Singlet, dip.Triplet} {
 		for sym := range 4 {
@@ -125,7 +149,10 @@ func TestDistributedSolveLowMemMatchesSingle(t *testing.T) {
 			single := backend.Gonum{}
 			resS := lanczos.SolveLowMem(dip.New(sp, ints, eps, single), single, opts)
 
-			for _, g := range []int{2, 3, 4} {
+			// g = 1 is the degenerate partitioning: one device owning everything, so every
+			// input band is local and the remote-input path is never taken. It is the control
+			// that separates "the distributed machinery is wrong" from "the partitioning is".
+			for _, g := range []int{1, 2, 3, 4} {
 				dbe, ndev := newDist(t, sp, g)
 				resD := lanczos.SolveLowMem(dip.New(sp, ints, eps, dbe), dbe, opts)
 
@@ -153,7 +180,7 @@ func TestDistributedSolveLowMemMatchesSingle(t *testing.T) {
 	if tested == 0 {
 		t.Skip("no h2o_dzp sector satisfies n > 2·main²")
 	}
-	t.Logf("%d sectors matched (SolveLowMem Mode B)", tested)
+	t.Logf("%d sectors matched (SolveLowMem Mode B, MaxBlocks=%d)", tested, maxBlocks)
 }
 
 func maxRelDiff(want, got []float64) float64 {

@@ -312,6 +312,41 @@ func reorthFull(be backend.Backend, hostQ [][]float64, v backend.BlockView, n, b
 func diagProjected(be backend.Backend, blocks []lmBlock, dim, b, main int, modeB bool) (theta []float64, topVecs, botVecs [][]float64, sDense backend.Mat) {
 	if modeB {
 		band := max(min(2*b-1, dim-1), 0)
+		lastSize := 0
+		if len(blocks) > 0 {
+			lastSize = blocks[len(blocks)-1].size
+		}
+		// The banded solver returns only the first and last `band` rows of each eigenvector, and
+		// the caller needs the top `main` rows (main space) plus the last block's rows (Ritz
+		// residual). The dim-1 cap on the bandwidth means that at a SMALL Krylov width those
+		// slices can be shorter than what is needed — at dim = 1 band is 0, so nm = 0 and the
+		// split below reads an empty column — so solve densely and slice the full eigenvectors
+		// instead. dim is tiny exactly when this triggers, so the dense solve is cheap.
+		//
+		// Both edges here have shipped: MaxBlocks = 1 with main > 1 gave a bottom slice one row
+		// short (index -1, job 14787917), and a one-dimensional main space gave band = 0. The
+		// block sweep in cmd/adcgo covers both.
+		if band < main || band < lastSize {
+			T := backend.NewMat(dim, dim)
+			fillDense(T, blocks)
+			theta, sFull := be.SymEig(T)
+			bw := min(dim, max(main, lastSize))
+			top := make([][]float64, main)
+			for r := range main {
+				top[r] = make([]float64, dim)
+				for k := range dim {
+					top[r][k] = sFull.At(r, k)
+				}
+			}
+			bot := make([][]float64, bw)
+			for r := range bw {
+				bot[r] = make([]float64, dim)
+				for k := range dim {
+					bot[r][k] = sFull.At(dim-bw+r, k)
+				}
+			}
+			return theta, top, bot, backend.Mat{}
+		}
 		bs := newBandStorage(dim, band)
 		fillBand(bs, blocks)
 		theta, z := bandSymDiagFast(bs)
@@ -459,8 +494,27 @@ func packLowMem(theta []float64, topVecs, botVecs [][]float64, sDense backend.Ma
 				for t := range last.size {
 					var comp float64
 					if modeB {
-						band := len(botVecs)
-						comp = botVecs[band-last.size+t][k]
+						// Global row of this last-block component. The banded solver returns only
+						// the first and last `band` rows of each eigenvector, so read it from
+						// whichever slice actually covers that row.
+						//
+						// The bottom slice normally does: it holds rows [dim-band, dim) and
+						// band = min(2b-1, dim-1) >= last.size whenever two or more blocks were
+						// accepted. With exactly ONE accepted block the cap bites — dim ==
+						// last.size == main and band == dim-1 — leaving the bottom slice one row
+						// short and indexing it at -1 (the mgpu smoke, job 14787917, hit exactly
+						// this at -blocks 1). In that case the TOP slice spans the whole vector,
+						// because main == dim, so the component is there instead.
+						g := last.off + t
+						if lo := dim - len(botVecs); g >= lo {
+							comp = botVecs[g-lo][k]
+						} else if g < len(topVecs) {
+							comp = topVecs[g][k]
+						} else {
+							panic(fmt.Sprintf("lanczos: Ritz residual needs projected row %d of %d, "+
+								"but Mode B retained only the top %d and bottom %d rows",
+								g, dim, len(topVecs), len(botVecs)))
+						}
 					} else {
 						comp = sDense.At(last.off+t, k)
 					}

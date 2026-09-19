@@ -65,8 +65,8 @@ func (b *gpuBackend) SetCoeff1(coeff1 []float64) {
 func (b *gpuBackend) DeviceERI(eri []float64) unsafe.Pointer {
 	var p unsafe.Pointer
 	b.do(func() {
-		p = C.k_malloc(C.size_t(len(eri) * elemSize))
-		C.k_h2d(p, unsafe.Pointer(&eri[0]), C.size_t(len(eri)*elemSize))
+		p = ckDevAlloc(C.k_malloc(C.size_t(len(eri)*elemSize)), len(eri)*elemSize, "DeviceERI")
+		ckCuda(C.k_h2d(p, unsafe.Pointer(&eri[0]), C.size_t(len(eri)*elemSize)), "cudaMemcpy H2D (ERI)")
 	})
 	return p
 }
@@ -75,8 +75,8 @@ func (b *gpuBackend) DeviceERI(eri []float64) unsafe.Pointer {
 func (b *gpuBackend) UploadInts(x []int32) unsafe.Pointer {
 	var p unsafe.Pointer
 	b.do(func() {
-		p = C.k_malloc(C.size_t(len(x) * 4))
-		C.k_h2d(p, unsafe.Pointer(&x[0]), C.size_t(len(x)*4))
+		p = ckDevAlloc(C.k_malloc(C.size_t(len(x)*4)), len(x)*4, "UploadInts")
+		ckCuda(C.k_h2d(p, unsafe.Pointer(&x[0]), C.size_t(len(x)*4)), "cudaMemcpy H2D (ints)")
 	})
 	return p
 }
@@ -85,8 +85,8 @@ func (b *gpuBackend) UploadInts(x []int32) unsafe.Pointer {
 func (b *gpuBackend) UploadFloats(x []float64) unsafe.Pointer {
 	var p unsafe.Pointer
 	b.do(func() {
-		p = C.k_malloc(C.size_t(len(x) * elemSize))
-		C.k_h2d(p, unsafe.Pointer(&x[0]), C.size_t(len(x)*elemSize))
+		p = ckDevAlloc(C.k_malloc(C.size_t(len(x)*elemSize)), len(x)*elemSize, "UploadFloats")
+		ckCuda(C.k_h2d(p, unsafe.Pointer(&x[0]), C.size_t(len(x)*elemSize)), "cudaMemcpy H2D (floats)")
 	})
 	return p
 }

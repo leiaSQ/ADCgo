@@ -1,6 +1,7 @@
 package dip
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"testing"
@@ -208,6 +209,72 @@ func TestSatelliteMatFreeDistributedEqualsDense(t *testing.T) {
 			assertClose(t, spin, sym, "dist "+tc.name, be.Download(wantB.V), dist.Download(gotB.V))
 		}
 		free.Release()
+	})
+}
+
+// TestSatelliteDistributedEdgeSweep runs the row-partitioned satellite apply across the
+// DEGENERATE partitionings and chunk widths, against the single-backend dense reference.
+//
+// TestSatelliteMatFreeDistributedEqualsDense above pins the shape at one partition count (2) and
+// one panel width (3). Every -mgpu defect this code has shipped lived outside that point: a
+// partition owning no block at all, a panel narrower than one gather chunk, a chunk width that
+// does not divide the panel. This sweeps those directly, over Gonum sub-backends, so it runs on
+// any machine with no GPU and no CUDA toolkit — the cheap gate that belongs ahead of the
+// hardware smoke, not behind it.
+//
+// SatChunkCols is latched when an applier is CONSTRUCTED (it sizes the slab), so it is set
+// before New and restored after.
+func TestSatelliteDistributedEdgeSweep(t *testing.T) {
+	rng := rand.New(rand.NewSource(101))
+	defer func(w int) { SatChunkCols = w }(SatChunkCols)
+
+	h2oSectors(t, func(spin Spin, sym int, sp *Space, ints *integrals.Store, eps []float64, be backend.Backend) {
+		n, main := sp.Size(), sp.MainBlockSize()
+		if n <= 2*main*main {
+			return // the distributed backend's shape invariant rejects it
+		}
+		dense := New(sp, ints, eps, be)
+
+		for _, g := range []int{1, 2, 3, 4} {
+			bounds := sp.PartitionBounds(g)
+			npart := len(bounds) - 1
+			if npart < 1 {
+				continue
+			}
+			for _, chunk := range []int{1, 3, 1 << 20} { // sub-panel, odd, and wider than any panel
+				for _, b := range []int{1, 3, chunk + 1} {
+					if b < 1 || b > 64 {
+						continue
+					}
+					SatChunkCols = chunk
+					subs := make([]backend.Backend, npart)
+					for i := range subs {
+						subs[i] = backend.Gonum{}
+					}
+					dist, err := backend.NewDistributed(subs, n, main, bounds)
+					if err != nil {
+						t.Fatalf("spin=%v sym=%d g=%d: NewDistributed: %v", spin, sym, g, err)
+					}
+					free := New(sp, ints, eps, dist)
+					free.SetMatFree(matfree.On, 0)
+
+					panel := make([]float64, n*b)
+					for i := range panel {
+						panel[i] = rng.NormFloat64()
+					}
+					wantB := backend.BlockView{V: be.Alloc(n * b), Rows: n, Cols: b, Ld: n}
+					dense.ApplyBlockSatellite(wantB, backend.BlockView{V: be.Upload(panel), Rows: n, Cols: b, Ld: n})
+
+					gotB := backend.BlockView{V: dist.Alloc(n * b), Rows: n, Cols: b, Ld: n}
+					free.ApplyBlockSatellite(gotB, backend.BlockView{V: dist.Upload(panel), Rows: n, Cols: b, Ld: n})
+
+					assertClose(t, spin, sym,
+						fmt.Sprintf("dist g=%d parts=%d chunk=%d b=%d", g, npart, chunk, b),
+						be.Download(wantB.V), dist.Download(gotB.V))
+					free.Release()
+				}
+			}
+		}
 	})
 }
 
