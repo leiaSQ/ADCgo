@@ -233,6 +233,11 @@ def main(argv):
     auglist = None   # --aug-shells 10,10,8: per-l augmentation counts, overriding --augment
     usebse = False   # --bse: load the parent basis from basis_set_exchange, with its ECP
     dropl = None     # --drop-l N: remove parent shells with l >= N
+    vacoverride = None  # --vacancy N: 0-based occupied index of the vacancy, overriding
+    #                     SYSTEMS. Required whenever an ECP changes the orbital numbering:
+    #                     Kr's 3d is MO 9 all-electron but MO 4 under the [Ne] ECP, and
+    #                     taking the wrong one silently ionizes 4s instead (E_Phi 32 eV
+    #                     rather than 94 eV) without failing.
     atoms = []
     i = 0
     while i < len(argv):
@@ -286,6 +291,10 @@ def main(argv):
             dropl = int(argv[i + 1])
             i += 2
             continue
+        if argv[i] == "--vacancy":
+            vacoverride = int(argv[i + 1])
+            i += 2
+            continue
         atoms.append(argv[i])
         i += 1
     if not atoms:
@@ -294,6 +303,8 @@ def main(argv):
 
     for atom in atoms:
         label, vac = SYSTEMS[atom]
+        if vacoverride is not None:
+            vac = vacoverride
         bas = basis
         suffix = ""
         ecp = None
@@ -328,8 +339,6 @@ def main(argv):
                 suffix = "_unc" + suffix
             if virtmax is not None:
                 suffix += f"_v{int(virtmax)}"
-            if ncore:
-                suffix += f"_fc{ncore}"
         elif aug > 0:
             bas = {atom: augment(basis, atom, aug, auglmax, alpha0, ratio)}
             names = "".join(f"{aug}{'spdfg'[l]}" for l in range(auglmax + 1))

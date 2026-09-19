@@ -94,6 +94,13 @@ go build -o "$OUT/adcgo" ./cmd/adcgo
 # out of P (it lies above the 2s vacancy) by naming only 3s-hole configurations as continuum,
 # and puts 3h2p 2p^-1 3s^-2 in P alone, which the paper says it did deliberately and blames
 # for Mg being its worst case. Kr's adds the 4s^-2 4p^-1 shake-up family to Q.
+# KRYLOV is a LIST: the pseudo-continuum is a Krylov approximation to P, and at ADC(2,2)
+# only ~10% of its states fall below the energy ceiling, so a single Krylov size cannot be
+# told apart from a converged one. Measured on Mg ADC(2,2)_m, 864 vectors gave 219 meV and
+# 3840 gave 768 meV, with the sum-rule residual barely moving (63% -> 58%) because that
+# residual is dominated by the deliberate energy cut rather than by Krylov incompleteness.
+KRYLOV="${FANO_KRYLOV:-120}"
+
 GEN="$ROOT/scripts/gen_fano_atoms.py"
 PYBIN="${FANO_PYTHON:-$HOME/miniconda3/envs/adcgo/bin/python}"
 A0="${FANO_ALPHA0:-0.05}"
@@ -109,7 +116,7 @@ if [ "${FANO_GENERATE:-1}" = 1 ]; then
   gen --bse --basis aug-cc-pwCV5Z --uncontract --aug-shells 4,3 \
       --aug-alpha0 "$A0" --aug-ratio "$RAT" --freeze 1 --virt-max 30 Ar
   gen --bse --basis cc-pwcv5z-pp  --aug-shells 5,5,5,2 --kbj 5 --drop-l 5 \
-      --freeze 4 --virt-max 11 Kr
+      --freeze 4 --virt-max 11 --vacancy 4 Kr
 fi
 
 # atom : vacancy : dump basename : orders : Q/P spec
