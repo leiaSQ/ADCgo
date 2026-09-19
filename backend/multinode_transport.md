@@ -12,6 +12,7 @@ Companion to [`backend/README.md`](README.md) (how one mat-vec is partitioned) a
 | **Reductions** | `ncclAllGather` of partials + **serial sum in ascending rank order**. Never `ncclAllReduce`. |
 | **Bootstrap** | plain Go TCP, or the 128-byte `ncclUniqueId` written to GPFS. **No MPI needed.** |
 | **Control plane** (rank registry, checkpoint coordination, health) | Go RPC/gRPC — fine, and only here |
+| **Portability** | RCCL is a source-level drop-in (same `nccl*` symbols). Fabric-agnostic — works on Slingshot, not just IB. See [AMD / APU portability](#amd--apu-portability). |
 | Rejected | MPI (Go ergonomics), RPC for bulk data (host staging) |
 
 NCCL uses the **same NVLink P2P intra-node that `PeerCopier` uses today**, so single-node
@@ -93,6 +94,81 @@ ever needed. Common hybrid: MPI *only* to broadcast `ncclUniqueId`. Not required
 round-trips. That is `newSatelliteMatFreeDistributed`, the fallback written to avoid exactly this,
 and the host-staging churn behind the 733 GB OOM kills (jobs 14040959 / 14075367). It would meet
 11 MB/s. Do not.
+
+## AMD / APU portability
+
+**The transport ports by build tag. The kernels are the blocker.** Write the NCCL seam
+dual-tagged from day one — near-zero cost, identical APIs — and keep AMD kernel porting out of
+scope.
+
+### Already vendor-neutral
+
+- `gpu_device.go` is `//go:build hip || cuda` — the shared GPU backend runs on both.
+- `hip.go` is a working twin of `cuda.go`: hipBLAS gemm/batched-gemm, hipSOLVER `dsyevd`, and
+  **`dev_can_peer` / `dev_enable_peer` / `dev_memcpy2d`**. `PeerCopier` already exists on AMD.
+- `distBackend` talks only to `Backend` / `PeerCopier` / `PartitionedDevices`. Nothing in it is
+  CUDA-aware.
+
+### RCCL is a drop-in, and it is why the fabric does not matter
+
+RCCL exports the **same `nccl*` symbols** (`ncclCommInitRank`, `ncclSend`, `ncclRecv`,
+`ncclAllGather`, `ncclGroupStart`/`End`). The port is a cgo tag pair — `-lnccl` + `<nccl.h>` vs
+`-lrccl` + `<rccl/rccl.h>` — with identical call sites, mirroring what `cuda.go` / `hip.go`
+already do for BLAS.
+
+**This is the main argument for a collective library over raw verbs.** AMD's large machines are
+**not InfiniBand**: Hunter, LUMI and Frontier are Cray EX with **Slingshot-11**, where RCCL routes
+through libfabric via the `aws-ofi-rccl` plugin. Code written against NCCL/RCCL does not notice.
+Code written against raw IB verbs or UCX-specific calls would be IB-locked and would not port.
+(Cray MPICH would port too — the option that does not is "go lower for performance", which the
+~1100x headroom already rules out.)
+
+### The gap: kernels
+
+`cuda_kernels.go` is `//go:build cuda` only. The 834 lines in `adc2dip_kernels.cu` +
+`adc4_kernels.cu` (`dip_sat_apply`, `dip_fill_sat`, `wert2_apply`, `c22_apply`) have no HIP twin.
+
+- Consequence today: `PartKernels` returns false -> `perDeviceSatelliteOK` fails -> the satellite
+  falls through to `newSatelliteMatFreeDistributed`, the host gather-apply-scatter path (~137 GB
+  each way). **Correct, but production-useless.** That is the current AMD story.
+- hipify handles most of the translation mechanically. Tuning is not mechanical: CDNA has 64-wide
+  wavefronts and a different LDS budget, so the uncoalesced integral gather needs re-tuning
+  regardless.
+
+### APUs (MI300A) change the design in our favour
+
+24 Zen4 cores + CDNA3 sharing **128 GB unified HBM3**, 4 APUs per node (Hunter, El Capitan).
+
+- **The worst structural problem disappears.** `Download`/`Upload`, the `stage [][]float64` host
+  buffers, `stageMu`, the `AddPanel` staging path — all exist because discrete GPU memory is a
+  separate address space. On an APU host and device pointers are the same physical HBM, so the
+  **733 GB RSS OOM class (jobs 14040959 / 14075367) is architecturally impossible**.
+- `devHostAlloc` returning `nil` (`hip.go:200`, no pinned path) stops mattering on an APU. It
+  would still matter on discrete MI300X.
+- **Capacity per device comparable, count per node lower**: 128 GB x 4 = 512 GB/node vs
+  141 GB x 8 H200 = 1128 GB/node. Same partitioning rationale, roughly **half the resident state
+  per node -> ~2x the nodes** for the same sector. Multinode is *more* load-bearing on AMD, not
+  less.
+
+### Determinism across vendors is not achievable — and is not the requirement
+
+rocBLAS and cuBLAS are different GEMM implementations; no care in our code makes an AMD build
+bit-match an NVIDIA one.
+
+- The requirement is **run-to-run on a fixed build**, and that survives: the allgather +
+  fixed-rank-order sum rule is vendor-independent, and RCCL's gather does no arithmetic either.
+- An AMD build is re-validated **against theADCcode at the reference thresholds** (ps 0.5 /
+  coeff 0.01), not against the NVIDIA build's last digits.
+- Say this explicitly in any proposal so "bit-reproducible" is not read as a cross-platform
+  promise.
+
+### Action items
+
+1. Put the NCCL calls behind one interface with `nccl` / `rccl` build tags **at first write**.
+   Retrofitting is strictly worse and the APIs are identical.
+2. Do **not** scope AMD kernel porting into the short-term project.
+3. Nearest AMD target: **HLRS Hunter (Stuttgart), MI300A** — same state as HELIX/HoreKa, so a
+   realistic access path. LUMI is MI250X, same RCCL/Slingshot story.
 
 ## Later, not first: NVSHMEM
 
