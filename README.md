@@ -369,6 +369,12 @@ for overlays live in [`testdata/reference/spectra/`](testdata/reference/spectra)
 
 ## Flags
 
+`adcgo -h` prints this table tiered: the methods, the ADC orders, the solvers and the
+knobs that decide whether a large run fits, one line each. Each line names a topic, and
+`adcgo -h <topic>` opens it with the full text of every flag it owns — `adcgo -h order`,
+`adcgo -h order 4`, `adcgo -h solver`, `adcgo -h lowmem`, `adcgo -h fano`. `adcgo -h
+topics` lists them all; `adcgo -h all` is the unabridged flag dump.
+
 | Flag | Default | Meaning |
 |---|---|---|
 | `-fcidump PATH` | — | FCIDUMP with MO integrals (required) |

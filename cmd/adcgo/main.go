@@ -62,13 +62,12 @@ func installStopSignal() *atomic.Bool {
 }
 
 func main() {
-	applyCgroupMemLimit() // bound RSS under the SLURM --mem cap (see memlimit.go)
 	stopSig := installStopSignal()
 
 	path := flag.String("fcidump", "", "path to an FCIDUMP file (MO integrals)")
 	doDIP := flag.Bool("dip", false, "solve DIP-ADC(2) and emit dication states as JSON")
 	doSIP := flag.Bool("sip", false, "solve IP-ADC(n) (non-Dyson) and emit cation states as JSON")
-	order := flag.Int("order", 3, "SIP ADC order: 2, 3, or 4 (4 = CVS Dyson ADC(4), needs -core)")
+	order := flag.Int("order", 3, "SIP ADC order: 2, 3, 4 or 22 (2 = extended ADC(2); 4 = CVS Dyson ADC(4), needs -core; 22 = ADC(2,2), see -adc22). Detail: adcgo -h order")
 	solver := flag.String("solver", "lanczos", "eigensolver: lanczos | lanczos-lowmem | davidson | dense")
 	lowmemBlock := flag.Int("lowmem-block", 0, "-solver lanczos-lowmem: block width. 0 = the 2h main-space size, the faithful theADCcode short-recurrence solve (Tarantelli subspace-iteration gate + banded eigensolver, ~3×(n×main) resident — a fat-memory CPU node); a value below main selects the device-frugal full-reorthogonalization mode (only 3 blocks on the GPU, full basis in host RAM), which is exact on the states it reaches but a block smaller than main cannot span every pole-carrying direction")
 	spinSel := flag.String("spin", "both", "spin sector: both | singlet | triplet")
@@ -144,6 +143,25 @@ func main() {
 	stAverage := flag.String("stieltjes-average", "paper", "-fano: how the per-order widths are combined. paper = the mean over -stieltjes-window consecutive orders in the region of best convergence, with that window's standard deviation as the error bar (Kolorenc & Averbukh's own protocol, and what their tabulated uncertainties are). reference = stieltjes_phi1.f's mean of the three highest orders with its relaxing convergence search")
 	stWindow := flag.Int("stieltjes-window", 9, "-fano -stieltjes-average paper: consecutive orders per averaging window (the paper uses nine)")
 
+	// Tiered help (help.go): `adcgo -h` prints the grouped overview, `adcgo -h <topic>`
+	// one topic page, `adcgo -h all` the old unabridged dump. Intercepted before
+	// flag.Parse because the flag package rejects the topic word as a stray positional
+	// and its own -h prints exactly the dump this replaces. The flags above are already
+	// registered on flag.CommandLine, so a topic page renders their real usage text.
+	if topic, ok := helpRequested(os.Args[1:]); ok {
+		if !printHelp(os.Stdout, topic) {
+			os.Exit(2)
+		}
+		return
+	}
+	if len(os.Args) == 1 {
+		printHelp(os.Stdout, "")
+		return
+	}
+	flag.Usage = func() { printHelp(os.Stderr, "") }
+
+	applyCgroupMemLimit() // bound RSS under the SLURM --mem cap (see memlimit.go)
+
 	flag.Parse()
 
 	println("\n ADCgo: a modern implementation of ADC \n Authors: Leia Wertebach, Alexander Kuleff \n\n Derived from: \n TheADCcode: A collection of ADC/ISR source codes.\n Contributors: Nikolay Golubev,\n Yasen Velkov (developer of the original version),\n Alexander Kuleff,\n Anthony Dutoi, Nicolas Sisourat, Tsveta Miteva,\n Joerg Breidbach, Imke Mueller, Nayana Vaval,\n Francesco Tarantelli, Soeren Kopelke,\n Sajeev Yesodharan, Kirill Gokhberg, Robin Santra\n\n")
@@ -203,7 +221,8 @@ func main() {
 	}
 
 	if *path == "" {
-		fmt.Fprintln(os.Stderr, "usage: adcgo -fcidump <file> [-dip ...]")
+		fmt.Fprintln(os.Stderr, "adcgo: -fcidump is required (try `adcgo -h`)")
+		fmt.Fprintln(os.Stderr, "usage: adcgo -fcidump <file> [-dip | -sip] [...]")
 		os.Exit(2)
 	}
 
