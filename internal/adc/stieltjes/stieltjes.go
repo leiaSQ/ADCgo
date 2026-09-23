@@ -508,16 +508,71 @@ func Image(e, g []float64, at float64, opts Options) (*Result, error) {
 			"energy range too narrow", t.max, t.n)
 	}
 
-	var last Rule
+	var rules []Rule
 	for n := minOrd; n <= maxOrd; n++ {
 		rule, err := t.Rule(n)
 		if err != nil {
 			return nil, err
 		}
-		last = rule
+		rules = append(rules, rule)
+	}
+	if err := evaluateRules(res, rules, at, opts); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// ImageRules images Gauss quadrature rules of one measure that did not come from the
+// moment recurrence: rules[i] must be the rule of order len(rules[i].Energy), ascending
+// in order. It applies Image's per-order evaluation, density export and order averaging
+// unchanged. The Fano Gauss engine uses it: a Lanczos run on PHP seeded by the coupling
+// vector g yields the Gauss rule of every order for the measure sum_j |<psi_j|g>|^2
+// delta(E - E_j) directly, in float64, with usable orders set by the Lanczos length
+// rather than by the moment recurrence's loss of orthogonality.
+//
+// at must lie inside the highest-order rule's node range, as for Image.
+func ImageRules(rules []Rule, at float64, opts Options) (*Result, error) {
+	opts = opts.withDefaults()
+	if len(rules) == 0 {
+		return nil, fmt.Errorf("stieltjes: no quadrature rules to image")
+	}
+	top := rules[len(rules)-1]
+	if len(top.Energy) < 2 {
+		return nil, fmt.Errorf("stieltjes: the highest rule has %d node(s); imaging needs at least 2",
+			len(top.Energy))
+	}
+	lo, hi := top.Energy[0], top.Energy[len(top.Energy)-1]
+	if at < lo || at > hi {
+		return nil, fmt.Errorf("stieltjes: the requested energy %.6g is outside the "+
+			"pseudo-continuum's range [%.6g, %.6g]; imaging cannot extrapolate", at, lo, hi)
+	}
+	for i, r := range rules {
+		if len(r.Energy) != len(r.Weight) || (i > 0 && len(r.Energy) <= len(rules[i-1].Energy)) {
+			return nil, fmt.Errorf("stieltjes: rule %d is malformed or not of increasing order", i)
+		}
+		for k := 1; k < len(r.Energy); k++ {
+			if r.Energy[k] <= r.Energy[k-1] {
+				return nil, fmt.Errorf("stieltjes: rule of order %d has nodes out of order", len(r.Energy))
+			}
+		}
+	}
+	res := &Result{MaxOrder: len(top.Energy), Points: len(top.Energy)}
+	if err := evaluateRules(res, rules, at, opts); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// evaluateRules evaluates Gamma(at) from every rule, exports the density of the last one
+// when requested, and combines the orders.
+func evaluateRules(res *Result, rules []Rule, at float64, opts Options) error {
+	for _, rule := range rules {
+		n := len(rule.Energy)
 		grid, dens := rule.Density()
 		or := OrderResult{Order: n}
 		switch {
+		case len(grid) == 0:
+			continue // a one-node rule has no density
 		case at < grid[0]:
 			// Under the first midpoint: the reference's crude estimate, with its warning.
 			or.Below = true
@@ -528,13 +583,14 @@ func Image(e, g []float64, at float64, opts Options) (*Result, error) {
 		default:
 			p, err := NewPCHIP(grid, dens)
 			if err != nil {
-				return nil, fmt.Errorf("stieltjes: order %d: %w", n, err)
+				return fmt.Errorf("stieltjes: order %d: %w", n, err)
 			}
 			or.Gamma = p.At(at)
 		}
 		res.Orders = append(res.Orders, or)
 	}
 
+	last := rules[len(rules)-1]
 	if opts.GridPoints > 0 && len(last.Energy) >= 3 {
 		grid, dens := last.Density()
 		if p, err := NewPCHIP(grid, dens); err == nil {
@@ -553,7 +609,7 @@ func Image(e, g []float64, at float64, opts Options) (*Result, error) {
 	} else {
 		combinePaper(res, opts)
 	}
-	return res, nil
+	return nil
 }
 
 // combinePaper implements the paper's protocol (ADC22.pdf p. 10): average Window

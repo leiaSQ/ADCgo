@@ -20,8 +20,7 @@
 //
 // evaluated at E = E_Phi after Stieltjes imaging of the discrete pseudo-continuum.
 //
-// Note that ADCgo_plan.md's Track W text has P and Q swapped relative to the paper.
-// This package follows the paper: Q is bound, P is the continuum.
+// This package follows the paper's convention: Q is bound, P is the continuum.
 //
 // # Why there is no projected operator here
 //
@@ -61,4 +60,22 @@ type Space interface {
 	// Holes appends the occupied orbitals of row's configuration to dst and returns
 	// the extended slice. Scheme A's Q/P criterion is a function of exactly this.
 	Holes(row int, dst []int) []int
+}
+
+// ParticleSpace is a Space that also reports the particles of each configuration.
+// khci.Space satisfies it. The net-charge partition (charge.go) needs it: a relaxed He+ has a hole AND a compact particle on the same atom, and its hole
+// set alone is indistinguishable from a closed He2+ configuration.
+type ParticleSpace interface {
+	Space
+	// Particles appends the virtual orbitals (0-based positions in the virtual
+	// block, spatial) of row's configuration to dst, a doubly filled orbital twice.
+	Particles(row int, dst []int) []int
+}
+
+// ConfigSelector is a Selector whose criterion also needs the particles. NewPartition
+// calls BoundConfig for it; its Bound, which cannot be answered from holes alone,
+// is never called.
+type ConfigSelector interface {
+	Selector
+	BoundConfig(holes, parts []int) bool
 }

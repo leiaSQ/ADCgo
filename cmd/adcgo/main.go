@@ -66,6 +66,10 @@ func main() {
 
 	path := flag.String("fcidump", "", "path to an FCIDUMP file (MO integrals)")
 	doDIP := flag.Bool("dip", false, "solve DIP-ADC(2) and emit dication states as JSON")
+	khciK := flag.Int("khci", 0, "-fano over k-hole CI instead of an ADC matrix: K = 1..4 removed electrons, classes Kh | (K+1)h1p | (K+2)h2p, matrix H - E_HF in any orbitals (localized ones included). -mo is then the labelled sidecar and -fano-qp accepts the net-charge grammar ('p: charge A=1,B=1 & free=1'). Needs -fano, -sym none|<irrep>")
+	khciMaxClass := flag.Int("khci-maxclass", 0, "-khci: highest class as a hole count, K..K+2 (0 = K+2)")
+	khciTwoMs := flag.Int("khci-twoms", -1, "-khci: 2*Ms of the N-K electron states (-1 = K mod 2, the lowest)")
+	khciMaxFree := flag.Int("khci-maxfree", -1, "-khci: keep at most this many FREE particles (sidecar orb_kind) in the (K+2)h2p class; 1 drops continuum-continuum pairs (-1 = no limit)")
 	doSIP := flag.Bool("sip", false, "solve IP-ADC(n) (non-Dyson) and emit cation states as JSON")
 	order := flag.Int("order", 3, "SIP ADC order: 2, 3, 4 or 22 (2 = extended ADC(2); 4 = CVS Dyson ADC(4), needs -core; 22 = ADC(2,2), see -adc22). Detail: adcgo -h order")
 	solver := flag.String("solver", "lanczos", "eigensolver: lanczos | lanczos-lowmem | davidson | dense")
@@ -122,11 +126,13 @@ func main() {
 	convert := flag.String("convert", "", "read a previously emitted solver document JSON (the default -dip/-sip output) and emit its bare stick spectrum without re-solving; needs -dip or -sip to say which kind")
 
 	adc22 := flag.String("adc22", "f", "-order 22 variant (Kolorenc & Averbukh, JCP 152, 214107 (2020), Table I): f = full, the paper's recommendation and the only variant that gets double Auger right; x = drops the second-order 1h/2h1p coupling; m = also drops the first-order 3h2p/3h2p block, leaving it diagonal. m and x are documented to overshoot decay widths by ~14% and ~24%, so they are diagnostics rather than production settings")
-	doFano := flag.Bool("fano", false, "compute an electronic decay width (Auger, ICD, ETMD and their double counterparts) by the Fano/Feshbach method with Stieltjes imaging, instead of a spectrum. Needs -sip, -fano-init, and an -order of 2 (Fano-ADC(2)x), 3, or 22 (Fano-ADC(2,2)). The vacancy fixes the target irrep, so -sym is determined rather than chosen")
+	doFano := flag.Bool("fano", false, "compute an electronic decay width (Auger, ICD, ETMD and their double counterparts) by the Fano/Feshbach method with Stieltjes imaging, instead of a spectrum. Needs -fano-init and one of: -sip with an -order of 2 (Fano-ADC(2)x), 3, or 22 (Fano-ADC(2,2)), where the vacancy fixes the target irrep; -dip (DIP-ADC(2), one -spin and one -sym sector); or -khci K (k-hole CI; one -sym sector)")
 	fanoInit := flag.Int("fano-init", -1, "-fano: the initially ionized orbital, a 0-based occupied index. It defines both the discrete state |Phi> (selected from the QMQ spectrum by its weight on this orbital's 1h configuration) and, by default, the Q subspace")
 	fanoQ := flag.String("fano-q", "", "-fano: the Q (bound) orbital set as comma-separated 0-based occupied indices. Empty = just -fano-init, which with the default -fano-rule any is the Auger criterion: Q is every configuration still carrying the initial hole, P every one that has filled it. For interatomic decay name the whole donor subunit's orbitals and use -fano-rule all")
 	fanoRule := flag.String("fano-rule", "any", "-fano: which reading of the scheme A predicate puts a configuration in Q. any = at least one hole in the Q set (retains the initial vacancy), right for local decay such as atomic Auger. all = every hole in the set (all holes localized on subunit A), right for ICD/ETMD between subunits, where it is a hole OUTSIDE the donor that marks a decay channel. The two are not interchangeable")
 	fanoNth := flag.Int("fano-nth", 0, "-fano: which qualifying QMQ root to take as |Phi>, 0-based in ascending energy (the reference's ninista-1). Only roots whose weight on the vacancy configuration reaches -fano-qmin are counted")
+	fanoPhiHoles := flag.String("fano-phi-holes", "", "-fano: select |Phi> as the INTERIOR root of QMQ with the largest weight on the main-class configuration with these holes (comma-separated 0-based occupied orbitals, a doubly emptied orbital twice, e.g. 0,0,4,4 for He2+ on atoms 0 and 4), found by Jacobi-Davidson and polished by shifted inverse iteration, instead of the nth qualifying root from the bottom. Needed for multiply ionized initial states, which sit above charge-transfer states of Q")
+	fanoPhiTol := flag.Float64("fano-phi-tol", 1e-10, "-fano-phi-holes: residual goal ||(QHQ - E) Phi|| in hartree; a polish that stops above it (the float64 floor) is reported in the document, not hidden")
 	fanoQP := flag.String("fano-qp", "", "-fano: a Q/P partition stated PER EXCITATION CLASS, which -fano-q cannot express. Grammar: clauses separated by ';', each prefixed q: or p:, each a conjunction of terms joined by '&', each term [class/]orbitals:min[:max] with orbitals a comma-separated list of 0-based occupied indices and a-b ranges, class an excitation class as a hole count (omitted = every class), and max omitted = unbounded. A configuration is bound if some q clause matches, or if p clauses were given and none matches. Two of the four atoms in the paper's Table V need this: Mg(2s^-1) is 'q:0:1;p:2/4:1;p:3/4:2' — 2s vacancies bound, continuum is 2h1p with a 3s hole and 3h2p with TWO of them, which is what keeps the CLOSED 2p^-2 channel out of P — and Kr(3d^-1) is 'q:0-4:1;q:3/5:2:2&3/6-8:1', a 3d any-hole rule plus the 4s^-2 4p^-1 shake-up family in Q. Supersedes -fano-q and -fano-rule")
 	fanoQMin := flag.Float64("fano-qmin", 0.1, "-fano: minimum weight of |Phi> on the vacancy's 1h configuration (the reference's mspacewi). A root below this is not the state that was ionized")
 	fanoQSolver := flag.String("fano-qsolver", "", "-fano: eigensolver for the QMQ (bound) half, which wants a different one from the PMP half that -solver governs. Empty = davidson, or dense when -solver is dense. Only a few of QMQ's LOWEST roots are wanted — |Phi> is the bottom of that spectrum, since every Q configuration past the 1h class carries an extra hole — and under this partition Q's main block is often a single configuration, so a block-Lanczos seeded from it would be one column wide")
@@ -135,6 +141,14 @@ func main() {
 	fanoEMaxRel := flag.Float64("fano-emax-rel", 3.0, "-fano: energy ceiling as a MULTIPLE of E_Phi, used when -fano-emax is not given absolutely. This is the transferable form of the reference's hard-coded 4 hartree: the cut exists to drop states far ABOVE the decaying state, which contribute nothing to Gamma(E_Phi) but dominate the moments the Stieltjes reconstruction is built from, and that only means anything relative to E_Phi. Without it a basis with tight augmentation functions spans tens of keV and puts E_Phi in the bottom 1% of the sampled range, where imaging is extrapolating: for Ar 2p that alone moved the width from 108 to 82 meV against a published 114. Scanning it is the honest convergence check - Gamma plateaus over roughly 3-10x with the order spread minimized near 3x. 0 disables the ceiling")
 	fanoWMin := flag.Float64("fano-wmin", 0.05, "-fano: drop pseudo-continuum states whose weight on P's decay class (2h1p for single ionization) is at or below this (the reference's cntr > 0.05; its ADC(2)-extended variant used 0.2). NOTE this is the 2h1p weight, not the 1h weight — the polarization-propagator reference tests its own lowest class, which is 1h1p. Negative disables the cut")
 	fanoGMin := flag.Float64("fano-gmin", 1e-16, "-fano: drop pseudo-continuum states with gamma_i at or below this, in hartree squared (the reference's 1e-16 floor). Negative disables the cut")
+	fanoGMinRel := flag.Float64("fano-gmin-rel", 0, "-fano eigen path: drop pseudo-continuum states with gamma_i at or below this fraction of the largest gamma_i (0 = off). Relative, so it scales with the width; -khci runs switch the absolute -fano-gmin off unless it is given")
+	fanoEngine := flag.String("fano-engine", "eigen", "-fano: the PMP width engine. eigen = PMP eigenvectors and the pseudo-continuum {E_i, gamma_i} (the paper's path; needs Ritz vectors over P); gauss = Gauss rules of every order from -fano-order Lanczos steps seeded by the coupling vector; shiftinvert = the same on (PMP - sigma)^-1 around E_Phi; kpm = -fano-order Chebyshev moments with a Jackson kernel. The last three need no PMP eigenvector and have no final-state cut, so a 1e-15 Eh width survives")
+	fanoOrder := flag.Int("fano-order", 200, "-fano-engine gauss|shiftinvert|kpm: Lanczos steps (the largest Gauss rule) or KPM moments")
+	fanoSIShift := flag.Float64("fano-si-shift", 1e-4, "-fano-engine shiftinvert: sigma = E_Phi + this (hartree); nonzero so sigma is not an eigenvalue of PMP")
+	fanoLambda := flag.String("fano-lambda", "", "-khci -fano with a labelled -mo: scale every integral whose charge distribution pairs an orbital of atom A with one of atom B by lambda, 'A:B=lambda,C:D=mu' (a lock-in: 'C:D=0' switches the C-D transfer off exactly, so a width that needs it vanishes and what remains is the noise floor)")
+	fanoSaveG := flag.String("fano-save-g", "", "-fano: write the coupling vector g = P(H - E_Phi)Phi (P coordinates) and E_Phi to this JSON file")
+	fanoImageG := flag.String("fano-image-g", "", "-fano: skip the discrete state and the coupling; image the coupling vector in this JSON file (as -fano-save-g writes it, e.g. a lock-in double difference) against this run's PMP")
+	fanoDecompose := flag.Bool("fano-decompose", false, "-fano: the ordering decomposition: image the coupling of each excitation class of Phi alone (g_B = P(H - E)Phi_B) and each pair's interference, with the Gauss engine at -fano-order")
 	fanoAt := flag.Float64("fano-at", 0, "-fano: evaluate Gamma at this energy in eV instead of at E_Phi. 0 = at E_Phi, which is the physical answer. Pinning it is how two schemes are compared at FIXED energy: a scheme that moves E_Phi changes Gamma twice over, once through the coupling density it produces and once by evaluating that density somewhere else, and only separating the two attributes a difference to the physics")
 	fanoBlock := flag.Int("fano-block", 0, "-fano -solver lanczos: Krylov block width for the PMP pseudo-continuum solve, seeded with the most strongly coupled P configurations (the reference's fill_stvc). 0 = min(64, |P|). P's own main block is a poor width here — under this partition it holds only the few 1h configurations Q did not claim — and the width is nearly free with -matfree, since one element recompute serves every column of the block")
 	fanoBlocks := flag.Int("fano-blocks", 0, "-fano -solver lanczos: block count for the PMP solve (0 = -blocks). The pseudo-continuum needs only enough states to sample the coupling density; a few hundred is ample, and Stieltjes imaging reports its own convergence")
@@ -196,7 +210,7 @@ func main() {
 		// with no re-solve (the populations, not the eigenvectors, are what the classifier
 		// needs). Without -mo, or with -bare, fall through to the bare per-state spectrum.
 		if *doDIP && *moPath != "" && !*doBare && (*doSpectrum || len(groups.sites) > 0 || groups.interactive) {
-			md, err := mo.ReadFile(*moPath)
+			md, err := mo.ReadCanonical(*moPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "adcgo:", err)
 				os.Exit(1)
@@ -280,6 +294,96 @@ func main() {
 		},
 	}
 
+	if *doFano {
+		if !*doSIP && !*doDIP && *khciK == 0 {
+			fmt.Fprintln(os.Stderr, "adcgo: -fano needs -sip, -dip or -khci K")
+			os.Exit(2)
+		}
+		if doSpec || *doTDM {
+			fmt.Fprintln(os.Stderr, "adcgo: -fano is exclusive with -spectrum/-bare and -tdm")
+			os.Exit(2)
+		}
+		if *fanoInit < 0 {
+			fmt.Fprintln(os.Stderr, "adcgo: -fano needs -fano-init <0-based occupied orbital>")
+			os.Exit(2)
+		}
+	}
+	// makeFano turns the -fano-* flags into a fanoConfig over the run's solver settings,
+	// for either family.
+	makeFano := func(base sipConfig, variant sip.Variant) (fanoConfig, error) {
+		rule, err := parseHoleRule(*fanoRule)
+		if err != nil {
+			return fanoConfig{}, err
+		}
+		qOrbs, err := parseOrbitalList("-fano-q", *fanoQ)
+		if err != nil {
+			return fanoConfig{}, err
+		}
+		phiHoles, err := parseOrbitalList("-fano-phi-holes", *fanoPhiHoles)
+		if err != nil {
+			return fanoConfig{}, err
+		}
+		lo, hi, err := parseStieltjesOrders(*stOrders)
+		if err != nil {
+			return fanoConfig{}, err
+		}
+		avg, err := parseAverageMode(*stAverage)
+		if err != nil {
+			return fanoConfig{}, err
+		}
+		return fanoConfig{
+			sip: base, variant: variant, vacancy: *fanoInit, qOrbs: qOrbs, rule: rule,
+			nth: *fanoNth, qMin: *fanoQMin, qRoots: *fanoQRoots, qSolver: *fanoQSolver,
+			qpSpec: *fanoQP, phiHoles: phiHoles, phiTol: *fanoPhiTol,
+			engine: *fanoEngine, order: *fanoOrder, siShift: *fanoSIShift, gminRel: *fanoGMinRel,
+			lambdaSpec: *fanoLambda, saveG: *fanoSaveG, imageG: *fanoImageG, decompose: *fanoDecompose,
+			emax: *fanoEMax, emaxRel: *fanoEMaxRel, wmin: *fanoWMin, gmin: *fanoGMin,
+			pBlock: *fanoBlock, pBlocks: *fanoBlocks, atEV: *fanoAt,
+			stOrderLo: lo, stOrderHi: hi, stPrec: *stPrec, stAverage: avg, stWindow: *stWindow,
+			initSite: *initAtom, sites: groups.sites, specOpts: specCfg.classify,
+		}, nil
+	}
+
+	if *khciK != 0 {
+		if !*doFano || *doSIP || *doDIP {
+			fmt.Fprintln(os.Stderr, "adcgo: -khci runs -fano only, and not together with -sip or -dip")
+			os.Exit(2)
+		}
+		if *khciK < 1 || *khciK > 4 {
+			fmt.Fprintf(os.Stderr, "adcgo: -khci %d outside 1..4\n", *khciK)
+			os.Exit(2)
+		}
+		mfMode, err := parseMatFree(*matfree)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "adcgo:", err)
+			os.Exit(2)
+		}
+		fcfg, err := makeFano(sipConfig{
+			solver: *solver, out: *out, sym: *sym, backend: *backendName, gpus: *gpus,
+			blocks: *blocks, nroots: *nroots, maxdavsp: *maxdavsp, maxdavit: *maxdavit,
+			convthr: *convthr, profile: *profile, moPath: *moPath, matFree: mfMode,
+		}, sip.VariantM)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "adcgo:", err)
+			os.Exit(2)
+		}
+		fcfg.khci, fcfg.khciMaxClass, fcfg.khciMaxFree = *khciK, *khciMaxClass, *khciMaxFree
+		fcfg.khciTwoMs = *khciTwoMs
+		if fcfg.khciTwoMs < 0 {
+			fcfg.khciTwoMs = *khciK % 2
+		}
+		fcfg.khciCSR = int64(*maxMemGB * (1 << 30))
+		if !flagGiven("fano-gmin") {
+			// the absolute 1e-16 Eh^2 floor deletes a 1e-15 Eh width whole
+			fcfg.gmin = -1
+		}
+		if err := runFano(d, fcfg); err != nil {
+			fmt.Fprintln(os.Stderr, "adcgo:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if *doDIP {
 		cfg := dipConfig{
 			solver: *solver, spinSel: *spinSel, moPath: *moPath, out: *out, sym: *sym,
@@ -302,6 +406,31 @@ func main() {
 		if cfg.ckpt != "" {
 			cfg.stop = stopSig
 		}
+		if *doFano {
+			// -dip -fano: one spin sector, the DIP-ADC(2) matrices, the -solver settings of
+			// the run. -spin both would be two different widths; name the sector.
+			spins, err := selectSpins(cfg.spinSel)
+			if err != nil || len(spins) != 1 {
+				fmt.Fprintf(os.Stderr, "adcgo: -dip -fano needs -spin singlet or -spin triplet (got %q)\n", cfg.spinSel)
+				os.Exit(2)
+			}
+			fcfg, err := makeFano(sipConfig{
+				solver: cfg.solver, out: cfg.out, sym: cfg.sym, backend: cfg.backend, gpus: cfg.gpus,
+				order: 2, blocks: cfg.blocks, nroots: cfg.nroots, maxdavsp: cfg.maxdavsp,
+				maxdavit: cfg.maxdavit, convthr: cfg.convthr, profile: cfg.profile,
+				moPath: cfg.moPath, matFree: cfg.matFree, matFreeBudget: cfg.matFreeBudget,
+			}, sip.VariantM)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "adcgo:", err)
+				os.Exit(2)
+			}
+			fcfg.dip, fcfg.spin = true, spins[0]
+			if err := runFano(d, fcfg); err != nil {
+				fmt.Fprintln(os.Stderr, "adcgo:", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if err := runDIP(d, cfg); err != nil {
 			if errors.Is(err, errInterrupted) {
 				fmt.Fprintln(os.Stderr, "adcgo: checkpoint written; resume needed")
@@ -311,21 +440,6 @@ func main() {
 			os.Exit(1)
 		}
 		return
-	}
-
-	if *doFano {
-		if !*doSIP {
-			fmt.Fprintln(os.Stderr, "adcgo: -fano needs -sip")
-			os.Exit(2)
-		}
-		if doSpec || *doTDM {
-			fmt.Fprintln(os.Stderr, "adcgo: -fano is exclusive with -spectrum/-bare and -tdm")
-			os.Exit(2)
-		}
-		if *fanoInit < 0 {
-			fmt.Fprintln(os.Stderr, "adcgo: -fano needs -fano-init <0-based occupied orbital>")
-			os.Exit(2)
-		}
 	}
 
 	if *doSIP {
@@ -368,34 +482,10 @@ func main() {
 		cfg.variant = variant
 
 		if *doFano {
-			rule, err := parseHoleRule(*fanoRule)
+			fcfg, err := makeFano(cfg, variant)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "adcgo:", err)
 				os.Exit(2)
-			}
-			qOrbs, err := parseOrbitalList("-fano-q", *fanoQ)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "adcgo:", err)
-				os.Exit(2)
-			}
-			lo, hi, err := parseStieltjesOrders(*stOrders)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "adcgo:", err)
-				os.Exit(2)
-			}
-			avg, err := parseAverageMode(*stAverage)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "adcgo:", err)
-				os.Exit(2)
-			}
-			fcfg := fanoConfig{
-				sip: cfg, variant: variant, vacancy: *fanoInit, qOrbs: qOrbs, rule: rule,
-				nth: *fanoNth, qMin: *fanoQMin, qRoots: *fanoQRoots, qSolver: *fanoQSolver,
-				qpSpec: *fanoQP,
-				emax:   *fanoEMax, emaxRel: *fanoEMaxRel, wmin: *fanoWMin, gmin: *fanoGMin,
-				pBlock: *fanoBlock, pBlocks: *fanoBlocks, atEV: *fanoAt,
-				stOrderLo: lo, stOrderHi: hi, stPrec: *stPrec, stAverage: avg, stWindow: *stWindow,
-				initSite: *initAtom, sites: groups.sites, specOpts: specCfg.classify,
 			}
 			if err := runFano(d, fcfg); err != nil {
 				fmt.Fprintln(os.Stderr, "adcgo:", err)
@@ -494,7 +584,7 @@ func dipLanczosOpts(cfg dipConfig, spin dip.Spin, targetSym int) lanczos.Options
 
 // progressReporter builds the per-block Progress callback both solve families install. It
 // prints one line per block to stderr: the cumulative phase times first — the DIP line's
-// original fields, in their original order, so scripts/uracil2W_dip_measure.sbatch's
+// original fields, in their original order, so scripts/helix/uracil2W_dip_measure.sbatch's
 // `grep -c "^progress dip"` and anything else reading them still match — then this block's
 // own deltas.
 //
@@ -777,7 +867,7 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 
 	var moData *mo.Data
 	if cfg.moPath != "" {
-		if moData, err = mo.ReadFile(cfg.moPath); err != nil {
+		if moData, err = mo.ReadCanonical(cfg.moPath); err != nil {
 			return err
 		}
 	}
@@ -1116,7 +1206,7 @@ func runSIP(d *fcidump.Data, cfg sipConfig) error {
 
 	var md *mo.Data
 	if cfg.moPath != "" {
-		if md, err = mo.ReadFile(cfg.moPath); err != nil {
+		if md, err = mo.ReadCanonical(cfg.moPath); err != nil {
 			return err
 		}
 	}
@@ -1291,4 +1381,16 @@ func referenceEnergy(d *fcidump.Data, nocc int) float64 {
 		}
 	}
 	return e
+}
+
+// flagGiven reports whether the named flag was set on the command line (as opposed to
+// holding its default).
+func flagGiven(name string) bool {
+	given := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			given = true
+		}
+	})
+	return given
 }

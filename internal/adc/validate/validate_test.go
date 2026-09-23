@@ -1,6 +1,6 @@
 // Package validate cross-checks ADCgo's DIP-ADC(2) output against theADCcode's
 // h2o DIP reference (../ADCanalysis/examples/DIP_h2o, vendored under
-// testdata/reference) on *matched* integrals: scripts/gen_ref_fcidump.py
+// testdata/reference) on *matched* integrals: scripts/fixtures/gen_ref_fcidump.py
 // reproduces the reference's exact DZP+diffuse basis, geometry, and frozen-core
 // active space (gated on SCF = -76.0498071428 Ha), so any residual is ADC method,
 // not basis.

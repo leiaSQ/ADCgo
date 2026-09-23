@@ -42,6 +42,16 @@ func newWidth(r *stieltjes.Result) Width {
 	return w
 }
 
+// NewWidth wraps a width computed without Stieltjes imaging (KPMWidth): Gamma and its
+// uncertainty in hartree.
+func NewWidth(gamma, sigma float64) Width {
+	w := Width{Gamma: gamma, Sigma: sigma, MeV: gamma * HartreeToMeV, SigmaMeV: sigma * HartreeToMeV}
+	if w.MeV > 0 {
+		w.Tau = LifetimeFsMeV / w.MeV
+	}
+	return w
+}
+
 // String reports the width and lifetime the way a paper does.
 func (w Width) String() string {
 	s := fmt.Sprintf("Gamma = %.4g +/- %.3g meV", w.MeV, w.SigmaMeV)

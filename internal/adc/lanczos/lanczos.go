@@ -194,11 +194,16 @@ func (o Options) normalize(n int) Options {
 //
 // Options.Block, when set, replaces `main` as the block width.
 func SubspaceDim(n, main int, opts Options) int {
-	if n == 0 || main == 0 {
+	// main == 0 is not empty: a Fano continuum subspace can hold no main-class
+	// configuration (see Solve). The subspace is then sized by Options.Block alone, which
+	// blockWidth already resolves, so only a zero-dimensional space or an unresolvable
+	// width has nothing to span.
+	b := blockWidth(n, main, opts)
+	if n == 0 || b == 0 {
 		return 0
 	}
 	o := opts.normalize(n)
-	return min(o.MaxDim, o.MaxBlocks*blockWidth(n, main, opts))
+	return min(o.MaxDim, o.MaxBlocks*b)
 }
 
 // blockWidth resolves the Krylov block width: Options.Block when set and in range, else
@@ -452,12 +457,19 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 	main := op.MainBlockSize()
 	opts = opts.normalize(n)
 	var tm Timing
-	if n == 0 || main == 0 {
-		return Result{MainVecs: backend.NewMat(main, 0), Timing: tm}
-	}
 	// b is the KRYLOV block width; main stays the operator's own main block, which the
 	// pole strengths and MainVecs are defined over.
 	b := blockWidth(n, main, opts)
+	// main == 0 is LEGITIMATE and must not short-circuit: a Fano continuum subspace P can
+	// hold no main-class configuration at all. It happens whenever every 1h configuration
+	// is bound, which is exactly the paper's Mg+(2s^-1) partition — 2s^-1, 3s^-1 and 2p^-1
+	// are all bound there, so P is entirely 2h1p and 3h2p. Returning early then produced no
+	// Ritz vectors and the run died downstream in fano.Widths with "the PMP solve did not
+	// retain full Ritz vectors", which names the symptom and not the cause. Only a space of
+	// zero dimension, or one with no usable block width, has nothing to solve.
+	if n == 0 || b == 0 {
+		return Result{MainVecs: backend.NewMat(main, 0), Timing: tm}
+	}
 
 	maxdim := SubspaceDim(n, main, opts)
 
@@ -627,7 +639,11 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 	// StridedDownloader fetches the whole rectangle in one transfer; without it this is one
 	// blocking round-trip per column, and dim reaches the thousands on a large sector.
 	bmain := backend.NewMat(main, dim)
-	if sd, ok := be.(backend.StridedDownloader); ok {
+	if main == 0 {
+		// Nothing to fetch, and Download2D of a zero-row rectangle is not worth asking a
+		// backend to define. mainVecs and the pole strengths are then empty, which is the
+		// honest answer for a subspace with no main class.
+	} else if sd, ok := be.(backend.StridedDownloader); ok {
 		flat := sd.Download2D(basis.V, main, dim, basis.Ld) // main×dim, column-major
 		for j := range dim {
 			for c := range main {
@@ -656,8 +672,8 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 	// Full Ritz vectors, satellite rows included: fullVecs = B·S. Unlike the main-space
 	// slice, this panel is n rows tall, so it stays on the device — bringing the basis
 	// home to multiply it here would cost an n×dim transfer and an O(n·dim²) host GEMM.
-	// It is computed in column chunks of `main` states so the output panel is wbuf, which
-	// the Krylov build already paid for; no device memory is added.
+	// It is computed in column chunks of b states so the output panel is wbuf, which the
+	// Krylov build already paid for; no device memory is added.
 	//
 	// mainVecs is deliberately not re-derived from its leading rows: WantFull must leave
 	// every existing field bit-for-bit as it was, and a device GEMM rounds differently
@@ -665,8 +681,14 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 	var fullVecs backend.Mat
 	if opts.WantFull {
 		fullVecs = backend.NewMat(n, dim)
-		for k0 := 0; k0 < dim; k0 += main {
-			cols := min(main, dim-k0)
+		// Chunk width is the KRYLOV block width b, because wbuf is allocated as n*b. It
+		// used to be `main`, which is wrong twice over: main == 0 (a Fano P space with no
+		// main class) never advanced the loop, and main > b — reachable whenever
+		// Options.Block is smaller than the operator's main block — built a BlockView
+		// wider than wbuf.
+		chunk := b
+		for k0 := 0; k0 < dim; k0 += chunk {
+			cols := min(chunk, dim-k0)
 			sc := make([]float64, dim*cols) // column-major s[:, k0:k0+cols]
 			for j := range cols {
 				for i := range dim {

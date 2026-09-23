@@ -188,7 +188,7 @@ device kernel) are what would move the production number.
 **Do not scope a σ-build rewrite until the current kernel's efficiency is measured.** The whole
 case rests on the "~2–5% of peak" assumption above, which nobody has checked.
 
-Job `14015067` (`scripts/uracil2W_mgpu_timing.sbatch`) produces the first real per-mat-vec time for
+Job `14015067` (`scripts/gpu/uracil2W_mgpu_timing.sbatch`) produces the first real per-mat-vec time for
 the satellite apply. Convert it to a fraction of peak, then:
 
 - **≳20% of peak** — a contraction rewrite buys maybe 3×, and is probably not worth losing

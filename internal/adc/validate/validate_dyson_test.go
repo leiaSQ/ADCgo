@@ -4,7 +4,7 @@
 // The comparison has to be *term-matched* to mean anything. pyscf's Dyson amplitude for a
 // virtual orbital carries the first-order 2h1p term f⁽¹⁾ *and* the second-order singles
 // t₁⁽²⁾ (and, at adc(3), the second-order doubles t₂⁽²⁾). ADCgo implements f⁽¹⁾ alone
-// (docs/adc4_rassi_plan.md, Chunk 4). scripts/gen_sip_ref.py therefore dumps a `dyson_o1`
+// (docs/adc4_rassi_plan.md, Chunk 4). scripts/fixtures/gen_sip_ref.py therefore dumps a `dyson_o1`
 // block computed with approx_trans_moments=True on adc(2)-x, where pyscf's virtual block
 // collapses to exactly the one term ADCgo has.
 //
@@ -75,7 +75,7 @@ func TestDysonvsPyscf(t *testing.T) {
 		t.Fatalf("unmarshal pyscf ref: %v", err)
 	}
 	if len(doc.Dyson.Roots) == 0 {
-		t.Fatal("h2o_sip.pyscf.json has no dyson_o1 block; rerun scripts/gen_sip_ref.py")
+		t.Fatal("h2o_sip.pyscf.json has no dyson_o1 block; rerun scripts/fixtures/gen_sip_ref.py")
 	}
 
 	d, err := fcidump.ReadFile(testdata("h2o.fcidump"))

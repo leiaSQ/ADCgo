@@ -41,7 +41,7 @@ The deviations quoted in the thesis, and the LaTeX rows of its ten-lowest-poles
 table, come from
 
 ```sh
-scripts/compare_spectra.py plots/h2o_dip_adcgo.spec.json \
+scripts/analysis/compare_spectra.py plots/h2o_dip_adcgo.spec.json \
     plots/h2o_dip_theadccode.spec.json --table 10 --irreps a_1,a_2,b_1,b_2
 ```
 

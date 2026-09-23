@@ -3,7 +3,7 @@
 **Status:** plan, 2026-07-23. Supersedes/operationalizes [`gpu_perf_backlog.md`](gpu_perf_backlog.md)
 into ordered, verifiable work. Companions: [`dip_operator_memory.md`](dip_operator_memory.md),
 [`sigma_build_contractions.md`](sigma_build_contractions.md), [`dip_lowmem_lanczos.md`](dip_lowmem_lanczos.md),
-[`../internal/adc/backend/README.md`](../internal/adc/backend/README.md), [`../scripts/HELIX.md`](../scripts/HELIX.md).
+[`../internal/adc/backend/README.md`](../internal/adc/backend/README.md), [`../scripts/helix/HELIX.md`](../scripts/helix/HELIX.md).
 
 ## Thesis
 
@@ -31,7 +31,7 @@ Every number in the companion docs was hand-instrumented per job.
 |---|---|---|
 | per-chunk gather/kernel split | `dip/matfree_dist.go` apply loops have no timers around gather vs. `DipSatApply`/`DipSatFillJII` | `time.Since` behind `-profile`, matching `reportTiming` (`cmd/adcgo/sip_tdm.go`) |
 | `PeerCopy2D`/`syncAll` latency | `gpu_device.go` `PeerCopy2D`/`Sync` (`:439,450-456`) are silent | same |
-| register-spill visibility | `scripts/build_adcgo_cuda_helix:62-67` has no `-Xptxas -v` | add it; `vint[31]` (`adc4_kernels.cu:44`) is a plausible spiller on `sm_90` |
+| register-spill visibility | `scripts/helix/build_adcgo_cuda_helix:62-67` has no `-Xptxas -v` | add it; `vint[31]` (`adc4_kernels.cu:44`) is a plausible spiller on `sm_90` |
 | kernel occupancy/timeline | nothing wraps the binary | `nsys profile --trace=cuda,osrt -o <run> ./adcgo-cuda ...`; `ncu --set full --launch-count 3 ...` on `dip_sat_apply`/`dip_fill_sat`/`wert2_fwd`/`c22_apply` |
 | the "0.58%" figure itself | measured on the **superseded per-scalar** kernel | re-run the timing job on the current default (`newSatBatchedDevice`/`newSatBatchedPerDevice`) before scoping Phase F |
 
@@ -247,7 +247,7 @@ nvcc cannot hoist D1's redundant load on its own (cannot assume `eri`/`eps`/`osy
 `c22_apply`, `dip_sat_apply`, `dip_fill_sat`. Verify: bit-identical output on any existing kernel
 test suite — a pure compiler hint, not a semantic change.
 
-**D3. Measure register spilling.** `scripts/build_adcgo_cuda_helix:62-67` has no `-Xptxas -v`.
+**D3. Measure register spilling.** `scripts/helix/build_adcgo_cuda_helix:62-67` has no `-Xptxas -v`.
 `vint[31]` (`adc4_kernels.cu:44`, inside `d_wert2`) — 248 bytes of live state per thread — is the
 standout candidate for spilling to local memory on `sm_90`, even before D1 changes call frequency.
 Add the flag, capture `ptxas info` register/spill counts in the Phase 0 job log, and treat any

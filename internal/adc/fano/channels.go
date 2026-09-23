@@ -2,6 +2,7 @@ package fano
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
 	"github.com/leiaSQ/ADCgo/internal/adc/mo"
@@ -90,6 +91,35 @@ func NewChannels(md *mo.Data, nocc int, sites []spectrum.Site, initial string, o
 	}
 
 	natom := len(md.AtomNames)
+	if md.HasLabels {
+		// A labelled sidecar (scripts/fcidump/orbitals.py) assigns every occupied
+		// orbital to one real atom, from IAO populations gated at >= 0.999 on that atom
+		// and < 1e-4 on every off-atom ghost. That assignment is the population used
+		// here: Mulliken and Loewdin shares of the diffuse ghost functions are unstable
+		// (Loewdin put 2.7% of a He 1s on the ghosts of testdata/khci/he3_ghost), and
+		// ghost centres carry no electrons, so they are never a site or a channel
+		// label.
+		for _, st := range sites {
+			for _, m := range st.Members {
+				if a := atomIndex(md.AtomNames, strings.TrimPrefix(m, "~")); a >= 0 && md.GhostAtom[a] {
+					return nil, fmt.Errorf("fano: site %q names ghost centre %q; ghosts are not decay sites",
+						st.Name, m)
+				}
+			}
+		}
+		if a := atomIndex(md.AtomNames, initial); a >= 0 && md.GhostAtom[a] {
+			return nil, fmt.Errorf("fano: the initial site %q is a ghost centre", initial)
+		}
+		if n := md.NOccLabelled(); n != nocc {
+			return nil, fmt.Errorf("fano: the sidecar labels %d occupied orbitals, the space has %d", n, nocc)
+		}
+		pop := make([][]float64, nocc)
+		for i := range nocc {
+			pop[i] = make([]float64, natom)
+			pop[i][md.OrbAtom[i]] = 1
+		}
+		return &Channels{pop: pop, cols: md.AtomNames, sites: sites, initial: initial, opts: opts}, nil
+	}
 	pop := make([][]float64, nocc)
 	for i := range nocc {
 		q := make([]float64, natom)
@@ -111,6 +141,15 @@ func NewChannels(md *mo.Data, nocc int, sites []spectrum.Site, initial string, o
 		pop[i] = q
 	}
 	return &Channels{pop: pop, cols: md.AtomNames, sites: sites, initial: initial, opts: opts}, nil
+}
+
+func atomIndex(names []string, name string) int {
+	for a, n := range names {
+		if n == name {
+			return a
+		}
+	}
+	return -1
 }
 
 func hasColumn(cols []string, name string) bool {

@@ -12,7 +12,7 @@ for large satellite spaces is hundreds of GB to multiple TB — bigger than any
 single GPU, and for the production system bigger than a whole 8×H200 node.
 
 Written 2026-07-20 while sizing the uracil / production DIP runs on bwForCluster
-Helix (see `scripts/HELIX.md`, `scripts/uracil_dip.sbatch`).
+Helix (see `scripts/helix/HELIX.md`, `scripts/helix/uracil_dip.sbatch`).
 
 ## The wall in one line
 

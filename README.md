@@ -31,7 +31,7 @@ stdout (or `-out FILE`). A companion CLI, `cmd/plotspec`, renders that JSON to a
 ```sh
 # 0. Generate integrals: RHF+MP2 on H2O/cc-pVDZ, C2v (needs pyscf; see below).
 #    Writes testdata/h2o.fcidump and the sidecar testdata/h2o.mo.json.
-python scripts/gen_fcidump.py
+python scripts/fixtures/gen_fcidump.py
 
 # 1. Sanity: reconstructed HF + MP2 energies from the FCIDUMP.
 go run ./cmd/adcgo -fcidump testdata/h2o.fcidump
@@ -139,9 +139,37 @@ Two diagnostics decide whether a width is trustworthy, and both are printed:
   reasonable with a *small* error bar, because the Stieltjes orders agree with each other
   about the wrong density — so raise `-fano-blocks` until the residual closes.
 
-`scripts/gen_fano_atoms.py` generates the atomic fixtures and
-`scripts/fano_table6.sbatch` runs the comparison on a compute node (necessary: the login
+`scripts/fixtures/gen_fano_atoms.py` generates the atomic fixtures and
+`scripts/helix/fano_table6.sbatch` runs the comparison on a compute node (necessary: the login
 node's user slice caps CPU at 4 cores, so `GOMAXPROCS` is 4 there whatever `nproc` says).
+
+### Beyond single ionization — `-dip -fano` and `-khci K -fano`
+
+The same Fano pipeline runs over two more families:
+
+| Family | Flags | Matrix | Use |
+|---|---|---|---|
+| double ionization | `-dip -fano -spin singlet\|triplet -sym none\|IRREP` | DIP-ADC(2), one sector | widths of dicationic states (no partial widths: the 3h1p decay class has no channel routing) |
+| k-hole CI | `-khci K -fano -sym none\|IRREP` | H − E_HF over kh \| (k+1)h1p \| (k+2)h2p, any orbitals | multiply ionized initial states (K = 1..4) |
+
+`-khci` accepts localized orbitals: with a labelled sidecar (`dump_fcidump`'s `&orbitals
+localized` scheme), `-fano-qp` takes a net-charge rule such as `'p: charge *=1 & free=1'`
+(every atom singly charged and one free electron), and `-fano-phi-holes 0,0,4,4` selects
+the decaying state as the interior QMQ root heaviest on that configuration, polished to
+`-fano-phi-tol` (default 1e-10 Eh).
+
+For widths far below the coupling scale (10⁻¹⁵ Eh), use an engine that needs no PMP
+eigenvectors and has no final-state cut: `-fano-engine gauss` (Gauss rules from a Lanczos
+run seeded by the coupling vector), `shiftinvert` or `kpm`. The noise floor is measured,
+not assumed: `-fano-lambda 'C:D=0'` switches one electron transfer off exactly, and
+`-fano-save-g` / `-fano-image-g` image the double difference of such runs.
+
+```sh
+# a four-hole initial state (two doubly emptied orbitals), labelled localized dump
+adcgo -fcidump sys.fcidump -mo sys.mo.json -khci 4 -khci-maxfree 1 -sym none -fano \
+    -fano-init 0 -fano-phi-holes 0,0,4,4 -fano-engine gauss -fano-decompose \
+    -fano-qp 'p: charge *=1 & free=1'
+```
 
 ### Bare eigenvalue spectrum — `-bare`
 
@@ -285,7 +313,7 @@ adcgo-cuda -fcidump system.fcidump -dip -order 2 \
     -backend cuda -spin both -sym all -blocks 200
 ```
 
-See [`scripts/HELIX.md`](scripts/HELIX.md) for a complete SLURM job
+See [`scripts/helix/HELIX.md`](scripts/helix/HELIX.md) for a complete SLURM job
 (`--gres=gpu:H200:8`).
 
 ### Matrix-free operator — `-matfree`
@@ -311,6 +339,29 @@ orbitals.
 adcgo-cuda -fcidump system.fcidump -dip -order 2 \
     -solver lanczos-lowmem -lowmem-block 0 -mgpu 8 -matfree on \
     -backend cuda -spin both -sym all -blocks 200
+```
+
+## Generated ISR matrix elements
+
+> **[`internal/adc/isrgen/README.md`](internal/adc/isrgen/README.md) is the full reference.**
+
+`scripts/codegen/generate_adc.py` uses [adcgen](https://github.com/jonasleitner/adcgen) to derive the
+ISR secular-matrix blocks of k-fold ionization ADC and emits them as Go element evaluators:
+`isrgen/ip`, `dip`, `tip` and `qip` (k = 1…4, classes kh | (k+1)h1p | (k+2)h2p). Each package
+is checked element by element against a numpy evaluation of adcgen's fully expanded
+expressions, and at first order against Slater–Condon CI.
+
+These packages are an independent **second source**, not a production operator. They
+reproduce every element of sip's hand-transcribed ADC(2,2), A9–A22 included, to 3.6e-15.
+They also reproduce `dip` (ISR ADC(2)x) block by block in its spin-adapted basis, to
+2.8e-14. And they supply the triple- and quadruple-ionization blocks that have no
+hand-written counterpart. The solvers above still run on the hand-ported `sip`/`dip`
+matrices.
+
+```sh
+python scripts/codegen/generate_adc.py --variant dip --schemes adc2x,ci,strict:2 \
+    --outdir internal/adc/isrgen/dip
+go test ./internal/adc/isrgen/...
 ```
 
 ## Plotting
@@ -439,14 +490,15 @@ Validation is layered: MP2 energy reconstruction (M0); DIP cross-checked against
 theADCcode's `adcdip*.out` on matched DZP+diffuse integrals (M4); SIP against pyscf's
 `ip_adc` on the same integrals (M5); the CVS ADC(4) blocks bit-exact against theADCcode's
 B2 tape; and the transition-dipole machinery against hermetic Slater–Condon determinant
-oracles.
+oracles. The generated ISR packages (`internal/adc/isrgen`) add an
+independent symbolic derivation as a second source for the `sip` and `dip` elements.
 
 ## Regenerating fixtures (needs pyscf)
 
 ```sh
-python scripts/gen_fcidump.py       # h2o.fcidump + h2o.mo.json + h2o.ref.json
-python scripts/gen_ref_fcidump.py   # matched DZP+diffuse integrals for the M4 DIP gate
-python scripts/gen_sip_ref.py       # pyscf IP-ADC + Dyson reference (M5)
+python scripts/fixtures/gen_fcidump.py       # h2o.fcidump + h2o.mo.json + h2o.ref.json
+python scripts/fixtures/gen_ref_fcidump.py   # matched DZP+diffuse integrals for the M4 DIP gate
+python scripts/fixtures/gen_sip_ref.py       # pyscf IP-ADC + Dyson reference (M5)
 ```
 
 The committed ADCgo output fixtures are regenerated with the corresponding `-out` runs;

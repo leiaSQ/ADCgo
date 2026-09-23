@@ -5,6 +5,7 @@
 package dip
 
 import (
+	"fmt"
 	"slices"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
@@ -333,4 +334,114 @@ func (s *Space) addIJKR() {
 			ci++
 		})
 	})
+}
+
+// Holes appends the occupied orbitals of row's configuration to dst, a doubly emptied
+// orbital twice (the fano.Space contract): |ii> gives i,i; |ij> gives i,j; |jiir> gives
+// j,i,i; |ijkr,T> gives i,j,k.
+func (s *Space) Holes(row int, dst []int) []int {
+	c := s.Configs[row]
+	if row < s.BeginJII {
+		return append(dst, c.Occ[0], c.Occ[1])
+	}
+	return append(dst, c.Occ[0], c.Occ[1], c.Occ[2])
+}
+
+// Particles appends the virtual orbital (0-based position in the virtual block) of a
+// 3h1p row to dst; a 2h row has none.
+func (s *Space) Particles(row int, dst []int) []int {
+	if row < s.BeginJII {
+		return dst
+	}
+	return append(dst, s.Configs[row].Vir)
+}
+
+// Restrict returns the sub-space spanned by the given rows, which must be ascending and
+// distinct, and must keep every 3h1p group (JII / IJK) either whole or not at all.
+//
+// The assembled operator builds each 3h1p group as one panel over all of its virtuals
+// and spin functions (singlet.go, triplet.go, the matrix-free and batched satellite
+// paths), so a group is the smallest unit a sub-space can hold; within that rule New
+// over the result assembles exactly the corresponding sub-block of the parent's matrix.
+// A partition by holes (fano scheme A) always satisfies it, since every row of a group
+// carries the same holes. 2h rows are independent and may be kept singly.
+func (s *Space) Restrict(rows []int) (*Space, error) {
+	n := s.Size()
+	keep := make([]bool, n)
+	for i, r := range rows {
+		if r < 0 || r >= n {
+			return nil, fmt.Errorf("dip: Restrict row %d outside 0..%d", r, n-1)
+		}
+		if i > 0 && r <= rows[i-1] {
+			return nil, fmt.Errorf("dip: Restrict rows not strictly ascending at %d", i)
+		}
+		keep[r] = true
+	}
+	// group boundaries of the parent, region by region
+	type grp struct{ lo, hi int }
+	groups := func(starts []int, end int) []grp {
+		out := make([]grp, len(starts))
+		for m, lo := range starts {
+			hi := end
+			if m+1 < len(starts) {
+				hi = starts[m+1]
+			}
+			out[m] = grp{lo, hi}
+		}
+		return out
+	}
+	jii := groups(s.JII, s.BeginIJK)
+	ijk := groups(s.IJK, n)
+	whole := func(g grp) (bool, error) {
+		k := 0
+		for r := g.lo; r < g.hi; r++ {
+			if keep[r] {
+				k++
+			}
+		}
+		if k != 0 && k != g.hi-g.lo {
+			return false, fmt.Errorf("dip: Restrict keeps %d of the %d rows of the 3h1p group "+
+				"at row %d (holes %v); a group must be kept whole", k, g.hi-g.lo, g.lo,
+				s.Holes(g.lo, nil))
+		}
+		return k != 0, nil
+	}
+	out := &Space{Sym: s.Sym, Spin: s.Spin, Mult: s.Mult, Nocc: s.Nocc, Nvir: s.Nvir,
+		Norb: s.Norb, orbSym: s.orbSym}
+	out.Configs = make([]Config, 0, len(rows))
+	for _, r := range rows {
+		if r >= s.BeginJII {
+			break
+		}
+		out.Configs = append(out.Configs, s.Configs[r])
+		if r < s.BeginIJ {
+			out.BeginIJ = len(out.Configs)
+		}
+	}
+	out.BeginJII = len(out.Configs)
+	for _, g := range jii {
+		ok, err := whole(g)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out.JII = append(out.JII, len(out.Configs))
+			out.Configs = append(out.Configs, s.Configs[g.lo:g.hi]...)
+		}
+	}
+	out.BeginIJK = len(out.Configs)
+	for _, g := range ijk {
+		ok, err := whole(g)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out.IJK = append(out.IJK, len(out.Configs))
+			out.Configs = append(out.Configs, s.Configs[g.lo:g.hi]...)
+		}
+	}
+	if len(out.Configs) != len(rows) {
+		return nil, fmt.Errorf("dip: Restrict kept %d rows, %d requested", len(out.Configs), len(rows))
+	}
+	return out, nil
 }

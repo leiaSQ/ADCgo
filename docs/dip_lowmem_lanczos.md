@@ -9,7 +9,7 @@ the original analysis (still the correct explanation of the gap) and the
 record what shipped and what the work discovered.
 
 Written 2026-07 while splitting the production pipeline into DIP=Davidson /
-SIP=Lanczos (see `scripts/HELIX.md`). The immediate production DIP runs use
+SIP=Lanczos (see `scripts/helix/HELIX.md`). The immediate production DIP runs use
 block-Davidson (lowest `-nroots` roots); the low-memory solver is for whoever
 wants the *whole* double-ionization band.
 

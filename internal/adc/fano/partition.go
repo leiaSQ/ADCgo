@@ -2,6 +2,8 @@ package fano
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
@@ -27,6 +29,9 @@ type Partition struct {
 	QMain, QSat int
 
 	sel Selector
+
+	// census[c] counts (Q, P) configurations of hole count c, for the run log.
+	census map[int][2]int
 }
 
 // NewPartition classifies every row of sp with sel.
@@ -36,27 +41,62 @@ type Partition struct {
 // itself is cheap, but the row count is the matrix dimension — 10^6 and up for the
 // sectors ADC(2,2) is built for — and a serial pass over it with a per-row Holes call
 // is not free.
+//
+// A ConfigSelector (net-charge rules) is evaluated on holes and particles and needs a
+// ParticleSpace; handing it a hole-only space is a programming error and panics. Every
+// other Selector takes the hole-only path, unchanged.
 func NewPartition(sp Space, sel Selector) *Partition {
 	n := sp.Size()
 	main := sp.MainBlockSize()
+	cs, byConfig := sel.(ConfigSelector)
+	var psp ParticleSpace
+	if byConfig {
+		var ok bool
+		if psp, ok = sp.(ParticleSpace); !ok {
+			panic(fmt.Sprintf("fano: selector %s needs particles, but the space (%T) "+
+				"does not provide them", sel, sp))
+		}
+	}
 	W := parallel.ChunkWorkers(n)
 	qs := make([][]int32, W)
 	ps := make([][]int32, W)
+	cens := make([]map[int][2]int, W)
 	parallel.Chunks(n, W, func(w, lo, hi int) {
-		holes := make([]int, 0, 3)
+		holes := make([]int, 0, 8)
+		parts := make([]int, 0, 2)
 		q := make([]int32, 0, (hi-lo)/8+1)
 		p := make([]int32, 0, hi-lo)
+		cen := map[int][2]int{}
 		for r := lo; r < hi; r++ {
-			if sel.Bound(sp.Holes(r, holes[:0])) {
+			holes = sp.Holes(r, holes[:0])
+			var bound bool
+			if byConfig {
+				parts = psp.Particles(r, parts[:0])
+				bound = cs.BoundConfig(holes, parts)
+			} else {
+				bound = sel.Bound(holes)
+			}
+			c := cen[len(holes)]
+			if bound {
 				q = append(q, int32(r))
+				c[0]++
 			} else {
 				p = append(p, int32(r))
+				c[1]++
 			}
+			cen[len(holes)] = c
 		}
 		qs[w], ps[w] = q, p
+		cens[w] = cen
 	})
 
-	pt := &Partition{sel: sel}
+	pt := &Partition{sel: sel, census: map[int][2]int{}}
+	for _, cen := range cens {
+		for c, v := range cen {
+			t := pt.census[c]
+			pt.census[c] = [2]int{t[0] + v[0], t[1] + v[1]}
+		}
+	}
 	nq, np := 0, 0
 	for w := range W {
 		nq += len(qs[w])
@@ -179,6 +219,29 @@ func (p *Partition) GatherQ(full []float64, out []float64) []float64 {
 		out[i] = full[r]
 	}
 	return out
+}
+
+// Census returns the (Q, P) configuration counts per hole count.
+func (p *Partition) Census() map[int][2]int {
+	out := make(map[int][2]int, len(p.census))
+	for k, v := range p.census {
+		out[k] = v
+	}
+	return out
+}
+
+// CensusString formats Census for the run log, classes in ascending hole count.
+func (p *Partition) CensusString() string {
+	keys := make([]int, 0, len(p.census))
+	for k := range p.census {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = fmt.Sprintf("%dh: Q=%d P=%d", k, p.census[k][0], p.census[k][1])
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Selector returns the criterion this partition was built with.

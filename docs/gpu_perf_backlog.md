@@ -96,7 +96,7 @@ default in the build script, silenced with `PTXAS_VERBOSE=0`.
 | no pinned host memory anywhere | `backend/cuda.go:193-199,225-227` | prerequisite for any async-transfer work |
 | SIP has no pre-flight guard | `cmd/adcgo/sip_tdm.go:85-144` | `checkDeviceFit` is generic (`dispatch.go:130-150`) but never called; `pickLanczos`'s own check is skipped whenever a backend is pinned (`dispatch.go:101-107`) — i.e. always, in production. Oversized sectors hit a raw `cudaMalloc` panic |
 | Ritz back-transform does `dim` separate small downloads | `lanczos/lanczos.go:502-509` | one bulk transfer instead |
-| register spilling never measured | `scripts/build_adcgo_cuda_helix` | no `-Xptxas -v`; `d[9]` (`adc2dip_kernels.cu:208`) and `vint[31]` (`adc4_kernels.cu:44`) are plausible spillers |
+| register spilling never measured | `scripts/helix/build_adcgo_cuda_helix` | no `-Xptxas -v`; `d[9]` (`adc2dip_kernels.cu:208`) and `vint[31]` (`adc4_kernels.cu:44`) are plausible spillers |
 
 ## Tier 3 — structural
 
@@ -125,7 +125,7 @@ the validation job above has run.
 
 ## Order of attack
 
-1. ~~Submit `scripts/test_jii_contraction_gpu.sbatch`~~ — done, passed (see above). Instead: re-run
+1. ~~Submit `scripts/gpu/test_jii_contraction_gpu.sbatch`~~ — done, passed (see above). Instead: re-run
    the timing job pinned to H200 (`--gres=gpu:H200:4`), since every number so far is from A40.
 2. Tier 1 #1–#4 — all small, independent, and pattern-copied from code already in the repo.
 3. `-Xptxas -v` plus an Nsight trace on the *current* path before anything in Tier 3.

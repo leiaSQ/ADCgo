@@ -3,7 +3,7 @@
 // (Tarantelli U-transform) needs the MO coefficients C and the AO overlap S, and
 // the AO→atom map to define atomic groups. It also carries no dipole integrals and
 // no geometry, which the transition-moment machinery needs. The sidecar is written
-// by scripts/fcidump_common.py.
+// by scripts/fcidump/fcidump_common.py.
 //
 // The dipole and geometry keys are optional: sidecars written before they existed
 // still load, with HasDipole false.
@@ -40,6 +40,42 @@ type Data struct {
 	// reproduces it only when C spans every occupied orbital — not for a frozen-core
 	// active space.
 	SCFDip [3]float64
+
+	// Orbital labels (scripts/fcidump/orbitals.py). HasLabels reports whether the
+	// group was present; it arrives all-or-none like the dipole keys.
+	//
+	// OrbKind[m] classifies MO m as occupied, compact virtual (assigned to an atom) or
+	// free virtual (the diffuse/ghost complement). OrbAtom[m] is the owning atom for
+	// occupied and compact MOs, as an index into AtomNames, and -1 for free ones.
+	// GhostAtom[a] marks basis-only centres, which never own an orbital. Canonical is
+	// false when the MOs were rotated away from the canonical HF orbitals, in which
+	// case the FCIDUMP's Fock matrix is not diagonal and anything that rebuilds
+	// orbital energies from its diagonal (mp.OrbitalEnergies) must not be used.
+	HasLabels bool
+	OrbKind   []OrbKind
+	OrbAtom   []int
+	GhostAtom []bool
+	Canonical bool
+}
+
+// OrbKind classifies a molecular orbital of a labelled sidecar.
+type OrbKind uint8
+
+const (
+	OrbOcc OrbKind = iota
+	OrbCompact
+	OrbFree
+)
+
+func (k OrbKind) String() string {
+	switch k {
+	case OrbOcc:
+		return "occ"
+	case OrbCompact:
+		return "compact"
+	default:
+		return "free"
+	}
 }
 
 type sidecar struct {
@@ -55,6 +91,11 @@ type sidecar struct {
 	AtomCoords  [][]float64   `json:"atom_coords"`
 	AtomCharges []float64     `json:"atom_charges"`
 	SCFDip      []float64     `json:"scf_dip"`
+
+	OrbKind   []string `json:"orb_kind"`
+	OrbAtom   []int    `json:"orb_atom"`
+	GhostAtom []bool   `json:"ghost_atoms"`
+	Canonical *bool    `json:"canonical"`
 }
 
 // ReadFile parses the sidecar JSON at path.
@@ -101,11 +142,105 @@ func ReadFile(path string) (*Data, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &Data{NAO: s.NAO, NMO: s.NMO, C: c, S: sm, AOAtom: s.AOAtom, AtomNames: s.AtomNames}
+	d := &Data{NAO: s.NAO, NMO: s.NMO, C: c, S: sm, AOAtom: s.AOAtom, AtomNames: s.AtomNames,
+		Canonical: true}
 	if err := d.readDipole(&s, flat); err != nil {
 		return nil, err
 	}
+	if err := d.readLabels(&s); err != nil {
+		return nil, err
+	}
 	return d, nil
+}
+
+// readLabels decodes the optional orbital-label group (orb_kind, orb_atom,
+// ghost_atoms, canonical). Like the dipole keys it is all or none, and every label is
+// validated against the dimensions: a label that points at a ghost or past the atom
+// list would otherwise surface much later as a wrong Q/P partition.
+func (d *Data) readLabels(s *sidecar) error {
+	present := 0
+	for _, ok := range []bool{s.OrbKind != nil, s.OrbAtom != nil, s.GhostAtom != nil, s.Canonical != nil} {
+		if ok {
+			present++
+		}
+	}
+	if present == 0 {
+		return nil
+	}
+	if present != 4 {
+		return fmt.Errorf("mo: sidecar has %d of the 4 orbital-label keys "+
+			"(orb_kind, orb_atom, ghost_atoms, canonical); it must have all or none", present)
+	}
+	if len(s.OrbKind) != d.NMO || len(s.OrbAtom) != d.NMO {
+		return fmt.Errorf("mo: orb_kind/orb_atom have %d/%d entries, want nmo=%d",
+			len(s.OrbKind), len(s.OrbAtom), d.NMO)
+	}
+	if len(s.GhostAtom) != len(d.AtomNames) {
+		return fmt.Errorf("mo: ghost_atoms has %d entries for %d atoms", len(s.GhostAtom), len(d.AtomNames))
+	}
+	d.OrbKind = make([]OrbKind, d.NMO)
+	seenVirt := false
+	for m, k := range s.OrbKind {
+		switch k {
+		case "occ":
+			if seenVirt {
+				return fmt.Errorf("mo: occupied MO %d after a virtual one", m)
+			}
+			d.OrbKind[m] = OrbOcc
+		case "compact":
+			d.OrbKind[m] = OrbCompact
+			seenVirt = true
+		case "free":
+			d.OrbKind[m] = OrbFree
+			seenVirt = true
+		default:
+			return fmt.Errorf("mo: orb_kind[%d] = %q, want occ, compact or free", m, k)
+		}
+		a := s.OrbAtom[m]
+		if d.OrbKind[m] == OrbFree {
+			if a != -1 {
+				return fmt.Errorf("mo: free MO %d is labelled with atom %d", m, a)
+			}
+			continue
+		}
+		if a < 0 || a >= len(d.AtomNames) {
+			return fmt.Errorf("mo: MO %d has atom %d outside 0..%d", m, a, len(d.AtomNames)-1)
+		}
+		if s.GhostAtom[a] {
+			return fmt.Errorf("mo: MO %d is assigned to ghost centre %s", m, d.AtomNames[a])
+		}
+	}
+	d.OrbAtom = s.OrbAtom
+	d.GhostAtom = s.GhostAtom
+	d.Canonical = *s.Canonical
+	d.HasLabels = true
+	return nil
+}
+
+// ReadCanonical is ReadFile for the ADC drivers: it refuses a sidecar that declares
+// its orbitals non-canonical (a localized-orbital dump). Every ADC path reads
+// orbital energies off the Fock diagonal and simplifies with a diagonal Fock matrix,
+// which such a dump violates by O(0.1) Eh; those dumps are for the khci engine.
+// Sidecars without the label group (every other dump) load exactly as before.
+func ReadCanonical(path string) (*Data, error) {
+	d, err := ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if d.HasLabels && !d.Canonical {
+		return nil, fmt.Errorf("mo: %s declares canonical=false (a localized-orbital dump); "+
+			"the ADC drivers need canonical HF orbitals", path)
+	}
+	return d, nil
+}
+
+// NOccLabelled is the number of MOs labelled occupied (they come first).
+func (d *Data) NOccLabelled() int {
+	n := 0
+	for n < len(d.OrbKind) && d.OrbKind[n] == OrbOcc {
+		n++
+	}
+	return n
 }
 
 // readDipole decodes the optional dipole/geometry keys. They arrive as a set: a

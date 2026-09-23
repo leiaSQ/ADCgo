@@ -57,6 +57,11 @@ type Filter struct {
 	EMax      float64 // keep states with eps < EMax (hartree); 0 or negative = no ceiling
 	MinWeight float64 // keep states with decay-class weight > MinWeight
 	MinGamma  float64 // keep states with gamma > MinGamma (hartree squared)
+	// MinGammaRel keeps states with gamma > MinGammaRel * max_i gamma_i; 0 (the default)
+	// or negative is off. Relative, so it scales with the coupling as the width does:
+	// an absolute floor deletes a width of ~1e-15 Eh (gamma_i ~ 1e-17 Eh^2) whole.
+	// Where both are set the larger threshold applies.
+	MinGammaRel float64
 }
 
 func (f Filter) withDefaults() Filter {
@@ -104,6 +109,11 @@ type Pseudo struct {
 	// mode the reference's hard-coded constants can hide.
 	DroppedEnergy, DroppedWeight, DroppedGamma int
 	LostGamma                                  float64
+	// LostEnergy / LostWeight / LostToGamma split LostGamma by the cut that removed it.
+	LostEnergy, LostWeight, LostToGamma float64
+	// GammaThreshold is the gamma cut actually applied (the larger of the absolute and
+	// relative floors).
+	GammaThreshold float64
 
 	// DecayHoles is the hole count of P's LOWEST decay class (2 for single ionization,
 	// 3 for double) and DecayRows the number of rows the weight was summed over — every
@@ -180,18 +190,30 @@ func Widths(psp Space, res lanczos.Result, g []float64, f Filter) (*Pseudo, erro
 	ps := &Pseudo{SumRule: SumRule(g), DecayHoles: decayHoles, DecayRows: len(decayRows),
 		ClassRows: classRows}
 	// The cuts, in the reference's order and with its comparisons: eps < EMax,
-	// weight > MinWeight, gamma > MinGamma.
+	// weight > MinWeight, gamma > MinGamma (or its relative form).
+	gcut := f.MinGamma
+	if f.MinGammaRel > 0 {
+		var gmax float64
+		for j := range nr {
+			gmax = max(gmax, gamma[j])
+		}
+		gcut = max(gcut, f.MinGammaRel*gmax)
+	}
+	ps.GammaThreshold = gcut
 	for j := range nr {
 		switch {
 		case !(res.Values[j] < f.EMax):
 			ps.DroppedEnergy++
 			ps.LostGamma += gamma[j]
+			ps.LostEnergy += gamma[j]
 		case !(weight[j] > f.MinWeight):
 			ps.DroppedWeight++
 			ps.LostGamma += gamma[j]
-		case !(gamma[j] > f.MinGamma):
+			ps.LostWeight += gamma[j]
+		case !(gamma[j] > gcut):
 			ps.DroppedGamma++
 			ps.LostGamma += gamma[j]
+			ps.LostToGamma += gamma[j]
 		default:
 			ps.Energy = append(ps.Energy, res.Values[j])
 			ps.Gamma = append(ps.Gamma, gamma[j])

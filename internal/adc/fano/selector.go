@@ -423,34 +423,15 @@ func ParseClassRule(spec, label string) (*ClassRule, error) {
 			if tm == "" {
 				return nil, fmt.Errorf("fano: empty term in clause %q", cl)
 			}
-			fields := strings.Split(tm, ":")
-			if len(fields) < 2 || len(fields) > 3 {
-				return nil, fmt.Errorf("fano: term %q wants orbitals:min[:max]", tm)
+			if isConfigTerm(tm) {
+				return nil, fmt.Errorf("fano: term %q needs particles and an atom map; "+
+					"parse the rule with ParseConfigRule", tm)
 			}
-			class := 0
-			orbSpec := fields[0]
-			if c, rest, hasClass := strings.Cut(fields[0], "/"); hasClass {
-				n, err := strconv.Atoi(strings.TrimSpace(c))
-				if err != nil {
-					return nil, fmt.Errorf("fano: bad excitation class %q in term %q", c, tm)
-				}
-				class, orbSpec = n, rest
-			}
-			set, err := parseOrbSet(orbSpec)
+			t, err := parseHoleTerm(tm)
 			if err != nil {
-				return nil, fmt.Errorf("fano: term %q: %w", tm, err)
+				return nil, err
 			}
-			min, err := strconv.Atoi(strings.TrimSpace(fields[1]))
-			if err != nil {
-				return nil, fmt.Errorf("fano: bad min %q in term %q", fields[1], tm)
-			}
-			max := -1
-			if len(fields) == 3 {
-				if max, err = strconv.Atoi(strings.TrimSpace(fields[2])); err != nil {
-					return nil, fmt.Errorf("fano: bad max %q in term %q", fields[2], tm)
-				}
-			}
-			clause = append(clause, Term{Class: class, Set: set, Min: min, Max: max})
+			clause = append(clause, t)
 		}
 		switch strings.ToLower(strings.TrimSpace(kind)) {
 		case "q":
@@ -467,4 +448,47 @@ func ParseClassRule(spec, label string) (*ClassRule, error) {
 	}
 	r.spec = spec
 	return r, nil
+}
+
+// splitClass strips an optional "class/" prefix from a term.
+func splitClass(tm string) (int, string, error) {
+	c, rest, has := strings.Cut(tm, "/")
+	if !has {
+		return 0, tm, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(c))
+	if err != nil {
+		return 0, "", fmt.Errorf("fano: bad excitation class %q in term %q", c, tm)
+	}
+	if n < 0 {
+		return 0, "", fmt.Errorf("fano: negative excitation class %d in term %q", n, tm)
+	}
+	return n, strings.TrimSpace(rest), nil
+}
+
+// parseHoleTerm reads one hole-count term, [class/]orbitals:min[:max].
+func parseHoleTerm(tm string) (Term, error) {
+	fields := strings.Split(tm, ":")
+	if len(fields) < 2 || len(fields) > 3 {
+		return Term{}, fmt.Errorf("fano: term %q wants orbitals:min[:max]", tm)
+	}
+	class, orbSpec, err := splitClass(fields[0])
+	if err != nil {
+		return Term{}, err
+	}
+	set, err := parseOrbSet(orbSpec)
+	if err != nil {
+		return Term{}, fmt.Errorf("fano: term %q: %w", tm, err)
+	}
+	min, err := strconv.Atoi(strings.TrimSpace(fields[1]))
+	if err != nil {
+		return Term{}, fmt.Errorf("fano: bad min %q in term %q", fields[1], tm)
+	}
+	max := -1
+	if len(fields) == 3 {
+		if max, err = strconv.Atoi(strings.TrimSpace(fields[2])); err != nil {
+			return Term{}, fmt.Errorf("fano: bad max %q in term %q", fields[2], tm)
+		}
+	}
+	return Term{Class: class, Set: set, Min: min, Max: max}, nil
 }

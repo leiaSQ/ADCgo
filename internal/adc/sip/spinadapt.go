@@ -1,5 +1,7 @@
 package sip
 
+import "fmt"
+
 // spinadapt.go — expansion of a spin-adapted ADC configuration over the
 // *primitive* spin-orbital configurations of Eq. (9) of Kolorenč/Averbukh,
 // J. Chem. Phys. 152, 214107 (2020), in which Appendix A2-A22 is written.
@@ -276,4 +278,50 @@ func (e *elements) expandDet3(cfg Config3) []detTerm {
 		out = append(out, detTerm{E: mkExc(holes, parts), C: row[d]})
 	}
 	return out
+}
+
+// DetTerm is one canonical spin-orbital determinant of a spin-adapted row and its
+// weight. Holes are occupied spin orbitals and Parts virtual ones, both ascending and
+// both ABSOLUTE canonical indices 2*orbital (+1 for beta), the sorb.Idx convention.
+type DetTerm struct {
+	Holes, Parts []int
+	Coef         float64
+}
+
+// DetExpansion expands row r of an ADC(2)/(3) or ADC(2,2) space over canonical
+// spin-orbital determinants: the spin-adapted row is sum_d Coef_d |D_d>, where |D_d>
+// creates its occupied spin orbitals in ascending order. It is the same expansion the
+// Slater-Condon blocks are built from (expandDet2/expandDet3), exported so that an
+// independent derivation (internal/adc/isrgen) can be compared element by element.
+//
+// The 1h row |j> is the operator string c_(j,beta)|Phi0>, which is -1 times the
+// M_s = +1/2 determinant with the beta electron of j removed, so its weight is -1.
+// That is the phase the 1h/2h1p coupling (c12_1, c12_2) is written in; the 1h/1h
+// block cannot see it. isrgen/ip TestADC22ElementsMatchSip measured it: with weight +1
+// every 1h/2h1p element comes out with the opposite sign and nothing else changes.
+// The CVS ADC(4) 3h2p space uses another spin-function construction and is refused.
+func (s *Space) DetExpansion(r int) ([]DetTerm, error) {
+	if s.adc4 {
+		return nil, fmt.Errorf("sip: DetExpansion is defined for ADC(2)/(3)/(2,2) spaces, not the CVS ADC(4) space")
+	}
+	if r < 0 || r >= s.Size() {
+		return nil, fmt.Errorf("sip: row %d outside the space (size %d)", r, s.Size())
+	}
+	conv := func(ts []detTerm) []DetTerm {
+		out := make([]DetTerm, len(ts))
+		for i, t := range ts {
+			out[i] = DetTerm{Holes: t.E.H, Parts: t.E.P, Coef: t.C}
+		}
+		return out
+	}
+	e := &elements{sp: s, nocc: s.Nocc, norb: s.Norb}
+	switch {
+	case r < s.BeginSat:
+		j := s.Configs[r].Occ[0]
+		return []DetTerm{{Holes: []int{sorb{Orb: j, Dn: true}.Idx()}, Coef: -1}}, nil
+	case r < len(s.Configs):
+		return conv(e.expandDet2(s.Configs[r])), nil
+	default:
+		return conv(e.expandDet3(s.Sat3[r-len(s.Configs)])), nil
+	}
 }

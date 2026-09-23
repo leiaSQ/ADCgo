@@ -141,5 +141,5 @@ CUDA transcription. Build the kernels before any `-tags cuda` run — `cuda_kern
 **both** `adc4_kernels.o` and `adc2dip_kernels.o`, and omitting either fails the link:
 
 ```
-scripts/build_adcgo_cuda_helix     # nvcc both .cu, then go build -tags cuda
+scripts/helix/build_adcgo_cuda_helix     # nvcc both .cu, then go build -tags cuda
 ```

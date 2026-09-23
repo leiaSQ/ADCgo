@@ -2,7 +2,7 @@ package sip
 
 // coeff4.go — spin-coupling coefficient tables for CVS IP-ADC(4), transcribed
 // verbatim from the reference INIT0_core/INIT1_core/INIT2_core
-// (../ADC/adc4core/adc4_constr/init{0,1,2}.F) by scripts/gen_coeff4.py. Do not
+// (../ADC/adc4core/adc4_constr/init{0,1,2}.F) by scripts/codegen/gen_coeff4.py. Do not
 // edit by hand; regenerate. See docs/adc4_sip_spec.md §6.
 //
 //   coeff0: /DREI/  VECTOR(13,36)     — KOPP4 (1h<->3h2p direct coupling)

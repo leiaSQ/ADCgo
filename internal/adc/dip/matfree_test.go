@@ -398,3 +398,82 @@ func assertClose(t *testing.T, spin Spin, sym int, what string, want, got []floa
 		t.Errorf("spin=%v sym=%d %s: relative diff %.3e (want <= 1e-10)", spin, sym, what, rel)
 	}
 }
+
+// TestRestrictIsSubBlock: a space restricted by a hole predicate (the Fano scheme A
+// partition) assembles exactly the parent's sub-block, dense and with the satellite region
+// matrix-free, for both halves of the partition; and a restriction that splits a 3h1p group
+// is refused, since the operator builds each group as one panel.
+func TestRestrictIsSubBlock(t *testing.T) {
+	h2oSectors(t, func(spin Spin, sym int, sp *Space, ints *integrals.Store, eps []float64, be backend.Backend) {
+		full := New(sp, ints, eps, be).BuildMatrix()
+		var q, p []int
+		for r := range sp.Size() {
+			has := false
+			for _, h := range sp.Holes(r, nil) {
+				has = has || h == 1
+			}
+			if has {
+				q = append(q, r)
+			} else {
+				p = append(p, r)
+			}
+		}
+		for _, rows := range [][]int{q, p} {
+			sub, err := sp.Restrict(rows)
+			if err != nil {
+				t.Fatalf("spin=%v sym=%d: %v", spin, sym, err)
+			}
+			for i, r := range rows {
+				if got, want := sub.Holes(i, nil), sp.Holes(r, nil); fmt.Sprint(got) != fmt.Sprint(want) {
+					t.Fatalf("spin=%v sym=%d: restricted row %d holes %v, parent row %d %v", spin, sym, i, got, r, want)
+				}
+			}
+			S := New(sub, ints, eps, be).BuildMatrix()
+			for i, r := range rows {
+				for j, c := range rows {
+					if S.At(i, j) != full.At(r, c) {
+						t.Fatalf("spin=%v sym=%d: restricted (%d,%d)=%g, parent (%d,%d)=%g",
+							spin, sym, i, j, S.At(i, j), r, c, full.At(r, c))
+					}
+				}
+			}
+			if sub.Size() == sub.MainBlockSize() {
+				continue
+			}
+			free := New(sub, ints, eps, be)
+			free.SetMatFree(matfree.On, 0)
+			n := sub.Size()
+			x := make([]float64, n)
+			rng := rand.New(rand.NewSource(int64(n)))
+			for i := range x {
+				x[i] = rng.NormFloat64()
+			}
+			y := be.Alloc(n)
+			free.ApplyFull(y, be.Upload(x))
+			yh := be.Download(y)
+			var worst float64
+			for i := range n {
+				var s float64
+				for j := range n {
+					s += S.At(i, j) * x[j]
+				}
+				worst = max(worst, math.Abs(yh[i]-s))
+			}
+			free.Release()
+			if worst > 1e-11 {
+				t.Errorf("spin=%v sym=%d: matrix-free restricted apply differs from the sub-block by %.2e", spin, sym, worst)
+			}
+		}
+		if len(sp.JII) > 0 {
+			var split []int
+			for r := range sp.Size() {
+				if r != sp.JII[0] {
+					split = append(split, r)
+				}
+			}
+			if _, err := sp.Restrict(split); err == nil {
+				t.Errorf("spin=%v sym=%d: a restriction splitting a 3h1p group was accepted", spin, sym)
+			}
+		}
+	})
+}

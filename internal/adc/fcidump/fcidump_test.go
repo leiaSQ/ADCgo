@@ -367,3 +367,71 @@ func TestReadSingleWorker(t *testing.T) {
 	}
 	assertSameData(t, "h2o.fcidump (GOMAXPROCS=1)", got, readSerial(t, path))
 }
+
+// TestScaleTransfer: the lock-in scaling multiplies h_pq by lambda for a pair of
+// groups, (pq|rs) by lambda per such distribution (lambda^2 for two), leaves everything
+// else bit for bit, keeps the 8-fold symmetry, and does not touch the original through
+// a Clone.
+func TestScaleTransfer(t *testing.T) {
+	d, err := ReadFile("../../../testdata/khci/he3_ghost.fcidump")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := d.NORB
+	// He3 labels (he3_ghost.mo.json orb_atom): occupied 0,1,2 and compact 3,4,5 on atoms
+	// 0,1,2; free 6,7,8 on none
+	group := []int{0, 1, 2, 0, 1, 2, -1, -1, -1}
+	if len(group) != n {
+		t.Fatalf("fixture has %d orbitals", n)
+	}
+	const lam = 0.37
+	s := d.Clone()
+	if err := s.ScaleTransfer(group, 0, 1, lam); err != nil {
+		t.Fatal(err)
+	}
+	pair := func(p, q int) bool {
+		return (group[p] == 0 && group[q] == 1) || (group[p] == 1 && group[q] == 0)
+	}
+	fac := func(p, q int) float64 {
+		if pair(p, q) {
+			return lam
+		}
+		return 1
+	}
+	for p := range n {
+		for q := range n {
+			if want := d.OneE(p, q) * fac(p, q); s.OneE(p, q) != want {
+				t.Fatalf("h_%d%d = %g, want %g", p, q, s.OneE(p, q), want)
+			}
+			for r := range n {
+				for u := range n {
+					want := d.TwoE(p, q, r, u) * (fac(p, q) * fac(r, u))
+					got := s.TwoE(p, q, r, u)
+					if got != want {
+						t.Fatalf("(%d%d|%d%d) = %g, want %g", p, q, r, u, got, want)
+					}
+					if got != s.TwoE(q, p, r, u) || got != s.TwoE(r, u, p, q) || got != s.TwoE(p, q, u, r) {
+						t.Fatalf("(%d%d|%d%d): permutational symmetry broken", p, q, r, u)
+					}
+				}
+			}
+		}
+	}
+	if d.TwoE(0, 1, 0, 1) == s.TwoE(0, 1, 0, 1) {
+		t.Error("the transfer exchange (01|01) was not scaled (or the Clone shares storage)")
+	}
+	one := d.Clone()
+	if err := one.ScaleTransfer(group, 0, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	for p := range n {
+		for q := range n {
+			if one.OneE(p, q) != d.OneE(p, q) {
+				t.Fatal("lambda = 1 changed an integral")
+			}
+		}
+	}
+	if err := s.ScaleTransfer(group, 1, 1, 0); err == nil {
+		t.Error("a pair of identical groups was accepted")
+	}
+}

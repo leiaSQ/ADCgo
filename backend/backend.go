@@ -3,7 +3,7 @@
 // themselves purely as calls into a Backend operating on backend-owned handles,
 // so a GPU (hipBLAS/cuBLAS) implementation can keep vectors and the assembled
 // operator resident on the device across Lanczos iterations without touching the
-// solver (see ADCgo_plan.md, milestone M3).
+// solver.
 //
 // DIP-ADC(2) is a real-symmetric secular problem, so the interface is real
 // (float64) throughout — the reference theADCcode uses only d-prefix BLAS. All

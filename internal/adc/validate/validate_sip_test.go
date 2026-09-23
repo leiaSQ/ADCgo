@@ -1,6 +1,6 @@
 // SIP cross-validation: ADCgo's IP-ADC(2)/(3) vs pyscf's IP-ADC on *matched*
 // integrals (both read the same H2O/cc-pVDZ MO integrals — ADCgo from
-// testdata/h2o.fcidump, pyscf from the identical mol in scripts/gen_sip_ref.py),
+// testdata/h2o.fcidump, pyscf from the identical mol in scripts/fixtures/gen_sip_ref.py),
 // so any residual is ADC method, not basis.
 //
 // Finding, encoded in the tolerances: the 2h1p satellite roots and the

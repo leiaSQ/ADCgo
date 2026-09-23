@@ -14,7 +14,7 @@ import (
 // σ-build, the term that is ~96.6% of DIP solver wall time.
 //
 // WHY THIS EXISTS. Until now the only per-mat-vec timing signal was a cluster job (job 14015067,
-// scripts/uracil2W_mgpu_timing.sbatch), i.e. hours of queue per data point. That job measured the
+// scripts/gpu/uracil2W_mgpu_timing.sbatch), i.e. hours of queue per data point. That job measured the
 // satellite apply at 0.196 TFLOP/s per H200 = 0.58% of fp64 vector peak — even after the
 // per-device NVLink rewrite that was itself 12.6× faster than its predecessor. The contraction
 // work planned on the back of that number (docs/sigma_build_contractions.md) needs a signal that

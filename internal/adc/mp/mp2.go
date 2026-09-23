@@ -5,6 +5,8 @@
 package mp
 
 import (
+	"fmt"
+
 	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
 	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
@@ -30,6 +32,61 @@ func OrbitalEnergies(d *fcidump.Data, nocc int) []float64 {
 		eps[p] = e
 	}
 	return eps
+}
+
+// MaxFockOffDiagonal is the largest |f_pq|, p != q, of the Fock matrix rebuilt from
+// the FCIDUMP, f_pq = h_pq + Σ_{i∈occ} [ 2 (pq|ii) − (pi|iq) ]. It is ~ the SCF
+// gradient (1e-9) for canonical HF orbitals and O(0.1) Eh for a rotated basis such as
+// localized orbitals (scripts/fcidump/orbitals.py), where the diagonal
+// OrbitalEnergies returns is NOT a set of orbital energies. Parallel over rows.
+func MaxFockOffDiagonal(d *fcidump.Data, nocc int) float64 {
+	n := d.NORB
+	W := parallel.ChunkWorkers(n)
+	worst := make([]float64, W)
+	parallel.Chunks(n, W, func(w, lo, hi int) {
+		for p := lo; p < hi; p++ {
+			for q := 0; q < n; q++ {
+				if q == p {
+					continue
+				}
+				f := d.OneE(p, q)
+				for i := 0; i < nocc; i++ {
+					f += 2*d.TwoE(p, q, i, i) - d.TwoE(p, i, i, q)
+				}
+				if f < 0 {
+					f = -f
+				}
+				if f > worst[w] {
+					worst[w] = f
+				}
+			}
+		}
+	})
+	var m float64
+	for _, x := range worst {
+		m = max(m, x)
+	}
+	return m
+}
+
+// CanonicalTol is the largest off-diagonal Fock element RequireCanonical accepts:
+// four orders above a converged SCF (conv_tol_grad 1e-9), four below a rotated basis.
+const CanonicalTol = 1e-5
+
+// RequireCanonical errors when the FCIDUMP's orbitals are not canonical HF orbitals.
+//
+// It is a diagnostic, deliberately not called by OrbitalEnergies or the drivers: the
+// theADCcode matched-integral tape (testdata/reference/h2o_dzp.matched.fcidump) has
+// off-diagonal Fock elements up to 1.03 Eh by construction and is used
+// semi-canonically, diagonal only, by bit-exact gates. The drivers instead refuse a
+// dump whose MO sidecar declares canonical=false (mo.ReadCanonical).
+func RequireCanonical(d *fcidump.Data, nocc int) error {
+	if m := MaxFockOffDiagonal(d, nocc); m > CanonicalTol {
+		return fmt.Errorf("mp: the FCIDUMP orbitals are not canonical (max |f_pq|, p != q, "+
+			"= %.3e Eh > %.0e): orbital energies cannot be read off the Fock diagonal. A "+
+			"localized-orbital dump (&orbitals localized) is for the khci engine, not for ADC", m, CanonicalTol)
+	}
+	return nil
 }
 
 // mp2Chunks is the number of static (i,j) ranges MP2Corr reduces over.

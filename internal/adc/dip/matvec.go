@@ -323,6 +323,9 @@ func (mx *Matrix) MainBlockSize() int { return mx.sp.MainBlockSize() }
 // Space returns the underlying configuration space.
 func (mx *Matrix) Space() *Space { return mx.sp }
 
+// Backend returns the backend the operator lives on.
+func (mx *Matrix) Backend() backend.Backend { return mx.be }
+
 // Diagonal returns the resident diagonal of the secular matrix, assembled directly from
 // the block element functions rather than from BuildMatrix. Only the block-diagonal
 // blocks contribute — the 2h/2h main block and each 3h1p group's self-block (jiiLKK /

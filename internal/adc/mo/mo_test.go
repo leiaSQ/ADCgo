@@ -152,3 +152,67 @@ func TestFrozenCoreSidecarLoads(t *testing.T) {
 		t.Errorf("%d atom charges but %d atom names", len(d.AtomCharges), len(d.AtomNames))
 	}
 }
+
+// TestLabelledSidecar: the orbital-label group of a localized-orbital dump
+// (testdata/khci/he3_ghost.in via scripts/fcidump/dump_fcidump.py) loads, is consistent, and
+// the rotated MOs are orthonormal.
+func TestLabelledSidecar(t *testing.T) {
+	d := load(t, filepath.Join("khci", "he3_ghost.mo.json"))
+	if !d.HasLabels || d.Canonical {
+		t.Fatalf("HasLabels=%v Canonical=%v, want true/false", d.HasLabels, d.Canonical)
+	}
+	if n := d.NOccLabelled(); n != 3 {
+		t.Fatalf("%d occupied labels, want 3", n)
+	}
+	ghosts := 0
+	for a, g := range d.GhostAtom {
+		if g {
+			ghosts++
+			if d.AtomNames[a] != "GT" && d.AtomNames[a] != "GOFF" {
+				t.Errorf("ghost %d named %q", a, d.AtomNames[a])
+			}
+		}
+	}
+	if ghosts != 2 {
+		t.Errorf("%d ghost centres, want 2", ghosts)
+	}
+	for m, k := range d.OrbKind {
+		if (k == OrbFree) != (d.OrbAtom[m] == -1) {
+			t.Errorf("MO %d kind %v with atom %d", m, k, d.OrbAtom[m])
+		}
+	}
+	// C^T S C = 1 for the rotated basis
+	var worst float64
+	for p := range d.NMO {
+		for q := range d.NMO {
+			var v float64
+			for i := range d.NAO {
+				for j := range d.NAO {
+					v += d.C.At(i, p) * d.S.At(i, j) * d.C.At(j, q)
+				}
+			}
+			if p == q {
+				v--
+			}
+			worst = max(worst, math.Abs(v))
+		}
+	}
+	if worst > 1e-10 {
+		t.Errorf("rotated MOs not orthonormal: %g", worst)
+	}
+}
+
+// TestReadFilePartialLabelsIsError: the label group is all or none.
+func TestReadFilePartialLabelsIsError(t *testing.T) {
+	doc := legacyDoc()
+	doc["orb_kind"] = []string{"occ"}
+	if _, err := ReadFile(writeJSON(t, doc)); err == nil {
+		t.Fatal("a sidecar with 1 of the 4 label keys loaded")
+	}
+	doc["orb_atom"] = []int{0}
+	doc["ghost_atoms"] = []bool{true}
+	doc["canonical"] = false
+	if _, err := ReadFile(writeJSON(t, doc)); err == nil {
+		t.Fatal("an occupied orbital assigned to a ghost loaded")
+	}
+}

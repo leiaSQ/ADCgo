@@ -23,6 +23,8 @@ import (
 	"sync/atomic"
 	"unicode/utf8"
 	"unsafe"
+
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // Data holds the parsed MO-basis integrals and metadata.
@@ -54,6 +56,60 @@ func (d *Data) TwoE(p, q, r, s int) float64 {
 
 var headerIntRe = func(key string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)\b` + key + `\s*=\s*(-?\d+)`)
+}
+
+// Clone returns a deep copy, for a caller that modifies integrals (ScaleTransfer)
+// while keeping the original.
+func (d *Data) Clone() *Data {
+	c := *d
+	c.OrbSym = append([]int(nil), d.OrbSym...)
+	c.h = append([]float64(nil), d.h...)
+	c.eri = append([]float64(nil), d.eri...)
+	return &c
+}
+
+// ScaleTransfer multiplies by lambda every integral whose charge distribution pairs an
+// orbital of group a with one of group b (a != b): h_pq for {group[p], group[q]} = {a, b},
+// and (pq|rs) once for each of its two distributions pq and rs that is such a pair (so
+// lambda^2 when both are). group[p] is orbital p's group, -1 for none.
+//
+// This is the transfer-coupling scaling of a noise-floor lock-in (adcgo -fano-lambda):
+// with a the orbitals of a donor and b those of its initiator, every electron-transfer
+// amplitude between them carries exactly one such distribution, so a transfer-mediated
+// width scales as lambda^2 per transfer and lambda = 0 switches the transfer off exactly.
+// The factor depends only on the unordered pair of each distribution, so the 8-fold
+// permutational symmetry and hermiticity survive; parallel over p.
+func (d *Data) ScaleTransfer(group []int, a, b int, lambda float64) error {
+	n := d.NORB
+	if len(group) != n {
+		return fmt.Errorf("fcidump: ScaleTransfer: %d group labels for %d orbitals", len(group), n)
+	}
+	if a == b || a < 0 || b < 0 {
+		return fmt.Errorf("fcidump: ScaleTransfer needs two distinct groups (got %d, %d)", a, b)
+	}
+	f := make([]float64, n*n) // factor per ordered pair, symmetric
+	for p := range n {
+		for q := range n {
+			f[p*n+q] = 1
+			gp, gq := group[p], group[q]
+			if (gp == a && gq == b) || (gp == b && gq == a) {
+				f[p*n+q] = lambda
+			}
+		}
+	}
+	for i := range d.h {
+		d.h[i] *= f[i]
+	}
+	parallel.HeavyRows(n, func(p int) {
+		for q := range n {
+			fpq := f[p*n+q]
+			base := (p*n + q) * n * n
+			for rs := range n * n {
+				d.eri[base+rs] *= fpq * f[rs]
+			}
+		}
+	})
+	return nil
 }
 
 // ReadFile parses the FCIDUMP at path.
