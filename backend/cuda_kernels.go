@@ -8,6 +8,7 @@
 //
 //go:generate nvcc -O3 -std=c++14 -c adc4_kernels.cu -o adc4_kernels.o
 //go:generate nvcc -O3 -std=c++14 -c adc2dip_kernels.cu -o adc2dip_kernels.o
+//go:generate nvcc -O3 -std=c++14 -c tensor_kernels.cu -o tensor_kernels.o
 //
 // They are build artifacts (git-ignored). See docs/adc4_matfree_gpu.md. Compiles and links
 // against the CUDA toolkit here; they are exercised (parity tests) on an NVIDIA GPU.
@@ -15,7 +16,7 @@
 package backend
 
 /*
-#cgo LDFLAGS: ${SRCDIR}/adc4_kernels.o ${SRCDIR}/adc2dip_kernels.o -L/usr/local/cuda/lib64 -lcudart -lstdc++
+#cgo LDFLAGS: ${SRCDIR}/adc4_kernels.o ${SRCDIR}/adc2dip_kernels.o ${SRCDIR}/tensor_kernels.o -L/usr/local/cuda/lib64 -lcudart -lstdc++
 #include <cuda_runtime.h>
 #include <stdlib.h>
 
@@ -45,6 +46,17 @@ int adc2_dip_sat_apply(int nsat,int njii,int nijk,int b,int ldIn,int ldOut,
     const int* iO0,const int* iO1,const int* iO2,const int* iSt,const int* iVoff,const int* iNv,const int* iVir,
     const double* eri,const double* eps,const int* osym,
     const double* xin,double* yout);
+
+// Launchers defined in tensor_kernels.cu (extern "C").
+int tensor_einsum_launch(int nOuter, int nInner, int hasB,
+    const long long* outerDim, const long long* innerDim,
+    const long long* oO, const long long* oA, const long long* oB,
+    const long long* iA, const long long* iB, double alpha,
+    double* out, const double* a, const double* b);
+int tensor_unpack_launch(long long n, int cols, long long tsize, long long ld,
+    const long long* elem, const int* row, const signed char* sign, const double* y, double* t);
+int tensor_pack_launch(long long n, int cols, long long tsize, long long ld,
+    const long long* elem, const int* row, const signed char* sign, const double* t, double* out);
 
 // Byte-sized device allocation/copy helpers (this cgo file's own C context; the ones in
 // cuda.go belong to a different translation unit and are not visible here).
@@ -196,5 +208,135 @@ func (b *gpuBackend) DipSatApply(a DipSatArgs) {
 			(*C.int)(a.JO0), (*C.int)(a.JO1), (*C.int)(a.JSt), (*C.int)(a.JVoff), (*C.int)(a.JNv), (*C.int)(a.JVir),
 			(*C.int)(a.IO0), (*C.int)(a.IO1), (*C.int)(a.IO2), (*C.int)(a.ISt), (*C.int)(a.IVoff), (*C.int)(a.INv), (*C.int)(a.IVir),
 			(*C.double)(a.ERI), (*C.double)(a.Eps), (*C.int)(a.OrbSym), xin, yout), "adc2_dip_sat_apply")
+	})
+}
+
+// ---- backend.TensorKernels (tensor.go; kernels in tensor_kernels.cu) ----
+
+// devTensorMap is a resident signed index map.
+type devTensorMap struct {
+	elem, row, sign unsafe.Pointer
+	n               int
+}
+
+func (m *devTensorMap) Len() int { return m.n }
+
+// TensorEinsum launches the label kernel: one thread per assignment of the labels out
+// carries, the others summed in the thread.
+func (b *gpuBackend) TensorEinsum(alpha float64, out, a TensorOperand, bo *TensorOperand) error {
+	ops := []TensorOperand{out, a}
+	if bo != nil {
+		ops = append(ops, *bo)
+	}
+	p, err := PlanTensor(ops...)
+	if err != nil {
+		return err
+	}
+	var outerDim, innerDim, oO, oA, oB, iA, iB []C.longlong
+	for _, l := range p.LoopOrder() {
+		sb := 0
+		if bo != nil {
+			sb = p.Strides[2][l]
+		}
+		if p.Strides[0][l] != 0 {
+			outerDim = append(outerDim, C.longlong(p.Dims[l]))
+			oO = append(oO, C.longlong(p.Strides[0][l]))
+			oA = append(oA, C.longlong(p.Strides[1][l]))
+			oB = append(oB, C.longlong(sb))
+		} else {
+			innerDim = append(innerDim, C.longlong(p.Dims[l]))
+			iA = append(iA, C.longlong(p.Strides[1][l]))
+			iB = append(iB, C.longlong(sb))
+		}
+	}
+	first := func(x []C.longlong) *C.longlong {
+		if len(x) == 0 {
+			return nil
+		}
+		return &x[0]
+	}
+	hasB := C.int(0)
+	var bp unsafe.Pointer
+	if bo != nil {
+		hasB = 1
+		bp = bo.V.(devVec).ptr()
+	}
+	b.do(func() {
+		ckLaunch(C.tensor_einsum_launch(C.int(len(outerDim)), C.int(len(innerDim)), hasB,
+			first(outerDim), first(innerDim), first(oO), first(oA), first(oB), first(iA), first(iB),
+			C.double(alpha), (*C.double)(out.V.(devVec).ptr()), (*C.double)(a.V.(devVec).ptr()),
+			(*C.double)(bp)), "tensor_einsum")
+	})
+	return nil
+}
+
+// UploadTensorMap makes a signed index map resident.
+func (b *gpuBackend) UploadTensorMap(elem []int64, row []int32, sign []int8) TensorMap {
+	m := &devTensorMap{n: len(elem)}
+	if m.n == 0 {
+		return m
+	}
+	up := func(src unsafe.Pointer, bytes int, what string) unsafe.Pointer {
+		p := ckDevAlloc(C.k_malloc(C.size_t(bytes)), bytes, what)
+		ckCuda(C.k_h2d(p, src, C.size_t(bytes)), "cudaMemcpy H2D ("+what+")")
+		return p
+	}
+	b.do(func() {
+		m.elem = up(unsafe.Pointer(&elem[0]), 8*m.n, "tensor map elem")
+		m.row = up(unsafe.Pointer(&row[0]), 4*m.n, "tensor map row")
+		m.sign = up(unsafe.Pointer(&sign[0]), m.n, "tensor map sign")
+	})
+	return m
+}
+
+// FreeTensorMap releases an UploadTensorMap allocation.
+func (b *gpuBackend) FreeTensorMap(tm TensorMap) {
+	m := tm.(*devTensorMap)
+	if m.n == 0 {
+		return
+	}
+	b.do(func() {
+		devFree(m.elem)
+		devFree(m.row)
+		devFree(m.sign)
+	})
+	m.n = 0
+}
+
+// TensorUnpack scatters a packed panel into a spin-block tensor.
+func (b *gpuBackend) TensorUnpack(t Vector, tsize int, y Vector, ld, cols int, tm TensorMap) {
+	m := tm.(*devTensorMap)
+	if m.n == 0 || cols == 0 {
+		return
+	}
+	b.do(func() {
+		ckLaunch(C.tensor_unpack_launch(C.longlong(m.n), C.int(cols), C.longlong(tsize), C.longlong(ld),
+			(*C.longlong)(m.elem), (*C.int)(m.row), (*C.schar)(m.sign),
+			(*C.double)(y.(devVec).ptr()), (*C.double)(t.(devVec).ptr())), "tensor_unpack")
+	})
+}
+
+// TensorPack gathers a spin-block tensor back into a packed panel (accumulating).
+func (b *gpuBackend) TensorPack(out Vector, ld, cols int, t Vector, tsize int, tm TensorMap) {
+	m := tm.(*devTensorMap)
+	if m.n == 0 || cols == 0 {
+		return
+	}
+	b.do(func() {
+		ckLaunch(C.tensor_pack_launch(C.longlong(m.n), C.int(cols), C.longlong(tsize), C.longlong(ld),
+			(*C.longlong)(m.elem), (*C.int)(m.row), (*C.schar)(m.sign),
+			(*C.double)(t.(devVec).ptr()), (*C.double)(out.(devVec).ptr())), "tensor_pack")
+	})
+}
+
+// GemmStridedBatched runs nb same-shaped products at fixed strides in one cuBLAS call.
+func (b *gpuBackend) GemmStridedBatched(transA, transB bool, m, n, k, nb int, a Vector, lda int,
+	bv Vector, ldb int, c Vector) {
+	if nb == 0 || m == 0 || n == 0 {
+		return
+	}
+	b.do(func() {
+		blasGemmStridedBatched(b.h, transA, transB, m, n, k, 1,
+			a.(devVec).ptr(), lda, m*k, bv.(devVec).ptr(), ldb, k*n, 0, c.(devVec).ptr(), m, m*n, nb)
 	})
 }

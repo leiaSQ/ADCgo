@@ -114,6 +114,17 @@ static int blas_gemm_batched(cublasHandle_t h, int transA, int transB, int m, in
 	return (int)cublasDgemmBatched(h, opA, opB, m, n, k, &alpha, A, lda, B, ldb, &beta, C, ldc, batch);
 }
 
+// Strided batched DGEMM: member t reads A + t*strideA, B + t*strideB, writes C + t*strideC.
+static int blas_gemm_strided_batched(cublasHandle_t h, int transA, int transB, int m, int n, int k,
+                                     double alpha, const double* A, int lda, long long strideA,
+                                     const double* B, int ldb, long long strideB,
+                                     double beta, double* C, int ldc, long long strideC, int batch) {
+	cublasOperation_t opA = transA ? CUBLAS_OP_T : CUBLAS_OP_N;
+	cublasOperation_t opB = transB ? CUBLAS_OP_T : CUBLAS_OP_N;
+	return (int)cublasDgemmStridedBatched(h, opA, opB, m, n, k, &alpha, A, lda, strideA,
+		B, ldb, strideB, &beta, C, ldc, strideC, batch);
+}
+
 // ---- cuSOLVER: divide-and-conquer symmetric eigensolver on the device ----
 //
 // The input is a fully symmetric matrix, so its row-major and column-major readings
@@ -448,6 +459,27 @@ func blasDgmm(h unsafe.Pointer, m, n int, a unsafe.Pointer, lda int, x unsafe.Po
 		cudaErr := int(C.dev_last_error())
 		panic(fmt.Sprintf("backend: cublasDdgmm failed (cublasStatus_t %d, cudaError_t %d): m=%d n=%d lda=%d ldc=%d",
 			int(st), cudaErr, m, n, lda, ldc))
+	}
+}
+
+// blasGemmStridedBatched: batch members at fixed element strides of a, b and c.
+func blasGemmStridedBatched(h unsafe.Pointer, transA, transB bool, m, n, k int, alpha float64,
+	a unsafe.Pointer, lda, strideA int, b unsafe.Pointer, ldb, strideB int, beta float64,
+	c unsafe.Pointer, ldc, strideC, batch int) {
+	var ta, tb C.int
+	if transA {
+		ta = 1
+	}
+	if transB {
+		tb = 1
+	}
+	st := C.blas_gemm_strided_batched(handle(h), ta, tb, C.int(m), C.int(n), C.int(k), C.double(alpha),
+		(*C.double)(a), C.int(lda), C.longlong(strideA), (*C.double)(b), C.int(ldb), C.longlong(strideB),
+		C.double(beta), (*C.double)(c), C.int(ldc), C.longlong(strideC), C.int(batch))
+	if st != 0 {
+		cudaErr := int(C.dev_last_error())
+		panic(fmt.Sprintf("backend: cublasDgemmStridedBatched failed (cublasStatus_t %d, cudaError_t %d): transA=%v transB=%v m=%d n=%d k=%d lda=%d ldb=%d ldc=%d batch=%d",
+			int(st), cudaErr, transA, transB, m, n, k, lda, ldb, ldc, batch))
 	}
 }
 

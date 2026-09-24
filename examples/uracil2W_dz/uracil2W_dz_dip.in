@@ -7,8 +7,8 @@
 # the operator, so the whole band fits the H200 pool via -mgpu.
 #
 # Pipeline (MOL=uracil2W_dz):
-#   MOL=uracil2W_dz sbatch scripts/uracil_dump.sbatch            # DZ FCIDUMP (CPU/pyscf)
-#   MOL=uracil2W_dz MGPU=8 sbatch --gres=gpu:H200:8 --mem=480gb scripts/uracil_dip.sbatch
+#   MOL=uracil2W_dz sbatch scripts/helix/uracil_dump.sbatch            # DZ FCIDUMP (CPU/pyscf)
+#   MOL=uracil2W_dz MGPU=8 sbatch --gres=gpu:H200:8 --mem=480gb scripts/helix/uracil_dip.sbatch
 #
 &geometry
   file   zmat
@@ -27,6 +27,6 @@
 &adc
   # Whole double-ionization band, faithful short-recurrence Lanczos, row-
   # partitioned across the GPU pool (uracil_dip.sbatch drives -mgpu from $MGPU;
-  # these args feed the standalone scripts/adcgo_run.sh path).
+  # these args feed the standalone scripts/helix/adcgo_run.sh path).
   args   -dip -order 2 -solver lanczos-lowmem -lowmem-block 0 -spin both -blocks 200 -backend cuda
   sym    all                   # C1: one spatial irrep

@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"runtime/debug"
 	"sort"
-	"sync"
 	"time"
 	"unsafe"
 
@@ -97,69 +95,6 @@ func checkSatChunkFits(w, n int) {
 	}
 }
 
-// goDevices runs body(d) for every partition concurrently and blocks until all have stopped.
-//
-// It exists for the panics. Every call into a sub-backend blocks on a round-trip through that
-// device's owning goroutine, and gpuBackend.do re-raises a device fault (a failed cudaMalloc in
-// a fill, a nonzero cudaGetLastError from a launch) as a panic on whichever goroutine called it.
-// Raised on a bare wg.Go goroutine that panic has no path back to solveDIPSectorMGPU — it aborts
-// the process, so a fault 30 h into a production mat-vec dies with a goroutine dump and, unless the
-// block happened to have reached cp.Every, no checkpoint. The serial applier's equivalent fault
-// unwound through apply -> ApplyBlock -> SolveLowMem, where the errInterrupted / checkpoint
-// handling lives. Recovering per device and re-raising on the CALLER's goroutine restores that.
-//
-// Every device is allowed to stop before anything is re-raised: a sibling still writing to a
-// slab that a unwinding goroutine is about to free would be a use-after-free. The lowest device
-// index wins so a reproducible fault reports reproducibly; the others are logged, not lost.
-func goDevices(nd int, body func(d int)) {
-	panics := make([]any, nd)
-	stacks := make([][]byte, nd)
-	var wg sync.WaitGroup
-	for d := range nd {
-		wg.Go(func() {
-			defer func() {
-				if r := recover(); r != nil {
-					panics[d], stacks[d] = r, debug.Stack()
-				}
-			}()
-			body(d)
-		})
-	}
-	wg.Wait()
-
-	first := -1
-	for d := range nd {
-		if panics[d] == nil {
-			continue
-		}
-		if first < 0 {
-			first = d
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "dip: partition %d also failed: %v\n%s\n", d, panics[d], stacks[d])
-	}
-	if first >= 0 {
-		// Re-raise the original value, not a wrapper: any type-based handling upstream still
-		// sees what the device backend raised. The partition and its worker stack — which the
-		// re-panic's own stack no longer shows — go to stderr first.
-		fmt.Fprintf(os.Stderr, "dip: partition %d failed:\n%s\n", first, stacks[first])
-		panic(panics[first])
-	}
-}
-
-// syncAll drains every partition's device stream concurrently. A peer read does not synchronize
-// the source stream, so the gather must be fenced on both sides: after the producers have written
-// the input, and after the kernels have written their output bands. The syncs are issued in
-// parallel because each is a blocking round-trip through that device's owning goroutine —
-// serialized over 8 devices, twice per apply, that is pure added latency.
-func syncAll(pd backend.PartitionedDevices) {
-	goDevices(pd.NumParts(), func(d int) {
-		if pc, ok := pd.PartBackend(d).(backend.PeerCopier); ok {
-			pc.Sync()
-		}
-	})
-}
-
 // gatherSlabs stages, on every partition, the full-height n×cw input slab for panel columns
 // [c0, c0+cw): device d's slab receives every partition's row band, because a satellite block's
 // candidate COLUMN can live on any partition (backend/README.md, "The slab must be full height").
@@ -194,7 +129,7 @@ func gatherSlabs(pd backend.PartitionedDevices, slabOf func(int) backend.Vector,
 		dsts[d] = pd.PartBackend(d).(backend.PeerCopier)
 		slabs[d] = slabOf(d)
 	}
-	goDevices(nd, func(d int) {
+	backend.GoDevices(nd, func(d int) {
 		if dsts[d] == nil {
 			return // stages nothing
 		}
@@ -271,8 +206,8 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 	// norb=212 — plus the 21-array config SoA, and Alloc reserves the n×w slab (~5.1 GB on the
 	// production singlet at w=64), and every one of those calls blocks on a round-trip through that
 	// device's owning goroutine. Serially that is eight 16 GB uploads one after another with
-	// seven GPUs idle. goDevices, not parallel.Rows: Rows runs serially below 2*GOMAXPROCS rows
-	// and nd=8 is far under that, and goDevices is what re-raises a failed cudaMalloc on the
+	// seven GPUs idle. backend.GoDevices, not parallel.Rows: Rows runs serially below 2*GOMAXPROCS rows
+	// and nd=8 is far under that, and GoDevices is what re-raises a failed cudaMalloc on the
 	// caller's goroutine instead of aborting the process from a bare worker.
 	//
 	// Disjoint by construction — device d touches only its own sub-backend, its own kernels and
@@ -280,7 +215,7 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 	// so it cannot move a bit of the result.
 	bufs := make([]*satDeviceBufs, nd)
 	slab := make([]backend.Vector, nd)
-	goDevices(nd, func(d int) {
+	backend.GoDevices(nd, func(d int) {
 		if !active[d] {
 			return
 		}
@@ -298,17 +233,17 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 
 			// Fence the producers: the input panel may still be mid-write from an async panel
 			// kernel, and a peer read would not drain that stream.
-			syncAll(pd)
+			backend.SyncParts(pd)
 
 			// Gather: every device assembles the full-height slab for columns [c0, c0+cw).
 			gatherSlabs(pd, func(d int) backend.Vector { return slab[d] }, in, bounds, n, c0, cw, active)
 
 			// Fence the gather before any kernel reads a slab.
-			syncAll(pd)
+			backend.SyncParts(pd)
 
 			// Concurrent for the same reason, and with the same disjointness argument, as the
 			// batched applier: one blocking round-trip per device otherwise leaves the rest idle.
-			goDevices(nd, func(d int) {
+			backend.GoDevices(nd, func(d int) {
 				if !active[d] {
 					return // partition owns no satellite rows
 				}
@@ -323,7 +258,7 @@ func (mx *Matrix) newSatelliteMatFreePerDevice(pd backend.PartitionedDevices) ma
 			})
 		}
 		// Fence the outputs before the caller consumes them.
-		syncAll(pd)
+		backend.SyncParts(pd)
 	}
 
 	release := func() {
@@ -419,7 +354,7 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 	// materialized all 2S blocks on every device and discarded the (nd-1)/nd it did not own —
 	// nd-fold redundant work in the phase that is second-largest after the GEMM.
 	//
-	// Concurrent over devices, for the same reason as the goDevices loop two statements below:
+	// Concurrent over devices, for the same reason as the GoDevices loop two statements below:
 	// this is ~1.64e8 block applications summed over the pool at production scale (~2.05e7 per
 	// device at nd=8), each one a slot lookup plus a rows·cols multiply, and run serially the
 	// whole pass sat on one core while construction stalled. HeavyRows, not parallel.Rows: Rows
@@ -444,8 +379,8 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 	// of those calls blocks on a round-trip through that device's owning goroutine — so a serial
 	// loop here uploads 8 GPUs one after another while 7 idle. The state is disjoint by
 	// construction (own backend, own kernels, own buffers, own slab, own plan clone), and
-	// goDevices recovers per device so a failed cudaMalloc still unwinds through the caller.
-	goDevices(nd, func(d int) {
+	// backend.GoDevices recovers per device so a failed cudaMalloc still unwinds through the caller.
+	backend.GoDevices(nd, func(d int) {
 		if !active[d] {
 			return
 		}
@@ -472,7 +407,7 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 			tChunk := time.Now()
 
 			t0 := time.Now()
-			syncAll(pd) // producers may still be mid-write; a peer read does not drain them
+			backend.SyncParts(pd) // producers may still be mid-write; a peer read does not drain them
 			tSync1 := time.Since(t0)
 
 			// Gather the full-height slab on every device (identical to the per-scalar path).
@@ -481,7 +416,7 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 			tGather := time.Since(t0)
 
 			t0 = time.Now()
-			syncAll(pd) // fence the gather before any kernel reads a slab
+			backend.SyncParts(pd) // fence the gather before any kernel reads a slab
 			tSync2 := time.Since(t0)
 
 			// Run the devices CONCURRENTLY, as gatherSlabs and syncAll above already do. Every
@@ -500,7 +435,7 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 			gemms := make([]time.Duration, nd)
 			nfills := make([]int, nd)
 			stats := make([]satStats, nd)
-			goDevices(nd, func(d int) {
+			backend.GoDevices(nd, func(d int) {
 				ds := st[d]
 				if ds == nil {
 					return // owns no block in any batch
@@ -544,7 +479,7 @@ func (mx *Matrix) newSatBatchedPerDevice(pd backend.PartitionedDevices) matFreeP
 				tFill.Round(time.Millisecond), tGemm.Round(time.Millisecond),
 				agg.calls, agg.members, perCall, nFill, nd)
 		}
-		syncAll(pd) // fence outputs before the caller reads them
+		backend.SyncParts(pd) // fence outputs before the caller reads them
 	}
 
 	release := func() {

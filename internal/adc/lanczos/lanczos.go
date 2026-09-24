@@ -133,6 +133,17 @@ type Options struct {
 	// has no start block; SolveDavidson seeds from the lowest diagonal elements.
 	StartRows []int
 
+	// StartVecs replaces the start block by explicit vectors: a column-major host panel of
+	// Size() × b values for the block width b in force. The columns are orthonormalized
+	// (Gram–Schmidt, twice); a column that loses more than 1 - 1e-8 of its norm to the
+	// others panics, since a rank-deficient start block silently shrinks the Krylov space.
+	// It is exclusive with StartRows. nil (the default) keeps every existing path unchanged.
+	//
+	// A spin-summed operator (one Ms sector, several spin multiplicities) needs it: the
+	// Hamiltonian commutes with S², so a start block of pure-spin main-space vectors keeps
+	// the whole Krylov space in that multiplicity. Honored by Solve and SolveLowMem.
+	StartVecs []float64
+
 	// LowMemBlock selects the block width for the limited-memory driver (SolveLowMem);
 	// other drivers ignore it. It is the memory knob: the driver keeps only three n×block
 	// panels resident instead of Solve's whole n×maxdim basis (lowmem.go). 0 (the default)
@@ -222,7 +233,13 @@ func blockWidth(n, main int, opts Options) int {
 // A bad StartRows panics rather than being repaired. A row out of range, a repeat, or a
 // wrong count each produce a rank-deficient or invalid start block, which does not fail
 // — it silently shrinks the Krylov space the run then reports spectra from.
-func startBlock(n, b int, rows []int) []float64 {
+func startBlock(n, b int, rows []int, vecs []float64) []float64 {
+	if vecs != nil {
+		if rows != nil {
+			panic("lanczos: Options.StartRows and Options.StartVecs are exclusive")
+		}
+		return orthonormalStart(n, b, vecs)
+	}
 	start := make([]float64, n*b)
 	if rows == nil {
 		for c := range b {
@@ -245,6 +262,50 @@ func startBlock(n, b int, rows []int) []float64 {
 		}
 		seen[r] = true
 		start[c*n+r] = 1
+	}
+	return start
+}
+
+// orthonormalStart copies the StartVecs panel and orthonormalizes its columns
+// (classical Gram–Schmidt, twice), panicking on a rank-deficient panel.
+func orthonormalStart(n, b int, vecs []float64) []float64 {
+	if len(vecs) != n*b {
+		panic(fmt.Sprintf("lanczos: Options.StartVecs holds %d values, want %d×%d", len(vecs), n, b))
+	}
+	start := append([]float64(nil), vecs...)
+	for c := range b {
+		col := start[c*n : (c+1)*n]
+		var n0 float64
+		for _, v := range col {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				panic(fmt.Sprintf("lanczos: Options.StartVecs column %d is not finite", c))
+			}
+			n0 += v * v
+		}
+		for range 2 {
+			for p := range c {
+				prev := start[p*n : (p+1)*n]
+				var d float64
+				for i, v := range col {
+					d += v * prev[i]
+				}
+				for i := range col {
+					col[i] -= d * prev[i]
+				}
+			}
+		}
+		var n1 float64
+		for _, v := range col {
+			n1 += v * v
+		}
+		if n0 == 0 || n1 <= 1e-16*n0 {
+			panic(fmt.Sprintf("lanczos: Options.StartVecs column %d is linearly dependent on the "+
+				"columns before it; the start block would be rank deficient", c))
+		}
+		inv := 1 / math.Sqrt(n1)
+		for i := range col {
+			col[i] *= inv
+		}
 	}
 	return start
 }
@@ -512,7 +573,7 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 		// orthonormal. With b == main (the default) these are theADCcode's own start
 		// vectors, so pole strengths converge first. Options.StartRows replaces which rows
 		// they are, not how many.
-		start := startBlock(n, b, opts.StartRows)
+		start := startBlock(n, b, opts.StartRows, opts.StartVecs)
 		tmp := be.Upload(start)
 		be.Copy(basis.ColRange(0, b).V, tmp)
 		be.Free(tmp)

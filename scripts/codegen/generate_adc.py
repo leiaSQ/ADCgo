@@ -1259,6 +1259,627 @@ def collect_all_itmds(gs, emitter, log):
 
 
 # ---------------------------------------------------------------------------
+# σ-build (--sigma): the matrix-vector product as tensor contractions
+# ---------------------------------------------------------------------------
+# For every block and order, adcgen's mvp_block_order gives r_I = Σ_J M_IJ Y_J with
+# the index restrictions lifted. Its spin is integrated out for each target spin
+# block, and each term becomes a sigma.Term: leaves (amplitude blocks, Coulomb
+# integrals, intermediates, an orbital-energy factor) and a pairwise contraction
+# order. internal/adc/isrgen/sigma runs the result; Elem.BuildDense is its oracle.
+#
+# Normalization. adcgen hides 1/sqrt(n_o! n_v!) in both vectors of r = M·Y. The
+# engine fills the spin-block tensors with the plain amplitude (every same-spin
+# reordering carrying its permutation sign), so the lifted sum over J counts each
+# configuration n_o(J)! n_v(J)! times, and r_expr = (p_I / p_J) σ. The terms are
+# therefore scaled by p_J / p_I = sqrt(n_o(I)! n_v(I)! / (n_o(J)! n_v(J)!)).
+
+SIG_SIZES = {"o": 40, "v": 150}   # extents the contraction-order search costs with
+SIG_COLS = 64                     # panel width of the amplitude-dependent steps
+SIG_STATIC = 1e-3                 # weight of amplitude-free steps (computed once)
+
+
+def class_names(k: int, c: int) -> list[str]:
+    return VIR_POOL[:c] + OCC_POOL[:k + c]
+
+
+def canonical_spins(k: int, c: int) -> list[str]:
+    """Target spin patterns of class c: alpha first within particles and within
+    holes, every Ms."""
+    out = []
+    nh = k + c
+    for pa in range(c + 1):
+        for ha in range(nh + 1):
+            out.append("a" * pa + "b" * (c - pa) + "a" * ha + "b" * (nh - ha))
+    return out
+
+
+def sigma_norm(k: int, tgt: int, src: int) -> float:
+    from math import factorial, sqrt
+    f = lambda c: factorial(k + c) * factorial(c)  # noqa: E731
+    return sqrt(f(tgt) / f(src))
+
+
+def derive_mvp(sm: SecularMatrix, k: int, spec: BlockSpec, order: int, side: int
+               ) -> tuple[ExprContainer | None, int, int]:
+    """The order-th σ contribution of spec: side 0 is M_bk·Y_k into the bra class,
+    side 1 (off-diagonal blocks only) M_kb·Y_b into the ket class."""
+    tgt, src = (spec.cb, spec.ck) if side == 0 else (spec.ck, spec.cb)
+    block = f"{class_space(k, tgt)},{class_space(k, src)}"
+    names = class_names(k, tgt)
+    with quiet():
+        raw = sm.mvp_block_order(order=order, space=class_space(k, tgt),
+                                 block=block, indices="".join(names))
+        expr = ExprContainer(raw, real=True)
+        expr.substitute_contracted()
+        expr = simplify(expr)
+        if expr.inner is S.Zero:
+            return None, tgt, src
+        expr.diagonalize_fock()
+        expr = reduce_expr(expr)
+        if expr.inner is S.Zero:
+            return None, tgt, src
+        expr = factor_intermediates(expr, max_order=order)
+    return expr, tgt, src
+
+
+def derive_ci_mvp(sm: SecularMatrix, k: int, spec: BlockSpec, order: int, side: int
+                  ) -> tuple[ExprContainer | None, int, int]:
+    """derive_mvp for a block taken as plain CI: the zeroth-order precursors (the bare
+    configurations) around the order-th shifted Hamiltonian, so order 0 + order 1 is
+    H - E_HF. ISR(<=1) equals CI on every block but B02, and this needs neither the
+    orthogonalization nor the ground-state corrections that make the ISR derivation of
+    the (k+2)h2p blocks of tip and qip intractable."""
+    from math import factorial
+    from sympy import Integer, sqrt as ssqrt
+    from adcgen.func import evaluate_deltas
+    from adcgen.indices import generic_indices_from_space
+    from adcgen.wicks import wicks
+    tgt, src = (spec.cb, spec.ck) if side == 0 else (spec.ck, spec.cb)
+    if order > 1:
+        return None, tgt, src
+    tsp, ssp = class_space(k, tgt), class_space(k, src)
+    names = class_names(k, tgt)
+    with quiet():
+        ket = "".join(i.name for i in generic_indices_from_space(ssp))
+        op, rules = sm.hamiltonian(order, True)
+        block = wicks(Mul(sm.isr.precursor(order=0, space=tsp, braket="bra", indices="".join(names)),
+                          op,
+                          sm.isr.precursor(order=0, space=ssp, braket="ket", indices=ket)),
+                      simplify_kronecker_deltas=True, rules=rules)
+        y = sm.isr.amplitude_vector(indices=ket, lr="right")
+        # mvp_block_order's normalization: 1/sqrt(n_o! n_v!) for each side
+        pref = 1 / ssqrt(Integer(factorial(k + tgt) * factorial(tgt) * factorial(k + src) * factorial(src)))
+        raw = evaluate_deltas((pref * block * y).expand())
+        expr = ExprContainer(raw, real=True)
+        expr.substitute_contracted()
+        expr = simplify(expr)
+        if expr.inner is S.Zero:
+            return None, tgt, src
+        expr.diagonalize_fock()
+        expr = reduce_expr(expr)
+    return (None if expr.inner is S.Zero else expr), tgt, src
+
+
+def diagonal_of(expr: ExprContainer, names: list[str], nv: int) -> ExprContainer | None:
+    """diag(M) from a diagonal block's σ expression: Y(J) replaced by the
+    antisymmetrized delta product with the target, Σ_P sgn(P) δ(J, P I), which
+    turns Σ_J M(I,J) Y(J)/n_J! into M(I,I)."""
+    from itertools import permutations
+    from sympy.combinatorics import Permutation as SPerm
+    from adcgen.func import evaluate_deltas
+    from adcgen.sympy_objects import KroneckerDelta
+    tgt = get_symbols(names)
+    tp, th = tgt[:nv], tgt[nv:]
+
+    def antisym(src, dst):
+        tot = S.Zero
+        for perm in permutations(range(len(dst))):
+            sgn = SPerm(list(perm)).signature()
+            prod = S.One
+            for s, d in zip(src, (dst[p] for p in perm)):
+                prod *= KroneckerDelta(s, d)
+            tot += sgn * prod
+        return tot
+
+    out = S.Zero
+    for term in expr.terms:
+        ys = [o for o in term.objects if o.name == tensor_names.right_adc_amplitude]
+        if len(ys) != 1:
+            raise RuntimeError(f"σ term {term} has {len(ys)} amplitudes")
+        y = ys[0].base
+        repl = antisym(y.upper, tp) * antisym(y.lower, th)
+        out += evaluate_deltas((term.inner.subs(y, repl)).expand(), names)
+    with quiet():
+        res = ExprContainer(out, real=True, target_idx="".join(names))
+        res = simplify(res)
+    return None if res.inner is S.Zero else res
+
+
+def spin_integrate(expr: ExprContainer, names: list[str], spin: str,
+                   combine: bool = True) -> ExprContainer:
+    """Spin-integrated expression of one target spin block, antisymmetric ERIs
+    expanded to Coulomb integrals (pr|qs). combine runs adcgen's simplify, which
+    cannot handle MP denominators (the intermediate definitions)."""
+    from adcgen.spatial_orbitals import integrate_spin
+    with quiet():
+        # MP denominators become tensors D^{+}_{-} = 1/(Σ e_upper - Σ e_lower): integrate_spin
+        # cannot take polynomials apart (compile_sigma_term turns D back into energies)
+        e = expr.copy()
+        e.use_symbolic_denominators()
+        si = integrate_spin(e, "".join(names), spin)
+        si.expand_antisym_eri().expand()
+        if combine:
+            si = simplify(si)
+    return si
+
+
+def energy_rpn(x, label_of) -> list[tuple]:
+    """A sympy orbital-energy expression as sigma.Instr tuples (op, label, n, val)."""
+    out: list[tuple] = []
+
+    def walk(y):
+        if y.is_Number:
+            out.append(("Const", 0, 0, float(y)))
+        elif isinstance(y, SymbolicTensor):
+            if y.name != tensor_names.orb_energy or len(y.idx) != 1:
+                raise NotImplementedError(f"unexpected {y} in an orbital-energy factor")
+            out.append(("Eps", label_of(y.idx[0]), 0, 0.0))
+        elif isinstance(y, (Add, Mul)):
+            for a in y.args:
+                walk(a)
+            out.append(("Add" if isinstance(y, Add) else "Mul", 0, len(y.args), 0.0))
+        elif isinstance(y, Pow):
+            base, exp = y.args
+            if not exp.is_Integer or exp == 0 or abs(int(exp)) > 127:
+                raise NotImplementedError(f"exponent {exp} in {y}")
+            walk(base)
+            out.append(("Pow", 0, int(exp), 0.0))
+        else:
+            raise NotImplementedError(f"cannot translate {y} ({type(y)})")
+
+    walk(x)
+    return out
+
+
+def plan_contractions(leaves: list[tuple[tuple[int, ...], bool]], final: list[int],
+                      space_of: dict[int, str]) -> list[tuple[int, int, list[int]]]:
+    """Cheapest pairwise order (exhaustive): steps (a, b, out labels). Costs are
+    2·Π extents over the labels a step touches, times the panel width when it
+    depends on the amplitude, and a small weight when it does not (it runs once)."""
+    n = len(leaves)
+    if n <= 1:
+        return []
+    fset = set(final)
+    best: list = [None, None]
+
+    def extent(ls):
+        p = 1
+        for label in ls:
+            p *= SIG_SIZES[space_of[label]]
+        return p
+
+    def rec(ops, steps, cost, peak, nxt):
+        if best[0] is not None and (cost, peak) >= best[0]:
+            return
+        if len(ops) == 1:
+            best[0], best[1] = (cost, peak), list(steps)
+            return
+        for x in range(len(ops)):
+            for y in range(x + 1, len(ops)):
+                ia, la, aa = ops[x]
+                ib, lb, ab = ops[y]
+                rest = set(fset)
+                for z, o in enumerate(ops):
+                    if z != x and z != y:
+                        rest |= set(o[1])
+                both = list(dict.fromkeys(list(la) + list(lb)))
+                if len(ops) == 2:
+                    keep = [label for label in final if label in both]
+                else:
+                    keep = [label for label in both if label in rest]
+                amp = aa or ab
+                f = 2.0 * extent(both) * (SIG_COLS if amp else SIG_STATIC)
+                sz = extent(keep) * (SIG_COLS if amp else 1)
+                new = [o for z, o in enumerate(ops) if z != x and z != y]
+                new.append((nxt, tuple(keep), amp))
+                steps.append((ia, ib, keep))
+                rec(new, steps, cost + f, max(peak, sz), nxt + 1)
+                steps.pop()
+
+    rec([(i, tuple(dict.fromkeys(ls)), a) for i, (ls, a) in enumerate(leaves)], [], 0.0, 0, n)
+    return best[1]
+
+
+def compile_sigma_term(term, target: list[str], coef_scale: float, block: int,
+                       order: int, itmd_refs: set[tuple[str, str]]) -> dict:
+    """One spin-integrated adcgen term as a sigma.Term (a dict for the emitter)."""
+    # union-find over index names, from the Kronecker deltas
+    parent: dict[str, str] = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    tset = set(target)
+    prefactor = S.One
+    energy = S.One
+    tensors = []
+    spaces: dict[str, str] = {}
+    for o in term.objects:
+        base, exp = o.base_and_exponent
+        if o.inner.is_number:
+            prefactor *= o.inner
+            continue
+        for i in o.idx:
+            spaces[i.name] = _space_of(i)
+        if o.contains_only_orb_energies:
+            energy *= Pow(base, exp)
+            continue
+        if not exp.is_Integer or exp < 1:
+            raise NotImplementedError(f"object {o} with exponent {exp}")
+        if o.name == tensor_names.sym_orb_denom:
+            # D^{p..}_{q..} = 1 / (Σ e_p - Σ e_q), a symbolic MP denominator
+            from adcgen.sympy_objects import NonSymmetricTensor
+            den = S.Zero
+            for i in o.base.upper:
+                den += NonSymmetricTensor(tensor_names.orb_energy, (i,))
+            for i in o.base.lower:
+                den -= NonSymmetricTensor(tensor_names.orb_energy, (i,))
+            energy *= Pow(den, -exp)
+            continue
+        if o.name == tensor_names.fock:
+            # canonical reference: f_pq = δ_pq e_p
+            from adcgen.sympy_objects import NonSymmetricTensor
+            p_, q_ = o.idx
+            for _ in range(int(exp)):
+                energy *= NonSymmetricTensor(tensor_names.orb_energy, (p_,))
+            ra, rb = find(p_.name), find(q_.name)
+            if ra != rb:
+                if rb in tset and ra not in tset:
+                    ra, rb = rb, ra
+                parent[rb] = ra
+            continue
+        if o.type_as_str == "delta":
+            a, b = (i.name for i in o.idx)
+            if spaces[a] != spaces[b]:
+                raise RuntimeError(f"delta between spaces in {term}")
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                # a target name represents its class, so the target keeps it
+                if rb in tset and ra not in tset:
+                    ra, rb = rb, ra
+                parent[rb] = ra
+            continue
+        for _ in range(int(exp)):
+            tensors.append(o)
+    for n in target:
+        spaces.setdefault(n, "o" if n[0] in "ijklmno" else "v")
+    labels: dict[str, int] = {}
+
+    def label_of(idx_or_name) -> int:
+        name = idx_or_name if isinstance(idx_or_name, str) else idx_or_name.name
+        r = find(name)
+        if r not in labels:
+            if len(labels) >= 250:
+                raise RuntimeError("more than 250 labels in one term")
+            labels[r] = len(labels)
+        return labels[r]
+
+    tgt_labels = [label_of(n) for n in target]
+    leaves = []
+    leaf_meta = []
+    for o in tensors:
+        name = o.name
+        ls = [label_of(i) for i in o.idx]
+        spin = "".join(i.spin for i in o.idx)
+        if name == tensor_names.right_adc_amplitude:
+            # the engine's class tensors hold particles (upper) first, then holes;
+            # an Amplitude's idx lists the lower indices first
+            ordered = list(o.base.upper) + list(o.base.lower)
+            ls = [label_of(i) for i in ordered]
+            spin = "".join(i.spin for i in ordered)
+            cls = len(o.base.upper)
+            if any(_space_of(i) != "v" for i in o.base.upper) or \
+                    any(_space_of(i) != "o" for i in o.base.lower):
+                raise RuntimeError(f"amplitude {o} is not particles over holes")
+            leaves.append({"kind": "Amp", "class": cls, "spin": spin, "labels": ls})
+            leaf_meta.append((tuple(ls), True))
+        elif name == tensor_names.coulomb:
+            leaves.append({"kind": "ERI", "labels": ls})
+            leaf_meta.append((tuple(ls), False))
+        elif name == tensor_names.eri:
+            raise NotImplementedError(f"{name} left after spin integration in {term}")
+        else:
+            if any(s not in "ab" for s in spin):
+                raise RuntimeError(f"intermediate {name} without spin in {term}")
+            # the registered name: t1^{ab}_{ij} is t2_1, densities carry their space
+            with quiet():
+                name = o.longname()
+            itmd_refs.add((name, spin))
+            leaves.append({"kind": "Itmd", "name": name, "spin": spin, "labels": ls})
+            leaf_meta.append((tuple(ls), False))
+    if energy is not S.One:
+        if energy.is_Number:
+            prefactor *= energy
+        else:
+            rpn = energy_rpn(energy, label_of)
+            els = sorted({ins[1] for ins in rpn if ins[0] == "Eps"})
+            leaves.append({"kind": "Energy", "labels": els, "expr": rpn})
+            leaf_meta.append((tuple(els), False))
+    if not leaves:
+        leaves.append({"kind": "Energy", "labels": [], "expr": [("Const", 0, 0, 1.0)]})
+        leaf_meta.append(((), False))
+    space_of = {lab: spaces[name] for name, lab in labels.items()}
+    final = list(dict.fromkeys(tgt_labels))
+    present = set()
+    for ls, _ in leaf_meta:
+        present |= set(ls)
+    final = [label for label in final if label in present]
+    steps = plan_contractions(leaf_meta, final, space_of)
+    sp = "".join(space_of[i] for i in range(len(labels)))
+    return {"block": block, "order": order, "coef": float(prefactor) * coef_scale,
+            "spaces": sp, "leaves": leaves, "steps": steps, "target": tgt_labels}
+
+
+def sigma_terms(expr: ExprContainer, names: list[str], spin: str, scale: float,
+                block: int, order: int, itmd_refs: set) -> list[dict]:
+    si = spin_integrate(expr, names, spin)
+    if si.inner is S.Zero:
+        return []
+    return [compile_sigma_term(t, names, scale, block, order, itmd_refs) for t in si.terms]
+
+
+def itmd_programs(gs: GroundState, refs: set[tuple[str, str]], log) -> list[dict]:
+    """Spin-block programs of every referenced intermediate, dependencies first."""
+    progs: dict[tuple[str, str], dict] = {}
+    deps: dict[tuple[str, str], set] = {}
+    pending = sorted(refs)
+    defs: dict[str, ItmdDef] = {}
+    while pending:
+        key = pending.pop()
+        if key in progs:
+            continue
+        name, spin = key
+        if name not in defs:
+            # the Fock matrix stays: compile_sigma_term reads the canonical f_pq as
+            # δ_pq e_p (adcgen's diagonalize_fock refuses the MP denominators here)
+            d = _itmd_definition(gs, name)
+            with quiet():
+                # real orbitals: the ERIs gain the bra-ket symmetry expand_antisym_eri needs
+                d.expr = ExprContainer(d.expr.inner, real=True, target_idx="".join(d.target))
+            defs[name] = d
+        d = defs[name]
+        sub: set = set()
+        terms = []
+        si = spin_integrate(d.expr, d.target, spin, combine=False)
+        if si.inner is not S.Zero:
+            terms = [compile_sigma_term(t, d.target, 1.0, -1, -1, sub) for t in si.terms]
+        progs[key] = {"name": name, "spin": spin, "spaces": "".join(d.spaces), "terms": terms}
+        deps[key] = sub
+        pending.extend(sorted(sub - progs.keys()))
+    ordered, done = [], set()
+
+    def visit(key, stack):
+        if key in done:
+            return
+        if key in stack:
+            raise RuntimeError(f"cyclic intermediates {stack + (key,)}")
+        for dep in sorted(deps[key]):
+            visit(dep, stack + (key,))
+        done.add(key)
+        ordered.append(progs[key])
+
+    for key in sorted(progs):
+        visit(key, ())
+    log(f"  σ intermediates: {len(ordered)} spin blocks "
+        f"({sum(len(p['terms']) for p in ordered)} terms)")
+    return ordered
+
+
+def derive_sigma(sm: SecularMatrix, gs: GroundState, k: int, gen: list[int], log,
+                 ci_blocks: set[str] = frozenset(), check_ci: bool = True
+                 ) -> tuple[dict, list[int]]:
+    """Every σ and diagonal term the generated orders need. Blocks named in ci_blocks are
+    derived as plain CI (derive_ci_mvp, orders <= 1); with check_ci the ISR derivation of
+    the same block and order must agree term for term."""
+    sigma: dict[tuple[int, str], list[dict]] = {}
+    diag: dict[tuple[int, str], list[dict]] = {}
+    refs: set[tuple[str, str]] = set()
+    max_class = max((max(cb, ck) for n, (cb, ck) in enumerate(BLOCK_PAIRS) if gen[n] >= 0),
+                    default=0)
+    for c in range(max_class + 1):
+        for spin in canonical_spins(k, c):
+            sigma[(c, spin)] = []
+            diag[(c, spin)] = []
+    for spec in all_blocks(k):
+        if gen[spec.index] < 0:
+            continue
+        for order in range(gen[spec.index] + 1):
+            for side in ((0,) if spec.cb == spec.ck else (0, 1)):
+                t0 = time.time()
+                if spec.go_func in ci_blocks:
+                    if order > 1:
+                        raise RuntimeError(f"{spec.go_func} as CI has no order {order}")
+                    expr, tgt, src = derive_ci_mvp(sm, k, spec, order, side)
+                    if check_ci:
+                        ref, _, _ = derive_mvp(sm, k, spec, order, side)
+                        a = S.Zero if expr is None else expr.inner
+                        b = S.Zero if ref is None else ref.inner
+                        with quiet():
+                            diff = simplify(ExprContainer(a - b, real=True))
+                        if diff.inner is not S.Zero:
+                            raise RuntimeError(f"{spec.go_func} order {order} side {side}: "
+                                               f"CI differs from the ISR: {diff}")
+                        log(f"  σ {spec.go_func} order {order} side {side}: CI = ISR checked")
+                else:
+                    expr, tgt, src = derive_mvp(sm, k, spec, order, side)
+                names = class_names(k, tgt)
+                nt = nd = 0
+                if expr is not None:
+                    scale = sigma_norm(k, tgt, src)
+                    for spin in canonical_spins(k, tgt):
+                        ts = sigma_terms(expr, names, spin, scale, spec.index, order, refs)
+                        sigma[(tgt, spin)] += ts
+                        nt += len(ts)
+                    if spec.cb == spec.ck and order >= 2:
+                        # Through first order a diagonal block is CI, whose diagonal the
+                        # engine evaluates in closed form (Slater-Condon, sigma/ciDiagonal);
+                        # only the higher orders need a diagonal program. A diagonal block
+                        # maps a class onto itself: scale == 1.
+                        dexpr = diagonal_of(expr, names, tgt)
+                        if dexpr is not None:
+                            for spin in canonical_spins(k, tgt):
+                                ds = sigma_terms(dexpr, names, spin, 1.0, spec.index,
+                                                 order, refs)
+                                diag[(tgt, spin)] += ds
+                                nd += len(ds)
+                log(f"  σ {spec.go_func}{'' if side == 0 else 'ᵀ'} order {order}: "
+                    f"{nt} terms, diagonal {nd} ({time.time() - t0:.1f}s)")
+    itmds = itmd_programs(gs, refs, log)
+    return {"sigma": sigma, "diag": diag, "itmds": itmds}, list(gen)
+
+
+def save_sigma_cache(path: Path, prog: dict, orders: list[int]) -> None:
+    """The derived σ program as JSON, keyed so load_sigma_cache restores it exactly."""
+    doc = {"orders": orders, "itmds": prog["itmds"],
+           "sigma": [{"class": c, "spin": s, "terms": ts} for (c, s), ts in prog["sigma"].items()],
+           "diag": [{"class": c, "spin": s, "terms": ts} for (c, s), ts in prog["diag"].items()]}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc))
+
+
+def load_sigma_cache(path: Path) -> tuple[dict, list[int]]:
+    doc = json.loads(path.read_text())
+
+    def fix(terms):
+        for t in terms:
+            t["steps"] = [tuple(st) for st in t["steps"]]
+            for lf in t["leaves"]:
+                if "expr" in lf:
+                    lf["expr"] = [tuple(ins) for ins in lf["expr"]]
+        return terms
+
+    prog = {"itmds": [dict(p, terms=fix(p["terms"])) for p in doc["itmds"]],
+            "sigma": {(e["class"], e["spin"]): fix(e["terms"]) for e in doc["sigma"]},
+            "diag": {(e["class"], e["spin"]): fix(e["terms"]) for e in doc["diag"]}}
+    return prog, doc["orders"]
+
+
+def go_term(t: dict) -> str:
+    def u8(xs):
+        return "[]uint8{" + ", ".join(str(x) for x in xs) + "}"
+
+    leaves = []
+    for lf in t["leaves"]:
+        f = [f"Kind: sigma.{lf['kind']}", f"Labels: {u8(lf['labels'])}"]
+        if lf["kind"] == "Amp":
+            f += [f"Class: {lf['class']}", f'Spin: "{lf["spin"]}"']
+        elif lf["kind"] == "Itmd":
+            f += [f'Name: "{lf["name"]}"', f'Spin: "{lf["spin"]}"']
+        elif lf["kind"] == "Energy":
+            ins = []
+            for op, label, n, val in lf["expr"]:
+                g = [f"Op: sigma.{op}"]
+                if op == "Eps":
+                    g.append(f"Label: {label}")
+                if op in ("Add", "Mul", "Pow"):
+                    g.append(f"N: {n}")
+                if op == "Const":
+                    g.append(f"Val: {go_float(val) if val == int(val) else repr(val)}")
+                ins.append("{" + ", ".join(g) + "}")
+            f.append("Expr: []sigma.Instr{" + ", ".join(ins) + "}")
+        leaves.append("{" + ", ".join(f) + "}")
+    steps = ", ".join(f"{{A: {a}, B: {b}, Out: {u8(o)}}}" for a, b, o in t["steps"])
+    coef = t["coef"]
+    return (f"{{Block: {t['block']}, Order: {t['order']}, Coef: {repr(float(coef))}, "
+            f"Spaces: \"{t['spaces']}\",\n\t\tLeaves: []sigma.Leaf{{{', '.join(leaves)}}},\n"
+            f"\t\tSteps: []sigma.Step{{{steps}}}, Target: {u8(t['target'])}}}")
+
+
+def go_tensor(fields: str, terms: list[dict]) -> str:
+    body = ",\n\t".join(go_term(t) for t in terms)
+    return f"{{{fields}, Terms: []sigma.Term{{\n\t{body}}}}}" if terms else f"{{{fields}}}"
+
+
+def emit_sigma_go(outdir: Path, variant: str, k: int, prog: dict, orders: list[int]) -> None:
+    def spaces(c, spin):
+        return "v" * c + "o" * (len(spin) - c)
+
+    itmds = ",\n".join(go_tensor(f'Name: "{p["name"]}", Spin: "{p["spin"]}", '
+                                 f'Spaces: "{p["spaces"]}"', p["terms"])
+                       for p in prog["itmds"])
+    sig = ",\n".join(go_tensor(f'Class: {c}, Spin: "{s}", Spaces: "{spaces(c, s)}"', ts)
+                     for (c, s), ts in sorted(prog["sigma"].items()))
+    dg = ",\n".join(go_tensor(f'Class: {c}, Spin: "{s}", Spaces: "{spaces(c, s)}"', ts)
+                    for (c, s), ts in sorted(prog["diag"].items()))
+    arr = "[6]int{" + ", ".join(str(x) for x in orders) + "}"
+    sch = "\n".join(f'\t"{n}": [6]int{{{", ".join(str(x) for x in o)}}},'
+                    for n, o in sorted(prog["schemes"].items()))
+    src = f"""{go_header()}
+import (
+	"fmt"
+
+	"github.com/leiaSQ/ADCgo/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/isrgen/sigma"
+	"github.com/leiaSQ/ADCgo/internal/adc/khci"
+)
+
+// SigmaOrders is the highest order per block (B00 B01 B11 B02 B12 B22) the σ program
+// was derived for (-1: not derived).
+var SigmaOrders = {arr}
+
+// SigmaSchemes are the schemes the σ program was generated for, per-block maximum order
+// (-1: the block is absent). They may differ from the element evaluators' Schemes: the
+// two are generated separately.
+var SigmaSchemes = map[string][6]int{{
+{sch}
+}}
+
+// NewSigma binds the generated σ-build to sp, truncated to scheme: the matrix-free
+// operator whose dense form is Elem.BuildDense(sp). eps are the spatial orbital energies
+// of the canonical reference, noccSpatial its doubly occupied orbitals.
+func NewSigma(sp *khci.Space, ints *integrals.Store, eps []float64, noccSpatial int,
+	scheme string, be backend.Backend) (*sigma.Operator, error) {{
+	mo, ok := SigmaSchemes[scheme]
+	if !ok {{
+		return nil, fmt.Errorf("%s: no σ program for scheme %q", Variant, scheme)
+	}}
+	return NewSigmaOrders(sp, ints, eps, noccSpatial, mo, be)
+}}
+
+// NewSigmaOrders is NewSigma for explicit per-block maximum orders (B00 B01 B11 B02 B12
+// B22, -1 absent), for hybrid schemes assembled by a caller (internal/adc/quip). An order
+// the σ program was not derived for is an error, never a silent truncation.
+func NewSigmaOrders(sp *khci.Space, ints *integrals.Store, eps []float64, noccSpatial int,
+	orders [6]int, be backend.Backend) (*sigma.Operator, error) {{
+	for b, o := range orders {{
+		if o > SigmaOrders[b] {{
+			return nil, fmt.Errorf("%s: block %d wanted at order %d; the σ program has %d",
+				Variant, b, o, SigmaOrders[b])
+		}}
+	}}
+	return sigma.New(sigmaProgram, sp, ints, eps, noccSpatial, orders, be)
+}}
+
+var sigmaProgram = &sigma.Program{{
+	Variant: Variant,
+	K:       K,
+	Itmds: []sigma.Tensor{{
+{itmds}}},
+	Sigma: []sigma.Tensor{{
+{sig}}},
+	Diag: []sigma.Tensor{{
+{dg}}},
+}}
+"""
+    (outdir / "sigma_generated.go").write_text(src)
+
+
+# ---------------------------------------------------------------------------
 # Fidelity reference
 # ---------------------------------------------------------------------------
 REF_NORB, REF_NOCC, REF_SEED, REF_PROBES = 6, 3, 7, 300
@@ -1626,6 +2247,21 @@ def main():
                    help="skip testdata/adcgen_ref.json (needs numpy)")
     p.add_argument("--reference-only", metavar="PATH",
                    help="write only the reference JSON to PATH; no Go")
+    p.add_argument("--sigma", action="store_true",
+                   help="also derive the σ-build (sigma_generated.go)")
+    p.add_argument("--ci-blocks", default="",
+                   help="σ-build: comma-separated blocks (B12, B22) derived as plain CI "
+                        "(orders <= 1) instead of through the ISR, which does not finish for "
+                        "the (k+2)h2p blocks of tip and qip; B02 is refused (ISR != CI there)")
+    p.add_argument("--no-ci-check", action="store_true",
+                   help="skip the CI = ISR(<=1) assertion of --ci-blocks (needed where the "
+                        "ISR block itself is the intractable part)")
+    p.add_argument("--sigma-cache", metavar="PATH",
+                   help="σ-build: write the derived program to PATH (JSON) and, when PATH "
+                        "already exists, emit from it instead of deriving again")
+    p.add_argument("--sigma-only", action="store_true",
+                   help="derive only the σ-build into an existing package; the element "
+                        "files are left as they are")
     a = p.parse_args()
     if not a.outdir and not a.reference_only:
         p.error("--outdir is required unless --reference-only is given")
@@ -1658,8 +2294,36 @@ def main():
 
     outdir = Path(a.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
+    if a.sigma or a.sigma_only:
+        t0 = time.time()
+        ci = {b for b in a.ci_blocks.split(",") if b}
+        if ci - {"B11", "B12", "B22"}:
+            p.error(f"--ci-blocks {sorted(ci)}: only B11, B12, B22 are CI at orders <= 1 "
+                    "(B02 starts at second order in the ISR)")
+        cache = Path(a.sigma_cache) if a.sigma_cache else None
+        if cache is not None and cache.exists():
+            prog, sorders = load_sigma_cache(cache)
+            log(f"  σ program read from {cache}")
+        else:
+            prog, sorders = derive_sigma(sm, gs, k, gen, log, ci, not a.no_ci_check)
+            if cache is not None:
+                save_sigma_cache(cache, prog, sorders)
+        prog["schemes"] = schemes
+        log(f"  σ derived ({time.time() - t0:.1f}s)")
+    if a.sigma_only:
+        if not (outdir / "types.go").exists():
+            p.error(f"--sigma-only needs an existing package in {outdir}")
+        emit_sigma_go(outdir, a.variant, k, prog, sorders)
+        gofmt = shutil.which("gofmt")
+        if gofmt is None:
+            sys.exit("gofmt not found in PATH; generated files are unformatted")
+        subprocess.run([gofmt, "-w", str(outdir / "sigma_generated.go")], check=True)
+        log("Done.")
+        return
     for old in outdir.glob("*_generated.go"):
-        old.unlink()
+        # a σ program survives an element-only regeneration
+        if old.name != "sigma_generated.go" or a.sigma:
+            old.unlink()
     emitter = TermEmitter(set())
     present: dict[str, list[int]] = {}
     timings: dict[str, float] = {}
@@ -1689,6 +2353,8 @@ def main():
             break
     emit_fidelity_test(outdir, dense)
     emit_doc(outdir, a.variant, k, sorted(schemes), gen)
+    if a.sigma:
+        emit_sigma_go(outdir, a.variant, k, prog, sorders)
     gofmt = shutil.which("gofmt")
     if gofmt is None:
         sys.exit("gofmt not found in PATH; generated files are unformatted")

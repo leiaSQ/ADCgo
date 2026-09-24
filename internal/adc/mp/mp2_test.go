@@ -3,7 +3,10 @@ package mp
 import (
 	"encoding/json"
 	"math"
+	"math/rand/v2"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
@@ -113,5 +116,82 @@ func TestMP2CorrChunkedReduction(t *testing.T) {
 		if again := MP2Corr(d, nocc, eps); again != got {
 			t.Fatalf("MP2Corr not reproducible: %.17g then %.17g", got, again)
 		}
+	}
+}
+
+// TestRequireCanonical: every canonical FCIDUMP in testdata passes, and the
+// localized-orbital dumps (rotated on purpose) are refused.
+func TestRequireCanonical(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "testdata")
+	var paths []string
+	filepath.WalkDir(root, func(p string, e os.DirEntry, err error) error {
+		if err == nil && !e.IsDir() && strings.HasSuffix(p, ".fcidump") {
+			paths = append(paths, p)
+		}
+		return nil
+	})
+	if len(paths) == 0 {
+		t.Fatal("no FCIDUMPs found")
+	}
+	sawLocalized := false
+	for _, p := range paths {
+		d, err := fcidump.ReadFile(p)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		m := MaxFockOffDiagonal(d, NOcc(d))
+		if strings.Contains(p, "matched") {
+			// theADCcode's matched-integral tape is semi-canonical by construction (see
+			// RequireCanonical); it is not a canonical-HF dump and not a localized one
+			continue
+		}
+		localized := strings.Contains(p, "localized") || strings.Contains(p, "he3_ghost")
+		sawLocalized = sawLocalized || localized
+		err = RequireCanonical(d, NOcc(d))
+		t.Logf("%s: max off-diagonal Fock %.2e", filepath.Base(p), m)
+		if localized && err == nil {
+			t.Errorf("%s: localized dump accepted as canonical (max off-diagonal %.2e)", p, m)
+		}
+		if !localized && err != nil {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+	if !sawLocalized {
+		t.Error("no localized dump in testdata: the refusal path is untested")
+	}
+}
+
+// TestSyntheticIsCanonical: the synthetic system's Fock matrix is diag(eps), and its
+// integrals have the 8-fold symmetry.
+func TestSyntheticIsCanonical(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 1))
+	eps := []float64{-1.2, -0.9, -0.7, 0.3, 0.5, 0.8, 1.1}
+	d, err := fcidump.Synthetic(len(eps), 6, eps, 0.2, rng.Float64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p, e := range OrbitalEnergies(d, 3) {
+		if math.Abs(e-eps[p]) > 1e-13 {
+			t.Fatalf("eps[%d] = %g, want %g", p, e, eps[p])
+		}
+	}
+	if off := MaxFockOffDiagonal(d, 3); off > 1e-13 {
+		t.Fatalf("off-diagonal Fock %g", off)
+	}
+	n := d.NORB
+	for p := range n {
+		for q := range n {
+			for r := range n {
+				for s := range n {
+					v := d.TwoE(p, q, r, s)
+					if v != d.TwoE(q, p, r, s) || v != d.TwoE(r, s, p, q) || v != d.TwoE(p, q, s, r) {
+						t.Fatalf("(%d%d|%d%d) breaks the 8-fold symmetry", p, q, r, s)
+					}
+				}
+			}
+		}
+	}
+	if _, err := fcidump.Synthetic(4, 3, eps[:4], 1, rng.Float64); err == nil {
+		t.Fatal("odd electron count accepted")
 	}
 }

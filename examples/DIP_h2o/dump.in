@@ -1,7 +1,7 @@
 # ADCgo DIP run on H2O, DZP+Diffuse (Dunning) basis, active space 2..30.
 # Reproduces theADCcode's ../ADCanalysis/examples/DIP_h2o run on matched integrals.
 #
-#   scripts/adcgo_run.sh examples/DIP_h2o/dump.in ./adcgo
+#   scripts/helix/adcgo_run.sh examples/DIP_h2o/dump.in ./adcgo
 #
 &geometry
   file   _zmatrix.dat        # GAMESS-UK z-matrix (O-H 0.944 A, HOH 107.07 deg)

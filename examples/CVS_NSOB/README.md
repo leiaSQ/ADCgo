@@ -53,8 +53,8 @@ the run rather than quietly producing a wrong spectrum.
 
 ```sh
 go build -o adcgo ./cmd/adcgo
-scripts/adcgo_run.sh examples/CVS_NSOB/n1s.in ./adcgo    # N K-edge
-scripts/adcgo_run.sh examples/CVS_NSOB/o1s.in ./adcgo    # O K-edge
+scripts/helix/adcgo_run.sh examples/CVS_NSOB/n1s.in ./adcgo    # N K-edge
+scripts/helix/adcgo_run.sh examples/CVS_NSOB/o1s.in ./adcgo    # O K-edge
 ```
 
 This is a large calculation, not a smoke test: 102 orbitals give a ~540 MB

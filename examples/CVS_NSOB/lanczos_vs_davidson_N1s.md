@@ -85,7 +85,7 @@ main edge and overall envelope.
 
 ```
 # ADCgo
-scripts/adcgo_run.sh examples/CVS_NSOB/n1s.in ./adcgo
+scripts/helix/adcgo_run.sh examples/CVS_NSOB/n1s.in ./adcgo
 # legacy (where the legacy codebase is available)
 #   adc4_diag.x with nroots=20, convthr=1.0E-03  -> dav.NSOB.N1s.out
 ```

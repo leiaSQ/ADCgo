@@ -63,9 +63,10 @@ fi
 #    whichever variant slurm schedules:
 #      A100 (gpu4/gpu8) = sm_80,  A40 (gpu4) = sm_86,  H200 (gpu8) = sm_90.
 #    sm_90 is needed for the H200 nodes (the SIP solve's ~45 GB basis wants their 141 GB).
-#    BOTH objects are required — cuda_kernels.go's #cgo LDFLAGS links adc4_kernels.o
-#    (CVS-ADC(4) wert2 + order-3 SIP c22) and adc2dip_kernels.o (DIP satellite), so omitting
-#    either one fails the link with "cannot find …_kernels.o".
+#    ALL objects are required — cuda_kernels.go's #cgo LDFLAGS links adc4_kernels.o
+#    (CVS-ADC(4) wert2 + order-3 SIP c22), adc2dip_kernels.o (DIP satellite) and
+#    tensor_kernels.o (the generated σ-build), so omitting one fails the link with
+#    "cannot find …_kernels.o".
 # -Xptxas -v prints per-kernel register counts and spill store/load bytes. A spill to local
 # memory is global-memory traffic in disguise, and these kernels carry sizeable per-thread
 # arrays (adc2dip_kernels.cu's double d[9], adc4_kernels.cu's double vint[31]) whose spill
@@ -75,7 +76,7 @@ ptxas_v="-Xptxas -v"
 [ "${PTXAS_VERBOSE:-1}" = "0" ] && ptxas_v=""
 
 echo "#begin<nvcc>"
-for ker in adc4_kernels adc2dip_kernels; do
+for ker in adc4_kernels adc2dip_kernels tensor_kernels; do
     echo "nvcc: $ker.cu"
     nvcc -O3 -std=c++14 \
          $ptxas_v \

@@ -134,7 +134,7 @@ and the only thing available when peer access is missing.
 | satellite matrix-free == dense, incl. distributed composition | `dip/matfree_test.go` | none (gonum subs) |
 | per-scalar form == dense blocks (pins the kernel's design) | `dip/satscalar` tests | none |
 | single-device kernel parity | `dip/matfree_cuda_test.go`, `sip/matfree_cuda_test.go` | 1 GPU |
-| per-device parity == dense **and** == host path, bit-exact | `dip/matfree_mgpu_cuda_test.go` | ≥4 peered GPUs |
+| per-device parity == dense **and** == host path, bit-exact | `dip/matfree_device_test.go` | ≥4 peered GPUs |
 
 The host-side tests are the source of truth for the physics; the on-hardware tests fix only the
 CUDA transcription. Build the kernels before any `-tags cuda` run — `cuda_kernels.go` links

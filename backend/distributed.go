@@ -219,8 +219,8 @@ func enablePeers(subs []Backend) {
 // lowest device index wins so a reproducible fault reports reproducibly; the others are
 // logged rather than lost.
 //
-// This is the backend-side twin of dip.goDevices (internal/adc/dip/matfree_dist.go),
-// duplicated rather than shared because backend must stay importable on its own.
+// Exported as GoDevices for the operators that drive the partitions themselves (dip's
+// -mgpu satellite apply in internal/adc/dip/matfree_dist.go, the generated σ-build).
 func goDevices(nd int, body func(d int)) {
 	if nd == 1 {
 		// One partition: no goroutine and no recover, so a fault keeps its original stack
@@ -261,6 +261,59 @@ func goDevices(nd int, body func(d int)) {
 		fmt.Fprintf(os.Stderr, "backend: partition %d failed:\n%s\n", first, stacks[first])
 		panic(panics[first])
 	}
+}
+
+// GoDevices runs body(d) for d < nd concurrently and re-raises the first device's panic
+// on the caller's goroutine after every device has stopped (goDevices). The operators that
+// drive the partitions of a PartitionedDevices backend (dip's -mgpu satellite apply, the
+// generated σ-build) share it.
+func GoDevices(nd int, body func(d int)) { goDevices(nd, body) }
+
+// SyncParts drains every partition's device stream concurrently: a peer read does not
+// synchronize the source stream, so a gather must be fenced after the producers wrote the
+// input and after the kernels wrote their output bands.
+func SyncParts(pd PartitionedDevices) {
+	goDevices(pd.NumParts(), func(d int) {
+		if pc, ok := pd.PartBackend(d).(PeerCopier); ok {
+			pc.Sync()
+		}
+	})
+}
+
+// CopyBand copies a rows×cols column-major band from src (on from, column stride srcLd)
+// into dst (on to, column stride dstLd): device to device when to can peer-read from's
+// memory, otherwise through the host. Runs on the calling goroutine.
+func CopyBand(to Backend, dst Vector, dstLd int, from Backend, src Vector, srcLd, rows, cols int) {
+	if rows == 0 || cols == 0 {
+		return
+	}
+	if pc, ok := to.(PeerCopier); ok && (to == from || pc.PeerAvailable(from)) {
+		pc.PeerCopy2D(dst, src, from, rows, cols, dstLd, srcLd)
+		return
+	}
+	span := (cols-1)*srcLd + rows
+	h := from.Download(src.Slice(0, span))
+	if hd, ok := to.(HostData); ok && isHostVector(to, dst) {
+		d := hd.HostSlice(dst)
+		for c := range cols {
+			copy(d[c*dstLd:c*dstLd+rows], h[c*srcLd:c*srcLd+rows])
+		}
+		return
+	}
+	col := make(Vec, rows)
+	for c := range cols {
+		copy(col, h[c*srcLd:c*srcLd+rows])
+		up := to.Upload(col)
+		to.Copy(dst.Slice(c*dstLd, rows), up)
+		to.Free(up)
+	}
+}
+
+// isHostVector reports whether v is host memory of be (a device backend may embed a host
+// one and so satisfy HostData without its vectors being host memory).
+func isHostVector(be Backend, v Vector) bool {
+	_, ok := v.(hostVec)
+	return ok
 }
 
 func (b *distBackend) ndev() int        { return len(b.subs) }

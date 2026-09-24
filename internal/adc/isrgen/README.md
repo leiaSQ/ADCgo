@@ -12,15 +12,15 @@ them as Go element evaluators, one package per variant:
 | `isrgen/tip` | triple ionization | 3 | 3h \| 4h1p \| 5h2p |
 | `isrgen/qip` | quadruple ionization | 4 | 4h \| 5h1p \| 6h2p |
 
-The packages are **reference evaluators, not production operators**. You call
-`Element(sp, r, c)` on the rows of a spin-orbital `khci.Space`. The packages have three uses:
+Each package has two faces:
 
-- checking the hand-ported `sip` and `dip` against an independent derivation;
-- supplying blocks that have no hand code: tip, qip, and ADC(2,2)-QUIP (`internal/adc/quip`);
-- building small dense matrices.
-
-The production solvers (`-sip`, `-dip`, GPU, `-mgpu`, `-matfree`) do not use them. See
-[Relation to `sip` and `dip`](#relation-to-sip-and-dip).
+- **Element evaluators.** `Element(sp, r, c)` on the rows of a spin-orbital `khci.Space`, and
+  `BuildDense`. They check the hand-ported `sip` and `dip`, supply blocks with no hand code
+  (tip, qip, ADC(2,2)-QUIP in `internal/adc/quip`), and are the exact reference for the σ-build.
+- **A σ-build** (`sigma_generated.go`, every variant). `NewSigma` returns a matrix-free
+  `sigma.Operator`: the matrix-vector product as tensor contractions on batched GEMMs, on the
+  host or a GPU. It drives Lanczos, the low-memory Lanczos and Davidson, and `adcgo -isr`. See
+  [σ-build](#σ-build).
 
 ## What is committed
 
@@ -156,7 +156,7 @@ Every package carries the first three layers of checks; ip and dip also carry th
    - The CI values of every block (`ci_entries`) are stored for khci's own gate.
 3. **Symmetry.** `TestSymmetricAndMsDegenerate` checks that the matrix is symmetric and that
    Ms-partner spectra coincide.
-4. **Hand-written crosschecks**, in `crosscheck_test.go`, which survives regeneration.
+4. **Hand-written crosschecks**, in `types_test.go`, which survives regeneration.
 
 | Test | Pins |
 |---|---|
@@ -187,31 +187,90 @@ target indices. It is skipped above 7! = 5040 target permutations (`PERM_SEARCH_
 covers tip B11/B12, qip, and dip B22. Those terms are emitted as they are: more Go, but the
 same values.
 
+## σ-build
+
+`generate_adc.py --sigma` (or `--sigma-only`, which leaves the element files alone) derives,
+per block, order and side, adcgen's matrix-vector product `SecularMatrix.mvp_block_order`. It
+then integrates out the spin for every target spin block (alpha first within particles and
+within holes, every Ms), and writes each term as leaves and a pairwise contraction order:
+
+- **Leaves:** amplitude blocks, Coulomb integrals (pr|qs), intermediates, and orbital-energy
+  factors. The MP denominators arrive as adcgen's symbolic `D` and become energy factors.
+- **Contraction order:** an exhaustive search at o = 40, v = 150, b = 64 that discounts
+  amplitude-free steps, since those run once.
+- **Diagonal:** through first order a diagonal block is CI, so the engine evaluates
+  diag(M) there in closed form (Slater–Condon, `sigma.Operator.ciDiagonal`). Orders ≥ 2
+  get a diagonal program: the σ expression with Y(J) replaced by the antisymmetrized delta
+  product with the target.
+- **Plain-CI blocks:** `--ci-blocks B12,B22` derives those blocks as plain CI, meaning the
+  bare configurations around H − E_HF by Wick's theorem. The ISR derivation of the
+  (k+2)h2p blocks does not finish for tip and qip. The generator asserts CI = ISR(≤ 1)
+  term for term wherever the ISR block can be derived; `--no-ci-check` skips the
+  assertion, as tip and qip need.
+- **Schemes and cache:** `SigmaSchemes` in `sigma_generated.go` are the schemes of the σ run,
+  independent of the element files. `NewSigmaOrders` takes explicit per-block orders, for a
+  caller's hybrid. `--sigma-cache PATH` stores the derived program as JSON, and a later run
+  re-emits from it without deriving again.
+
+`internal/adc/isrgen/sigma` runs a program:
+
+- **Tensors:** each class is held as spatial spin-block tensors, unpacked from and packed back
+  into the khci vector by signed index maps.
+- **Contractions:** each contraction is permute + batched GEMM, with the panel column as one
+  more mode, so a block of b vectors is one GEMM with N ≥ b.
+- **Kernels:** on the host they are Go; on a backend implementing `backend.TensorKernels`
+  (CUDA: `backend/tensor_kernels.cu`) they run on the device. A backend with neither is staged
+  through the host.
+
+**Spin.** The space is one Ms sector, so singlets, triplets and quintets share it. The
+Hamiltonian commutes with S², but roundoff does not: a spin-summed Lanczos run grows every
+multiplicity within a few hundred vectors. `Operator.SetSpin(2S)` makes each apply P·M·P with
+the Löwdin projector of `khci.Space.SpinProjector`. Start from `khci.Space.MainSpinVectors`
+through `lanczos.Options.StartVecs`.
+
+**Verified** (`sigma_generated_test.go`, hand-written):
+
+- σ·X = `BuildDense`·X to ≤ 1.3e-13 relative, for every scheme and Ms sector, the
+  satellite-only apply, restricted spaces and the diagonal.
+- Spin-projected block Lanczos reproduces package dip one to one: 683 singlet and 818 triplet
+  poles, |ΔE| ≤ 5.4e-13 Eh, |ΔPS| ≤ 3.6e-11 %.
+- Device ≡ host: `TestSigmaDeviceParity`.
+
+**Cost.** One block apply against dip's production host path (singlet + triplet, satellites
+matrix-free) on synthetic C1 systems, 32 cores (`sigma_generated_test.go`):
+
+| o, v | b = 1 | b = 16 | b = 64 |
+|---|---|---|---|
+| 12, 48 | 0.03× | 0.09× | 0.11× |
+| 16, 64 | 0.01× | 0.04× | 0.12× |
+
+The δ-gated satellite blocks of the hand code cost ~o⁵v² in total, while the contractions
+cost o⁴v².
+
 ## Relation to `sip` and `dip`
 
-The hand-ported `sip` and `dip` packages remain the production matrices, for four reasons.
+The hand-ported packages remain the reference-exact production matrices. They are bit-exact
+against theADCcode, and they cover what an ISR derivation cannot: Dyson CVS IP-ADC(4) and
+sip's Σ(∞) C11⁽³⁾. They also carry the reference's conventions (sip `-order 2` is ADC(2)x).
 
-- They are **bit-exact against theADCcode** on matched integrals.
-- They apply spin-adapted blocks as GEMMs, CUDA kernels and row-partitioned multi-GPU panels.
-  Generated code evaluates one spin-orbital element at a time.
-- They cover what an ISR derivation cannot: Dyson CVS IP-ADC(4), and the Σ(∞) treatment of
-  sip's C11⁽³⁾.
-- They carry the reference's conventions: sip `-order 2` is ADC(2)x.
-
-The generated packages are the **second source** that checks those matrices, and the **only
-source** for variants with no hand code. A block-level replacement would need a σ-building
-(contraction) back end for the generator.
+The generated packages are their second source. With the σ-build they are also a production
+path of their own: `adcgo -isr VARIANT:SCHEME`. Multi-GPU row partitioning (`-mgpu`) is
+still hand-code only.
 
 ## Limits
 
-- **Element by element.** There are no σ-builds. Use the packages for dense blocks and
-  probes, not for matrix-free solves.
+- **σ programs** for tip and qip cover adc2x and ci, with B12/B22 as plain CI. The adc22
+  schemes of qip (`internal/adc/quip.NewSigma`) wait on the second-order 5h1p/5h1p block.
+- **Unpacked tensors.** Same-spin index groups are stored in full, so a group of n same-spin
+  holes costs n! redundant elements. That is harmless for dip, but it would dominate qip's
+  6h2p class.
 - **Canonical HF only** (see [Conventions](#conventions)).
 - **Missing top blocks.** tip and qip have no (k+2)h2p/(k+2)h2p block. qip has no B12, and
   the second-order 5h1p/5h1p block that ADC(2,2)-QUIP needs has not been derived.
 - **Generated files are not for editing.** They carry `DO NOT EDIT`. Regenerating replaces
-  every `*_generated.go`, `types.go`, `doc.go`, `fidelity_test.go` and the reference.
-  `crosscheck_test.go` is hand-written and kept.
+  every `*_generated.go` (`sigma_generated.go` only with `--sigma`), `types.go`, `doc.go`,
+  `fidelity_test.go` and the reference. `types_test.go` and `sigma_generated_test.go`
+  are hand-written and kept.
 - **Target index names.** Names are drawn from fixed pools, bare letters first:
   `i…o, i1…o1` for holes and `a…h` for particles. Numbered names break adcgen's
   intermediate factoring at order 3, so they are used only on overflow.

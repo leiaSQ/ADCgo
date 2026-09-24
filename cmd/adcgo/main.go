@@ -87,7 +87,7 @@ func main() {
 	coreOrb := flag.String("core", "", "CVS core orbitals for -order 4: comma-separated 0-based occupied indices (e.g. 0)")
 	backendName := flag.String("backend", "gonum", "linear-algebra backend: gonum | hip | cuda | auto (auto calibrates and picks per sector; build-tag gated)")
 	gpus := flag.Int("gpus", 0, "-backend cuda|hip only: max GPUs for concurrent per-sector solves (0 = all visible). Independent sectors (DIP spin×irrep, SIP irrep) run one per GPU")
-	mgpu := flag.Int("mgpu", 0, "-dip -solver lanczos-lowmem -lowmem-block 0 only: row-partition ONE sector across this many GPUs (0 = off), so a whole-band Mode B Krylov block that dwarfs a single GPU fits across a node. Sectors run serially, each spanning the pool; needs a fast inter-GPU link (NVLink)")
+	mgpu := flag.Int("mgpu", 0, "-dip -solver lanczos-lowmem -lowmem-block 0, or -isr (each apply split by panel column): row-partition ONE sector across this many GPUs (0 = off), so a whole-band Mode B Krylov block that dwarfs a single GPU fits across a node. Sectors run serially, each spanning the pool; needs a fast inter-GPU link (NVLink)")
 	satChunk := flag.Int("satchunk", dip.SatChunkCols, "-mgpu matrix-free DIP only: column-chunk width of the per-device satellite gather. Each device stages a full-height n×w slab (n·w·8 bytes), and the applier fences twice per chunk — so raising this cuts both the ceil(b/w) element recompute (~15% at 64, ~8% at 128) and the barrier count, at proportionally more slab VRAM")
 	satTrace := flag.Bool("sat-trace", false, "-mgpu matrix-free DIP only: print a per-column-chunk timing breakdown of the satellite apply to stderr (gather / fences / operator fill / batched GEMM). A whole-band production mat-vec is 40 h and lanczos reports it as one number only once the block ends; the apply is ceil(b/-satchunk) chunks, so tracing per chunk gives the same split in ~1/27th of the time")
 	matfree := flag.String("matfree", "off", "matrix-free apply of large blocks — CVS-ADC(4) 2h1p×3h2p/2h1p² coupling and the order-3 SIP 2h1p×2h1p satellite (recompute vs store): off | auto | on. Trades resident memory for per-mat-vec recompute; auto switches per block using -maxmem. Required for large SIP-ADC(3) sectors whose dense satellite block is TB-scale (e.g. the production system)")
@@ -126,6 +126,7 @@ func main() {
 	convert := flag.String("convert", "", "read a previously emitted solver document JSON (the default -dip/-sip output) and emit its bare stick spectrum without re-solving; needs -dip or -sip to say which kind")
 
 	adc22 := flag.String("adc22", "f", "-order 22 variant (Kolorenc & Averbukh, JCP 152, 214107 (2020), Table I): f = full, the paper's recommendation and the only variant that gets double Auger right; x = drops the second-order 1h/2h1p coupling; m = also drops the first-order 3h2p/3h2p block, leaving it diagonal. m and x are documented to overshoot decay widths by ~14% and ~24%, so they are diagnostics rather than production settings")
+	isrSel := flag.String("isr", "", "solve a GENERATED ISR secular matrix (internal/adc/isrgen) as VARIANT:SCHEME, e.g. dip:adc2x or ip:adc22f, applied matrix-free as tensor contractions on a k-hole space of one Ms sector: one sector per multiplicity (-spin both|singlet,triplet,...), each a block Lanczos from its pure-spin main-class vectors. -khci-maxclass/-khci-twoms shape the space; -solver lanczos|dense; -backend gonum|cuda. Detail: adcgo -h isr")
 	doFano := flag.Bool("fano", false, "compute an electronic decay width (Auger, ICD, ETMD and their double counterparts) by the Fano/Feshbach method with Stieltjes imaging, instead of a spectrum. Needs -fano-init and one of: -sip with an -order of 2 (Fano-ADC(2)x), 3, or 22 (Fano-ADC(2,2)), where the vacancy fixes the target irrep; -dip (DIP-ADC(2), one -spin and one -sym sector); or -khci K (k-hole CI; one -sym sector)")
 	fanoInit := flag.Int("fano-init", -1, "-fano: the initially ionized orbital, a 0-based occupied index. It defines both the discrete state |Phi> (selected from the QMQ spectrum by its weight on this orbital's 1h configuration) and, by default, the Q subspace")
 	fanoQ := flag.String("fano-q", "", "-fano: the Q (bound) orbital set as comma-separated 0-based occupied indices. Empty = just -fano-init, which with the default -fano-rule any is the Auger criterion: Q is every configuration still carrying the initial hole, P every one that has filled it. For interatomic decay name the whole donor subunit's orbitals and use -fano-rule all")
@@ -342,6 +343,30 @@ func main() {
 			stOrderLo: lo, stOrderHi: hi, stPrec: *stPrec, stAverage: avg, stWindow: *stWindow,
 			initSite: *initAtom, sites: groups.sites, specOpts: specCfg.classify,
 		}, nil
+	}
+
+	if *isrSel != "" {
+		if *doSIP || *doDIP || *khciK != 0 || *doFano || doSpec || *doTDM {
+			fmt.Fprintln(os.Stderr, "adcgo: -isr is its own mode: not with -sip, -dip, -khci, -fano, -spectrum or -tdm")
+			os.Exit(2)
+		}
+		variant, scheme, err := parseISR(*isrSel)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "adcgo:", err)
+			os.Exit(2)
+		}
+		cfg := isrConfig{variant: variant, scheme: scheme, solver: *solver, spinSel: *spinSel,
+			sym: *sym, backend: *backendName, out: *out, maxClass: *khciMaxClass, twoMs: *khciTwoMs,
+			blocks: *blocks, psThresh: *psThresh, coeffThresh: *coeffThresh, profile: *profile,
+			mgpu: *mgpu}
+		if !flagGiven("sym") {
+			cfg.sym = "none"
+		}
+		if err := runISR(d, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "adcgo:", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	if *khciK != 0 {

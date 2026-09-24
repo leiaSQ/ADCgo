@@ -1,7 +1,7 @@
 # ADCgo CVS core->valence X-ray *emission* (XES) at the pyridine NITROGEN K-edge.
 #
 # Pipeline (run from repo root with the adcgo conda python):
-#   python scripts/dump_fcidump.py --input examples/pyridine_N.in
+#   python scripts/fcidump/dump_fcidump.py --input examples/pyridine_N.in
 #   go run ./cmd/dimsprobe testdata/pyridine_N.fcidump -nnz -blocks 60      # memory gate
 #   go run ./cmd/adcgo -fcidump testdata/pyridine_N.fcidump \
 #       -sip -order 4 -core 0 -sym <a1-irrep> -mo testdata/pyridine_N.mo.json \

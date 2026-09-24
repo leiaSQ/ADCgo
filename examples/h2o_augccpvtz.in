@@ -1,7 +1,7 @@
 # ADCgo DIP run on H2O with a *named* basis (aug-cc-pVTZ), full MO space (no active
 # selection). Same geometry as h2o_ccpvdz.in; 92 spherical MOs.
 #
-#   scripts/adcgo_run.sh examples/h2o_augccpvtz.in ./adcgo
+#   scripts/helix/adcgo_run.sh examples/h2o_augccpvtz.in ./adcgo
 #
 &geometry
   file   h2o.xyz

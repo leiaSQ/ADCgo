@@ -3,7 +3,7 @@
 # Recreates the O-edge twin of /mnt/worka/alexk/NSOB/adc_1holes (theADCcode
 # adc4_constr.x + adc4_diag.x -> NSOB.O1s.res / dav.NSOB.O1s.out).
 #
-#   scripts/adcgo_run.sh examples/CVS_NSOB/o1s.in ./adcgo
+#   scripts/helix/adcgo_run.sh examples/CVS_NSOB/o1s.in ./adcgo
 #
 &geometry
   file   _zmatrix.dat

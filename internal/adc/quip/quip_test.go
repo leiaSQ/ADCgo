@@ -2,6 +2,7 @@ package quip
 
 import (
 	"math"
+	"math/rand/v2"
 	"path/filepath"
 	"testing"
 
@@ -176,5 +177,72 @@ func TestAssemblyBlocks(t *testing.T) {
 	}
 	if ran == 0 {
 		t.Fatal("no scheme of quip is carried by isrgen/qip")
+	}
+}
+
+// TestSigmaMatchesAssembly: NewSigma (the generated σ program, B12/B22 as plain CI) applies
+// the matrix New assembles element by element, for every scheme the σ program covers; a
+// scheme needing a block it was not derived to is refused rather than truncated.
+func TestSigmaMatchesAssembly(t *testing.T) {
+	g := loadPair(t, khciDir, "he3chain_631g")
+	rng := rand.New(rand.NewPCG(61, 62))
+	ran := 0
+	for scheme, maxClass := range Schemes() {
+		sp := space(t, g, maxClass)
+		sop, err := NewSigma(sp, g.can, scheme, backend.Gonum{})
+		orders := sigmaOrders[scheme]
+		derived := true
+		for b, o := range orders {
+			if o > qip.SigmaOrders[b] {
+				derived = false
+			}
+		}
+		if !derived {
+			if err == nil {
+				t.Errorf("%s: NewSigma accepted a scheme the σ program was not derived to", scheme)
+			}
+			t.Logf("%s: σ refused as expected: %v", scheme, err)
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := qip.Schemes[scheme]; !ok {
+			continue // no element assembly to compare with
+		}
+		op, err := New(sp, g.can, scheme)
+		if err != nil {
+			t.Fatal(err)
+		}
+		M := op.BuildMatrix()
+		n, b := sp.Size(), 3
+		x := make([]float64, n*b)
+		for i := range x {
+			x[i] = rng.NormFloat64()
+		}
+		be := backend.Gonum{}
+		out := be.Alloc(n * b)
+		sop.ApplyBlock(backend.BlockView{V: out, Rows: n, Cols: b, Ld: n},
+			backend.BlockView{V: be.Upload(x), Rows: n, Cols: b, Ld: n})
+		got := be.Download(out)
+		var dev, scale float64
+		for c := range b {
+			for r := range n {
+				var s float64
+				for k := range n {
+					s += M.At(r, k) * x[c*n+k]
+				}
+				dev = math.Max(dev, math.Abs(got[c*n+r]-s))
+				scale = math.Max(scale, math.Abs(s))
+			}
+		}
+		t.Logf("%s: n=%d |σ - M·X| %.2e (scale %.2e)", scheme, n, dev, scale)
+		if dev > 1e-11*math.Max(scale, 1) {
+			t.Errorf("%s: σ differs from the assembled operator by %.2e", scheme, dev)
+		}
+		ran++
+	}
+	if ran == 0 {
+		t.Fatal("no scheme compared")
 	}
 }

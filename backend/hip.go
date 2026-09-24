@@ -142,7 +142,7 @@ const backendName = "hip"
 
 // devCount returns the number of visible HIP devices, or 0 if none / on error.
 // ckHip panics on a non-zero hipError_t. The cuda backend's ckCuda twin; see
-// cgo_status_test.go for why an ignored status is treated as a defect.
+// cuda_test.go for why an ignored status is treated as a defect.
 func ckHip(st C.int, op string) {
 	if st != 0 {
 		panic(fmt.Sprintf("backend: hip %s failed (hipError_t %d)", op, int(st)))

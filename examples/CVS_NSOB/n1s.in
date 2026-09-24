@@ -3,7 +3,7 @@
 # Recreates /mnt/worka/alexk/NSOB/adc_1holes (theADCcode adc4_constr.x + adc4_diag.x,
 # MCORE=1, NROOT=15 -> NSOB.N1s.res / dav.NSOB.N1s.out).
 #
-#   scripts/adcgo_run.sh examples/CVS_NSOB/n1s.in ./adcgo
+#   scripts/helix/adcgo_run.sh examples/CVS_NSOB/n1s.in ./adcgo
 #
 &geometry
   file   _zmatrix.dat

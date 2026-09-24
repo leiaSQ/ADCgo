@@ -46,6 +46,7 @@ import (
 	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
 	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
 	"github.com/leiaSQ/ADCgo/internal/adc/isrgen/qip"
+	"github.com/leiaSQ/ADCgo/internal/adc/isrgen/sigma"
 	"github.com/leiaSQ/ADCgo/internal/adc/khci"
 	"github.com/leiaSQ/ADCgo/internal/adc/mo"
 	"github.com/leiaSQ/ADCgo/internal/adc/mp"
@@ -118,6 +119,48 @@ func New(sp *khci.Space, d *fcidump.Data, scheme string) (*Op, error) {
 		return nil, err
 	}
 	return &Op{sp: sp, ci: ci, el: el, eps: eps, scheme: scheme, orders: h, nso: 2 * nocc}, nil
+}
+
+// sigmaOrders is each scheme's per-block maximum order (B00 B01 B11 B02 B12 B22) on the
+// σ-build: the qip ISR orders of B00, B01 and B11, B02 absent, and the hybrid's B12/B22 —
+// through first order plain CI (the σ program derives them so, generate_adc.py
+// --ci-blocks), or 0 for the orbital-energy diagonal of the m variant.
+var sigmaOrders = map[string][6]int{
+	"adc2x":  {2, 1, 1, -1, -1, -1},
+	"adc22m": {2, 1, 2, -1, 1, 0},
+	"adc22x": {2, 1, 2, -1, 1, 1},
+	"adc22f": {2, 2, 2, -1, 1, 1},
+}
+
+// NewSigma is the matrix-free twin of New: the same operator as tensor contractions on
+// the generated qip σ program, on be (host, a TensorKernels device, or a row-partitioned
+// multi-device backend). A scheme whose blocks the σ program was not derived to (the
+// adc22 schemes need the order-2 5h1p/5h1p block) is an error, not a truncation.
+func NewSigma(sp *khci.Space, d *fcidump.Data, scheme string, be backend.Backend) (*sigma.Operator, error) {
+	o := sp.Options()
+	if o.K != qip.K {
+		return nil, fmt.Errorf("quip: the space has K = %d, ADC(2,2)-QUIP needs %d", o.K, qip.K)
+	}
+	orders, ok := sigmaOrders[scheme]
+	if !ok {
+		return nil, fmt.Errorf("quip: unknown scheme %q (have adc2x, adc22m, adc22x, adc22f)", scheme)
+	}
+	if need := Schemes()[scheme]; o.MaxClass != need {
+		return nil, fmt.Errorf("quip: scheme %s is defined on classes %d..%d, the space reaches %d",
+			scheme, o.K, need, o.MaxClass)
+	}
+	nocc := mp.NOcc(d)
+	if nocc != o.NOcc {
+		return nil, fmt.Errorf("quip: dump has %d occupied orbitals, the space %d", nocc, o.NOcc)
+	}
+	if err := mp.RequireCanonical(d, nocc); err != nil {
+		return nil, fmt.Errorf("quip: the generated ISR blocks assume canonical orbitals: %w", err)
+	}
+	op, err := qip.NewSigmaOrders(sp, integrals.New(d, nocc, nil), mp.OrbitalEnergies(d, nocc), nocc, orders, be)
+	if err != nil {
+		return nil, fmt.Errorf("quip: %w (regenerate isrgen/qip --sigma for this scheme)", err)
+	}
+	return op, nil
 }
 
 // Space is the row space.

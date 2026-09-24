@@ -58,6 +58,54 @@ var headerIntRe = func(key string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)\b` + key + `\s*=\s*(-?\d+)`)
 }
 
+// Synthetic returns a random canonical closed-shell system: two-electron integrals
+// (pq|rs) with the 8-fold permutational symmetry of real orbitals, drawn from rnd (which
+// returns values in [0,1)) and scaled by scale, and one-electron integrals chosen so that
+// the Fock matrix is diag(eps) with nelec/2 doubly occupied orbitals. It exists for
+// scaling benchmarks: every ADC element and σ path runs on it as on a real FCIDUMP, at
+// sizes no checked-in system reaches.
+func Synthetic(norb, nelec int, eps []float64, scale float64, rnd func() float64) (*Data, error) {
+	if nelec%2 != 0 || nelec < 2 || nelec/2 >= norb {
+		return nil, fmt.Errorf("fcidump: synthetic system with %d electrons in %d orbitals", nelec, norb)
+	}
+	if len(eps) != norb {
+		return nil, fmt.Errorf("fcidump: %d orbital energies for %d orbitals", len(eps), norb)
+	}
+	n := norb
+	d := &Data{NORB: n, NELEC: nelec, ISYM: 1, OrbSym: make([]int, n),
+		h: make([]float64, n*n), eri: make([]float64, n*n*n*n)}
+	for i := range d.OrbSym {
+		d.OrbSym[i] = 1
+	}
+	for p := range n {
+		for q := range p + 1 {
+			pq := p*(p+1)/2 + q
+			for r := range n {
+				for t := range r + 1 {
+					if r*(r+1)/2+t > pq {
+						continue
+					}
+					d.setTwo(p, q, r, t, scale*(rnd()-0.5))
+				}
+			}
+		}
+	}
+	nocc := nelec / 2
+	for p := range n {
+		for q := range p + 1 {
+			var f float64
+			if p == q {
+				f = eps[p]
+			}
+			for i := range nocc {
+				f -= 2*d.TwoE(p, q, i, i) - d.TwoE(p, i, i, q)
+			}
+			d.setOne(p, q, f)
+		}
+	}
+	return d, nil
+}
+
 // Clone returns a deep copy, for a caller that modifies integrals (ScaleTransfer)
 // while keeping the original.
 func (d *Data) Clone() *Data {
