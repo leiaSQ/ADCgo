@@ -125,7 +125,7 @@ func TestAssemblyBlocks(t *testing.T) {
 	ran := 0
 	for scheme, maxClass := range Schemes() {
 		if _, ok := qip.Schemes[scheme]; !ok {
-			t.Logf("%s: not in the committed isrgen/qip (needs the second-order 5h1p/5h1p block)", scheme)
+			t.Logf("%s: not in the committed isrgen/qip (adc22f needs B01 at second order)", scheme)
 			continue
 		}
 		ran++

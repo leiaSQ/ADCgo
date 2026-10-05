@@ -7,6 +7,37 @@
 [`dip_operator_memory.md`](dip_operator_memory.md) (why the operator is matrix-free) and
 [`dip_lowmem_lanczos.md`](dip_lowmem_lanczos.md) (why the basis is not resident).
 
+## UPDATE (2026-09-23): the generated σ-build
+
+The contraction route is implemented, not for the hand-ported `dip` but for the
+adcgen-generated operators (`internal/adc/isrgen/*/sigma_generated.go`, run by
+`internal/adc/isrgen/sigma`). It is the form this note argued for: σ = integrals ⊗ vector as
+binary contractions on batched GEMMs. Nothing is materialized; the losing A/B below built
+operator blocks and then GEMM'd them. See `internal/adc/isrgen/README.md`.
+
+| | hand `dip` (matrix-free satellites) | generated σ (dip adc2x, Ms = 0) |
+|---|---|---|
+| FLOP/vector, o = 58, v = 154 (production triplet size) | 9.3e13 (satellite only) | 8.8e12 (whole operator) |
+| scaling of the 3h1p/3h1p part | ~o⁵v² (δ-gated v×v blocks) | o⁴v² |
+| host wall, o = 16, v = 64, 32 cores, b = 1 / 16 / 64 | 27.9 s / 50.9 s / 167 s | 0.27 s / 1.9 s / 19.6 s |
+
+- **Correctness:** the σ-build equals the element-wise `BuildDense` to ≤ 1.3e-13 relative, and
+  reproduces package dip's singlet and triplet poles one to one (|ΔE| ≤ 5.4e-13 Eh).
+- **One H200** (job 15047806), against the hand dip device path:
+
+  | o, v | b = 1 | b = 16 | b = 64 |
+  |---|---|---|---|
+  | 12, 48 | 0.10× | 0.15× | 0.21× |
+  | 16, 64 | 0.04× | 0.05× | 0.11× |
+
+  On the hand path the time barely moves with b, because launches dominate it.
+- **Four H200s** (NVLink, column split), at o = 24, v = 96: no speed-up. b = 64 takes 266 vs
+  258 ms, b = 256 1.03 vs 0.93 s. One GPU is already milliseconds per apply, so the gather and
+  scatter cost what the split saves. `-mgpu` is for memory, not time, at these sizes.
+- **Devices:** it runs on the CUDA backend through `backend.TensorKernels`
+  (`backend/tensor_kernels.cu`); device ≡ host was checked on an A40 (job 14895641). It runs
+  across devices by panel-column split (`sigma/partitioned.go`, `adcgo -isr … -mgpu G`).
+
 ## The short answer
 
 cuTENSOR is not an alternative to Lanczos. They sit at different layers, and conflating them hides
@@ -126,7 +157,7 @@ reframes the work: the production whole-band DIP extrapolates to singlet 113 h +
 against a 120 h walltime**, so contractions are plausibly what make the run feasible at all, not
 merely faster.
 
-**Host-side baseline** (`internal/adc/dip/bench_satellite_test.go`, added so this stops requiring a
+**Host-side baseline** (`internal/adc/dip/matfree_test.go`, added so this stops requiring a
 cluster job — sub-second, runs on any machine):
 
 - `BenchmarkSatelliteApply` on the largest h2o_dzp sector: 0.048 / 0.88 / 2.07 GFLOP/s at

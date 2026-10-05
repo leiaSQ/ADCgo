@@ -37,9 +37,9 @@ func (el *Elem) build_t2_1() {
 // def_t2_1t0: \frac{{V^{ab}_{ij}}}{{e_{a}} + {e_{b}} - {e_{i}} - {e_{j}}}
 func (el *Elem) def_t2_1t0(i, j, a, b int) float64 {
 	var acc float64
-	fv4129 := el.asym(el.nocc+a, el.nocc+b, i, j)
-	if fv4129 != 0 {
-		acc += fv4129
+	fv14209 := el.asym(el.nocc+a, el.nocc+b, i, j)
+	if fv14209 != 0 {
+		acc += fv14209
 	}
 	return (1.0 / ((-1.0 * el.eps(i)) + (-1.0 * el.eps(j)) + el.eps(el.nocc+a) + el.eps(el.nocc+b))) * acc
 }

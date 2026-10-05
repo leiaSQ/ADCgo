@@ -21,20 +21,22 @@ const K = 4
 
 // GeneratedOrders is the highest order generated per block, indexed as
 // B00, B01, B11, B02, B12, B22 (-1: not generated).
-var GeneratedOrders = [6]int{2, 1, 1, -1, -1, -1}
+var GeneratedOrders = [6]int{2, 1, 2, -1, -1, -1}
 
 // Schemes maps each scheme name to its per-block maximum order (-1: the block
 // is absent in that scheme).
 var Schemes = map[string][6]int{
+	"adc22m":   [6]int{2, 1, 2, -1, -1, -1},
+	"adc22x":   [6]int{2, 1, 2, -1, -1, -1},
 	"adc2x":    [6]int{2, 1, 1, -1, -1, -1},
 	"ci":       [6]int{1, 1, 1, -1, -1, -1},
 	"strict:2": [6]int{2, 1, 0, -1, -1, -1},
 }
 
 // Derivation times of this generation (adcgen, seconds per block):
-//	B00         338.0 s
-//	B01          32.2 s
-//	B11         279.9 s
+//	B00         346.9 s
+//	B01          33.4 s
+//	B11       48661.3 s
 
 // Elem evaluates secular-matrix elements in the spin-orbital basis adcgen
 // derives them in: spin orbital p has spatial orbital p>>1 and spin p&1,
@@ -189,6 +191,8 @@ func (el *Elem) orderPart(block string, order int, idx []int) (v float64, ok boo
 		return el.b11o0(idx[0], idx[1], idx[2], idx[3], idx[4], idx[5], idx[6], idx[7], idx[8], idx[9], idx[10], idx[11]), true
 	case block == "B11" && order == 1:
 		return el.b11o1(idx[0], idx[1], idx[2], idx[3], idx[4], idx[5], idx[6], idx[7], idx[8], idx[9], idx[10], idx[11]), true
+	case block == "B11" && order == 2:
+		return el.b11o2(idx[0], idx[1], idx[2], idx[3], idx[4], idx[5], idx[6], idx[7], idx[8], idx[9], idx[10], idx[11]), true
 	}
 	return 0, false
 }

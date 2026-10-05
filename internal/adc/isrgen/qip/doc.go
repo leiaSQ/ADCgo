@@ -3,10 +3,10 @@
 // Package qip holds adcgen-generated ISR secular-matrix element evaluators
 // for quadruple ionization (qip, classes 4h | 5h1p | 6h2p).
 //
-// Generated with schemes adc2x, ci, strict:2; blocks B00<=2, B01<=1, B11<=1.
+// Generated with schemes adc22m, adc22x, adc2x, ci, strict:2; blocks B00<=2, B01<=1, B11<=2.
 // Regenerate with
 //
-//	python3.12 scripts/codegen/generate_adc.py --variant qip --schemes adc2x,ci,strict:2 \
+//	python3.12 scripts/codegen/generate_adc.py --variant qip --schemes adc22m,adc22x,adc2x,ci,strict:2 \
 //	    --outdir internal/adc/isrgen/qip
 //
 // fidelity_test.go (generated) replays testdata/adcgen_ref.json, an independent

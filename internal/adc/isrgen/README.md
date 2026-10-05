@@ -259,8 +259,8 @@ still hand-code only.
 
 ## Limits
 
-- **σ programs** for tip and qip cover adc2x and ci, with B12/B22 as plain CI. The adc22
-  schemes of qip (`internal/adc/quip.NewSigma`) wait on the second-order 5h1p/5h1p block.
+- **σ programs** for tip cover adc2x and ci, and for qip adc2x, ci and adc22m/x, with B12/B22
+  as plain CI. qip's adc22f needs B01 at second order, which has not been derived.
 - **Unpacked tensors.** Same-spin index groups are stored in full, so a group of n same-spin
   holes costs n! redundant elements. That is harmless for dip, but it would dominate qip's
   6h2p class.
