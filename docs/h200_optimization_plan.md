@@ -50,7 +50,7 @@ pattern before streams make the overlap in B4 worth building.
 
 **The correctness gap is closed.** Two jobs on 2026-07-23 exercised the batched-GEMM satellite path
 (`dip_fill_sat`, `newSatBatchedDevice`/`newSatBatchedPerDevice`) on **real CUDA backends** —
-`matfree_batched_cuda_test.go:99` builds sub-backends with `backend.NewAll("cuda", …)`, not gonum
+`matfree_device_test.go:99` builds sub-backends with `backend.NewAll("cuda", …)`, not gonum
 subs; gonum appears only as the host reference (`:34`):
 
 | job | node | tests | result |
@@ -195,7 +195,7 @@ row-partition-aware `ApplyBlock` on `sip.Matrix` composing with `distBackend`, t
 straddles a block — needed for C2's matfree coupling under `-mgpu`; (3) `cmd/adcgo` plumbing —
 `-mgpu` reachable from `-sip` (gated to `-dip` at `main.go:561-567`), and `checkSubsFit` (already
 generic, `dispatch.go:152-...`) wired as `main.go:477` does for DIP.
-- **Verify:** `TestSatelliteMatFreeDistributedEqualsDense`-style host coverage adapted for SIP; on-hardware parity mirroring `dip/matfree_mgpu_cuda_test.go`.
+- **Verify:** `TestSatelliteMatFreeDistributedEqualsDense`-style host coverage adapted for SIP; on-hardware parity mirroring `dip/matfree_device_test.go`.
 - **Effort:** 1–2 weeks — a genuine port, though every primitive it needs exists on the DIP side.
 
 **C4. Port `ApplyBlockSatellite` + `lanczos-lowmem` to SIP.** `sip.Matrix` does not implement
@@ -211,7 +211,7 @@ what `SolveLowMem`'s Tarantelli subspace-iteration gate needs (`dip_lowmem_lancz
 Given SIP's much smaller `n` (518k vs. DIP's 10–15M), Mode A (device-frugal, block < main) may be
 usable for SIP where it was ruled structurally incomplete for DIP's full band — check the Mode
 A/B findings there before assuming Mode B (fat-CPU-node) is the only target.
-- **Verify:** mirror `TestSolveLowMemModeB_MatchesDense`/`TestSolveLowMemModeA_FullExact` for SIP; satellite gate vs. a masked dense operator, mirroring `dip/satellite_test.go`.
+- **Verify:** mirror `TestSolveLowMemModeB_MatchesDense`/`TestSolveLowMemModeA_FullExact` for SIP; satellite gate vs. a masked dense operator, mirroring `dip/satelem_test.go`.
 - **Effort:** 1–2 weeks, gated on C1+C2 (the satellite-only apply needs the coupling matfree gate to stay cheap under `-lowmem-block 0`, where panel width equals the full main space).
 
 **C5. SIP pre-flight guard.** `sip_tdm.go:85-141`'s `solveSIPSpace` never calls `checkDeviceFit`
