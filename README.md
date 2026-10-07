@@ -15,6 +15,54 @@ stdout (or `-out FILE`). A companion CLI, `cmd/plotspec`, renders that JSON to a
 (PNG/SVG/PDF) — decay-channel, single-ionization, and transition-dipole spectra. See
 [Plotting](#plotting).
 
+## Install
+
+New to Go? It compiles to a single binary; no runtime or virtualenv is needed.
+
+**1. Install Go 1.26 or newer** (check with `go version`; skip if it is already new enough).
+
+```sh
+# Linux x86-64; other platforms: https://go.dev/dl
+curl -LO https://go.dev/dl/go1.26.5.linux-amd64.tar.gz
+mkdir -p ~/.local && tar -C ~/.local -xzf go1.26.5.linux-amd64.tar.gz
+echo 'export PATH=$HOME/.local/go/bin:$PATH' >> ~/.bashrc && source ~/.bashrc
+go version
+```
+
+**2. Get the code and build.** Go downloads the dependencies on the first build (needs internet).
+
+```sh
+git clone https://github.com/leiaSQ/ADCgo.git
+cd ADCgo
+go build -o adcgo ./cmd/adcgo          # the solver
+go build -o plotspec ./cmd/plotspec    # optional: JSON -> PNG/SVG/PDF
+```
+
+- `go run ./cmd/adcgo ARGS` compiles and runs in one step; the examples below use it.
+- `./adcgo -h` lists the flags; `./adcgo -h topics` the help topics.
+- Pure-Go by default. For OpenBLAS, CUDA or HIP see [Backends](#backends).
+
+**3. Optional: Python + pyscf**, only to make FCIDUMPs for your own molecules
+(`scripts/fixtures/`, `scripts/fcidump/`). The water example below is already in `testdata/`.
+
+```sh
+pip install pyscf numpy
+```
+
+## Quick start
+
+```sh
+# 1. Sanity: reconstructed HF + MP2 energies from the FCIDUMP.
+./adcgo -fcidump testdata/h2o.fcidump
+
+# 2. Single ionization, IP-ADC(3), one sector per irrep.
+./adcgo -fcidump testdata/h2o.fcidump -sip -order 3 -sym all -out sip.json
+
+# 3. Per-orbital stick spectrum, rendered to a PNG.
+./adcgo -fcidump testdata/h2o.fcidump -sip -order 3 -sym all -spectrum -out spec.json
+./plotspec -in spec.json -out spec.png -fwhm 1.0
+```
+
 ## What it computes
 
 | Capability | Method | Flags |
@@ -23,22 +71,8 @@ stdout (or `-out FILE`). A companion CLI, `cmd/plotspec`, renders that JSON to a
 | Single ionization | non-Dyson IP-ADC(2) / IP-ADC(3) | `-sip -order 2\|3` |
 | Core single ionization | CVS Dyson IP-ADC(4) | `-sip -order 4 -core` |
 | Auger / ICD / ETMD spectrum | decay-channel classification | `-spectrum` |
-| Bare eigenvalue spectrum | one stick per state (energy + pole strength) | `-bare` |
+| Decay widths and lifetimes | Fano-ADC(2)x / ADC(2,2) with Stieltjes imaging | `-fano` |
 | Transition dipoles | RASSI-like ion→ion emission, Dyson photoionization, core→valence X-ray emission | `-tdm` |
-
-## Quick start
-
-```sh
-# 0. Generate integrals: RHF+MP2 on H2O/cc-pVDZ, C2v (needs pyscf; see below).
-#    Writes testdata/h2o.fcidump and the sidecar testdata/h2o.mo.json.
-python scripts/fixtures/gen_fcidump.py
-
-# 1. Sanity: reconstructed HF + MP2 energies from the FCIDUMP.
-go run ./cmd/adcgo -fcidump testdata/h2o.fcidump
-
-# 2. Single ionization, IP-ADC(3), one sector per irrep.
-go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -order 3 -sym all
-```
 
 ## Methods
 
@@ -93,115 +127,25 @@ go run ./cmd/adcgo -fcidump testdata/h2o_dzp.fcidump -dip -mo testdata/h2o_dzp.m
     -solver dense -sym all -spectrum -group "wat=O,~H1,~H2" -init-atom wat
 ```
 
-### Decay widths and lifetimes — Fano-ADC(2,2) `-fano`
+### Decay widths and lifetimes — `-fano`
 
-Electronic decay *rates*, not just channels: Γ and τ = ℏ/Γ for a chosen vacancy, by the
-Fano/Feshbach method with Stieltjes imaging
+> **[`docs/fano.md`](docs/fano.md) is the full reference**: basis requirements, how to tell
+> whether a width is converged, and the `-dip` / `-khci` families.
+
+Γ and τ = ℏ/Γ for a chosen vacancy, by the Fano/Feshbach method with Stieltjes imaging
 ([Kolorenč & Averbukh, *J. Chem. Phys.* **152**, 214107 (2020)](https://doi.org/10.1063/5.0007912)).
-Works over any SIP secular matrix: `-order 2` is Fano-ADC(2)x, `-order 22` the new ADC(2,2)
-scheme, whose explicit 3h2p class is what makes second-order decay (double Auger, double ICD)
-describable at all. `-adc22 m|x|f` selects the variant; `f` is the paper's recommendation.
+`-sip -order 2` is Fano-ADC(2)x; `-order 22 -adc22 f` is ADC(2,2), which also describes
+second-order decay (double Auger, double ICD). `-mo` adds partial widths per channel.
 
 ```sh
-# Ne+ (1s^-1) Auger width. The vacancy fixes the target irrep, so -sym is determined.
-go run ./cmd/adcgo -fcidump ne.fcidump -sip -order 22 -adc22 f     -fano -fano-init 0 -sym all -solver lanczos -matfree on
-
-# interatomic decay: Q is every configuration with ALL holes on the donor subunit
-go run ./cmd/adcgo -fcidump dimer.fcidump -sip -order 22 -fano     -fano-init 2 -fano-q 2,3,4 -fano-rule all -mo dimer.mo.json -init-atom A
+# Ne+ (1s^-1) Auger width
+go run ./cmd/adcgo -fcidump ne.fcidump -sip -order 22 -adc22 f -fano -fano-init 0 \
+    -sym all -solver lanczos -matfree on
 ```
 
-`-mo` adds approximate partial widths per channel (Auger@A, ICD:A→B, ETMD, and `double` for
-the 3h2p/second-order channel), each imaged separately.
-
-**Basis requirement — the thing that decides whether a run is possible at all.** Imaging can
-only evaluate Γ(E_Φ) if the 2h1p pseudo-continuum brackets E_Φ, and a 2h1p state sits at
-ε_a − ε_k − ε_l. So what matters is the *energy span and level density of the virtual space*
-near E_Φ, not diffuseness. For the Ne 1s vacancy (E_Φ ≈ 32 E_h) aug-cc-pVTZ tops out at
-14.6 E_h and cannot describe the decay at all; aug-cc-pVQZ reaches 68.9 E_h. The run log
-reports how many P configurations actually carry coupling and warns when there are too few
-for the imaging to settle:
-
-| Ne⁺(1s⁻¹), Fano-ADC(2)x | coupled channels | Γ (meV) |
-|---|---|---|
-| aug-cc-pVQZ | 77 | 642 ± 269 |
-| aug-cc-pV5Z | 96 | 316 ± 8 |
-| aug-cc-pV5Z + 4s4p4d | 165 | 227 ± 10 |
-| published (Table VI) | | 244 ± 4 |
-
-Two diagnostics decide whether a width is trustworthy, and both are printed:
-
-- **coupled channels** — how many P configurations carry any coupling at all. Imaging
-  reconstructs a density from these alone, so a few tens gives a large Stieltjes spread
-  however well the rest of the pipeline works.
-- **sum-rule residual** — the pseudo-continuum's total strength against the exact
-  2π‖g‖². It is zero for a complete basis, so a large value means the Krylov space was
-  truncated before it captured the coupling. An unconverged width can still look
-  reasonable with a *small* error bar, because the Stieltjes orders agree with each other
-  about the wrong density — so raise `-fano-blocks` until the residual closes.
-
-`scripts/fixtures/gen_fano_atoms.py` generates the atomic fixtures and
-`scripts/helix/fano_table6.sbatch` runs the comparison on a compute node (necessary: the login
-node's user slice caps CPU at 4 cores, so `GOMAXPROCS` is 4 there whatever `nproc` says).
-
-### Beyond single ionization — `-dip -fano` and `-khci K -fano`
-
-The same Fano pipeline runs over two more families:
-
-| Family | Flags | Matrix | Use |
-|---|---|---|---|
-| double ionization | `-dip -fano -spin singlet\|triplet -sym none\|IRREP` | DIP-ADC(2), one sector | widths of dicationic states (no partial widths: the 3h1p decay class has no channel routing) |
-| k-hole CI | `-khci K -fano -sym none\|IRREP` | H − E_HF over kh \| (k+1)h1p \| (k+2)h2p, any orbitals | multiply ionized initial states (K = 1..4) |
-
-`-khci` accepts localized orbitals: with a labelled sidecar (`dump_fcidump`'s `&orbitals
-localized` scheme), `-fano-qp` takes a net-charge rule such as `'p: charge *=1 & free=1'`
-(every atom singly charged and one free electron), and `-fano-phi-holes 0,0,4,4` selects
-the decaying state as the interior QMQ root heaviest on that configuration, polished to
-`-fano-phi-tol` (default 1e-10 Eh).
-
-For widths far below the coupling scale (10⁻¹⁵ Eh), use an engine that needs no PMP
-eigenvectors and has no final-state cut: `-fano-engine gauss` (Gauss rules from a Lanczos
-run seeded by the coupling vector), `shiftinvert` or `kpm`. The noise floor is measured,
-not assumed: `-fano-lambda 'C:D=0'` switches one electron transfer off exactly, and
-`-fano-save-g` / `-fano-image-g` image the double difference of such runs.
-
-```sh
-# a four-hole initial state (two doubly emptied orbitals), labelled localized dump
-adcgo -fcidump sys.fcidump -mo sys.mo.json -khci 4 -khci-maxfree 1 -sym none -fano \
-    -fano-init 0 -fano-phi-holes 0,0,4,4 -fano-engine gauss -fano-decompose \
-    -fano-qp 'p: charge *=1 & free=1'
-```
-
-### Bare eigenvalue spectrum — `-bare`
-
-The plain solver output is just eigenvalues (energies + pole strengths), like legacy ADC.
-`-bare` turns that list directly into a stick-spectrum JSON — one line per state, energy =
-ionization energy, intensity = pole strength (ps/100), all on a single `states` channel —
-without any decay-channel or per-orbital classification. It works for both `-dip` and
-`-sip`, needs no `-mo` sidecar, and renders through [`cmd/plotspec`](#plotting) exactly like
-any other spectrum (one broadened curve). DIP `-spectrum` *without* `-mo` falls back to this
-same bare spectrum, since decay channels require atom-resolved populations.
-
-```sh
-# bare per-state DIP spectrum (no MO sidecar needed)
-go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -dip -bare -solver dense -out bare.json
-go run ./cmd/plotspec -in bare.json -out bare.png -fwhm 1.0
-
-# bare per-state SIP spectrum (vs. the per-orbital -spectrum decomposition)
-go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -sip -bare -out sip_bare.json
-```
-
-`-convert FILE` post-processes an **already-emitted** solver document (the default
-`-dip`/`-sip` JSON, or the `-out` file from an earlier run) into the same bare spectrum,
-without re-solving — the document already carries every state's energy and pole strength.
-Pass `-dip` or `-sip` to say which kind of document it is. The result is byte-identical to
-running `-bare` on the original problem.
-
-```sh
-# solve once, keep the full document...
-go run ./cmd/adcgo -fcidump testdata/h2o.fcidump -dip -solver dense -out dip.json
-# ...then derive the bare spectrum from that file whenever you need it
-go run ./cmd/adcgo -convert dip.json -dip -out bare.json
-```
+The basis must reach E_Φ: a 2h1p continuum that stops below the vacancy energy gives no width
+at all (Ne 1s needs aug-cc-pVQZ or larger). Check the **coupled channels** and **sum-rule
+residual** lines in the log before trusting Γ.
 
 ### Transition dipole moments — `-tdm` (`-rassi`)
 
@@ -461,14 +405,24 @@ topics` lists them all; `adcgo -h all` is the unabridged flag dump.
 ## Backends
 
 Default is pure-Go (`gonum`); the accelerated backends are build-tag gated and selected
-at runtime with `-backend`.
+at runtime with `-backend`. They use cgo, so they also need a C compiler (`gcc`).
+
+| Backend | Needs | Build |
+|---|---|---|
+| `openblas` (multicore CPU) | OpenBLAS + LAPACKE dev packages (`libopenblas-dev liblapacke-dev` / `openblas-devel lapack-devel`) | `go build -tags openblas -o adcgo ./cmd/adcgo` |
+| `hip` (AMD) | ROCm under `/opt/rocm` (hipBLAS, hipSOLVER) | `go build -tags hip -o adcgo ./cmd/adcgo` |
+| `cuda` (NVIDIA) | CUDA toolkit with `nvcc`; the `.cu` kernels are compiled first | `scripts/helix/build_adcgo_cuda_helix` → `./adcgo-cuda` |
 
 ```sh
-go run -tags openblas ./cmd/adcgo -fcidump testdata/h2o.fcidump -dip -sym all   # multicore CPU
+./adcgo -fcidump testdata/h2o.fcidump -dip -sym all       # openblas build: no -backend needed
 HSA_OVERRIDE_GFX_VERSION=11.0.0 \
-  go run -tags hip ./cmd/adcgo -fcidump testdata/h2o.fcidump -dip -backend hip -sym 0 -spin singlet
-go build -tags cuda ./...   # cuBLAS: compiles here, run on an NVIDIA host
+  ./adcgo -fcidump testdata/h2o.fcidump -dip -backend hip -sym 0 -spin singlet
+./adcgo-cuda -fcidump testdata/h2o.fcidump -dip -backend cuda -sym all
 ```
+
+`go build -tags cuda` alone does **not** rebuild the `.cu` kernels; it links whatever
+`backend/*.o` are on disk. Run the build script after editing a kernel. Cluster specifics
+(modules, GPU models, SLURM): [`scripts/helix/HELIX.md`](scripts/helix/HELIX.md).
 
 With `-backend auto` the solver calibrates each available backend once and picks the
 predicted-fastest per sector (measuring the real mat-vec cost, not a flop estimate).
