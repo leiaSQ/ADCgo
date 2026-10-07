@@ -24,7 +24,7 @@ These are FORTRAN unformatted tapes (`adc4.in` = the run's keyword input):
 B2 has no core hole in its own irrep, so there is **no 1h main block** — the matrix
 is 42 (2h1p) + 1646 (3h2p) = 1688. This tape therefore validates the 2h1p/2h1p block
 (WERT1, 3rd+4th order) and the 2h1p↔3h2p coupling (WERT2), but not the KOPP 1h
-couplings (those need an A1 tape). See `internal/adc/sip/adc4_gate_test.go`.
+couplings (those need an A1 tape). See `internal/adc/sip/elements4_test.go`.
 
 The reference permutes 3h2p columns internally (`ab5.F` `pam`/ELIM reordering), which
 does not change eigenvalues; the coupling block is therefore compared

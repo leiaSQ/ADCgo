@@ -94,9 +94,10 @@ func (e *elements) expand2(cfg Config) []term2 {
 	}
 	b := doubletCSF(3)
 	row := b.Coef[cfg.Typ]
+	ph := holeOrderPhase(k, l)
 	out := make([]term2, 0, len(b.Dets))
 	for d, det := range b.Dets {
-		c := row[d]
+		c := ph * row[d]
 		if c == 0 {
 			continue
 		}
@@ -186,6 +187,21 @@ func sortSmall(a []int) {
 	}
 }
 
+// holeOrderPhase is the phase between a 2h1p spin function built in the Config's
+// role order (Occ[0], Occ[1]) and theADCcode's, whose hole operators always stand
+// in descending orbital order. The two strings differ by one fermionic swap when
+// Occ[0] < Occ[1], for both spin types alike. The C1 enumeration never stores that
+// order (l < k always), but addSat's symmetry blocking puts the hole of the higher
+// irrep first whatever its index, and without this phase c22_2 and c23_1 were
+// written in a different basis from c12 and c22off there: a symmetry-only error of
+// up to 0.27 eV in aug-cc-pVDZ H2O and CO ADC(2,2) main lines.
+func holeOrderPhase(k, l int) float64 {
+	if k < l {
+		return -1
+	}
+	return 1
+}
+
 // expandDet2 expands a spin-adapted 2h1p configuration over determinants. The
 // open shells are taken in the Config's own role order (Occ[0], Occ[1], particle),
 // which is what makes spin-function index 0/1 agree with Config.Typ.
@@ -202,6 +218,7 @@ func (e *elements) expandDet2(cfg Config) []detTerm {
 	}
 	b := doubletCSF(3)
 	row := b.Coef[cfg.Typ]
+	ph := holeOrderPhase(k, l)
 	out := make([]detTerm, 0, len(b.Dets))
 	for d, det := range b.Dets {
 		if row[d] == 0 {
@@ -212,7 +229,7 @@ func (e *elements) expandDet2(cfg Config) []detTerm {
 			flip(sorb{Orb: l, Dn: det[1] == spinDown}),
 		}
 		parts := []sorb{{Orb: a, Dn: det[2] == spinDown}}
-		out = append(out, detTerm{E: mkExc(holes, parts), C: row[d]})
+		out = append(out, detTerm{E: mkExc(holes, parts), C: ph * row[d]})
 	}
 	return out
 }

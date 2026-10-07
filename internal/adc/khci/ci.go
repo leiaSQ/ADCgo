@@ -61,7 +61,8 @@ type CI struct {
 	nirr  int
 	irrep []int // spatial orbital -> irrep (all 0 without symmetry)
 
-	csr atomic.Pointer[csrMat]
+	csr  atomic.Pointer[csrMat]
+	need atomic.Int64 // bytes the CSR needs, from the last Materialize count (0: never counted)
 }
 
 // csrMat is the materialized off-diagonal part, row-major.
@@ -565,7 +566,8 @@ func (ci *CI) Materialize(maxBytes int64) bool {
 		counts[r+1] += counts[r]
 	}
 	nnz := counts[n]
-	if 12*nnz+8*int64(n+1) > maxBytes {
+	ci.need.Store(12*nnz + 8*int64(n+1))
+	if ci.need.Load() > maxBytes {
 		return false
 	}
 	m := &csrMat{start: counts, col: make([]int32, nnz), val: make([]float64, nnz)}
@@ -580,6 +582,10 @@ func (ci *CI) Materialize(maxBytes int64) bool {
 	ci.csr.Store(m)
 	return true
 }
+
+// CSRBytes is what storing the couplings takes (12 bytes per coupling plus the row
+// starts), as counted by the last Materialize, whether or not it fit; 0 before any.
+func (ci *CI) CSRBytes() int64 { return ci.need.Load() }
 
 // NNZ is the number of stored off-diagonal couplings, 0 when not materialized.
 func (ci *CI) NNZ() int64 {

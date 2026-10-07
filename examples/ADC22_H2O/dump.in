@@ -1,0 +1,19 @@
+# H2O aug-cc-pVDZ, frozen O 1s: the integrals of the ADC(2,2) oracle (ADC22.H2O.tar.bz2,
+# MOLCAS SEWARD/SCF/MOTRA + Prema's 1h-ADC(2,2), variant F, one run per C2v irrep)
+&geometry
+  file   h2o.xyz
+  unit   angstrom
+&basis
+  name   aug-cc-pvdz
+&scf
+  charge 0
+  spin   0
+  symmetry C2v
+  gate   -76.0413935200
+  max_cycle 200
+&active
+  frozen-core 1
+&output
+  fcidump  h2o_apvdz.fcidump
+  sidecar  h2o_apvdz.mo.json
+  manifest h2o_apvdz.ref.json

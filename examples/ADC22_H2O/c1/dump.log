@@ -1,0 +1,6 @@
+converged SCF energy = -76.0413935199872
+SCF gate OK: E(SCF)=-76.0413935200 Ha (ref -76.0413935200)
+wrote /gpfs/bwfor/home/hd/hd_hd/hd_hh323/ADCgo/examples/ADC22_H2O/c1/h2o_c1.fcidump  NORB=40 NELEC=8 nocc=4 ncore_frozen=1
+wrote /gpfs/bwfor/home/hd/hd_hd/hd_hh323/ADCgo/examples/ADC22_H2O/c1/h2o_c1.mo.json  nAO=41 atoms=['O', 'H1', 'H2'] dipole_origin=[0.0, 0.0, 0.0]
+wrote /gpfs/bwfor/home/hd/hd_hd/hd_hh323/ADCgo/examples/ADC22_H2O/c1/h2o_c1.ref.json
+E(SCF) = -76.0413935200 Ha  NORB=40 NELEC=8  ORBSYM=[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]

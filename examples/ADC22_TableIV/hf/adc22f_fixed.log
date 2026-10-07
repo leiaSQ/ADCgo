@@ -1,0 +1,55 @@
+adcgo: GOMEMLIMIT auto-set to 170 GiB (85% of the 200 GiB cgroup cap) to keep RSS under the SLURM --mem limit
+
+ ADCgo: a modern implementation of ADC 
+ Authors: Leia Wertebach, Alexander Kuleff 
+
+ Derived from: 
+ TheADCcode: A collection of ADC/ISR source codes.
+ Contributors: Nikolay Golubev,
+ Yasen Velkov (developer of the original version),
+ Alexander Kuleff,
+ Anthony Dutoi, Nicolas Sisourat, Tsveta Miteva,
+ Joerg Breidbach, Imke Mueller, Nayana Vaval,
+ Francesco Tarantelli, Soeren Kopelke,
+ Sajeev Yesodharan, Kirill Gokhberg, Robin Santra
+
+
+adcgo: sip sym=0 assemble ADC(2,2)f: n=4202 (main=2 2h1p=130 3h2p=4070)
+adcgo: sip sym=0 assemble: 1h/1h main block (2×2) ...
+adcgo: sip sym=0 main block: cached to /gpfs/bwfor/home/hd/hd_hd/hd_hh323/ADCgo/examples/ADC22_TableIV/hf/hf.fcidump.mainblock.o22.i0.cache
+adcgo: sip sym=0 assemble: 1h/1h main block (2×2) done in 0s
+adcgo: sip sym=0 assemble: 1h/2h1p coupling (2×130) ...
+adcgo: sip sym=0 assemble: 1h/2h1p coupling (2×130) done in 0s
+adcgo: sip sym=0 assemble: 2h1p/2h1p block (130×130) ...
+adcgo: sip sym=0 assemble: 2h1p/2h1p block (130×130) done in 0s
+adcgo: sip sym=0 assemble: 2h1p/3h2p coupling, dense (130×4070) ...
+adcgo: sip sym=0 assemble: 2h1p/3h2p coupling, dense (130×4070) done in 0s
+adcgo: sip sym=0 assemble: 3h2p/3h2p block, dense (4070×4070) ...
+adcgo: sip sym=0 assemble: 3h2p/3h2p block, dense (4070×4070) done in 15s
+adcgo: sip sym=0 assemble complete in 15s; entering the solver
+adcgo: sip sym=2 assemble ADC(2,2)f: n=4105 (main=1 2h1p=108 3h2p=3996)
+adcgo: sip sym=2 assemble: 1h/1h main block (1×1) ...
+adcgo: sip sym=2 main block: cached to /gpfs/bwfor/home/hd/hd_hd/hd_hh323/ADCgo/examples/ADC22_TableIV/hf/hf.fcidump.mainblock.o22.i2.cache
+adcgo: sip sym=2 assemble: 1h/1h main block (1×1) done in 0s
+adcgo: sip sym=2 assemble: 1h/2h1p coupling (1×108) ...
+adcgo: sip sym=2 assemble: 1h/2h1p coupling (1×108) done in 0s
+adcgo: sip sym=2 assemble: 2h1p/2h1p block (108×108) ...
+adcgo: sip sym=2 assemble: 2h1p/2h1p block (108×108) done in 0s
+adcgo: sip sym=2 assemble: 2h1p/3h2p coupling, dense (108×3996) ...
+adcgo: sip sym=2 assemble: 2h1p/3h2p coupling, dense (108×3996) done in 1s
+adcgo: sip sym=2 assemble: 3h2p/3h2p block, dense (3996×3996) ...
+adcgo: sip sym=2 assemble: 3h2p/3h2p block, dense (3996×3996) done in 15s
+adcgo: sip sym=2 assemble complete in 16s; entering the solver
+adcgo: sip sym=3 assemble ADC(2,2)f: n=4105 (main=1 2h1p=108 3h2p=3996)
+adcgo: sip sym=3 assemble: 1h/1h main block (1×1) ...
+adcgo: sip sym=3 main block: cached to /gpfs/bwfor/home/hd/hd_hd/hd_hh323/ADCgo/examples/ADC22_TableIV/hf/hf.fcidump.mainblock.o22.i3.cache
+adcgo: sip sym=3 assemble: 1h/1h main block (1×1) done in 0s
+adcgo: sip sym=3 assemble: 1h/2h1p coupling (1×108) ...
+adcgo: sip sym=3 assemble: 1h/2h1p coupling (1×108) done in 0s
+adcgo: sip sym=3 assemble: 2h1p/2h1p block (108×108) ...
+adcgo: sip sym=3 assemble: 2h1p/2h1p block (108×108) done in 0s
+adcgo: sip sym=3 assemble: 2h1p/3h2p coupling, dense (108×3996) ...
+adcgo: sip sym=3 assemble: 2h1p/3h2p coupling, dense (108×3996) done in 1s
+adcgo: sip sym=3 assemble: 3h2p/3h2p block, dense (3996×3996) ...
+adcgo: sip sym=3 assemble: 3h2p/3h2p block, dense (3996×3996) done in 13s
+adcgo: sip sym=3 assemble complete in 14s; entering the solver

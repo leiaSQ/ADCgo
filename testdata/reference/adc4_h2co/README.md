@@ -40,7 +40,7 @@ bit-exact.)
    active orbital 1 → vfile).
 2. **Reference matrix** — `theADCcode < adc4_a1.in` (ADC4CVS, `sym 1` = A1), giving
    `FT21F001.ADC` (off-diagonals) + `FT18F001.ADC` (header + 1h/2h1p diagonal).
-3. **Matched FCIDUMP** — `scripts/gen_h2co_ref.py` (pyscf, cc-pVDZ `cart=True`, GUK's
+3. **Matched FCIDUMP** — `scripts/fixtures/gen_h2co_ref.py` (pyscf, cc-pVDZ `cart=True`, GUK's
    oriented geometry, freeze 1 core → 39 active; gates on the SCF energy). The
    3h2p effective diagonal (WERT3+ELIM) and the static Σ are out of scope here as for
    H2O (not on the tape / external), see `../../..//internal/adc/sip/matvec4.go`.

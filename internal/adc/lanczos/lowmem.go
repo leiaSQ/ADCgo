@@ -99,12 +99,21 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 	abuf := be.Alloc(b * b)     // α = curᵀ·W
 	gbuf := be.Alloc(b * b)     // blockOrth Gram
 	pbuf := be.Alloc(2 * b * b) // cgs2 projection coefficients (≤2b × b)
-	defer be.Free(pcBuf)
-	defer be.Free(workBuf)
-	defer be.Free(tmpBuf)
-	defer be.Free(abuf)
-	defer be.Free(gbuf)
-	defer be.Free(pbuf)
+	// The Krylov panels are the largest device allocation in the run — pcBuf alone is n*2*b, ~274 GB
+	// at the production DIP shape — and every one of them is DEAD the moment the block loop ends:
+	// what the eigensolve and packLowMem consume afterwards (blocks, qmain, betaExtra) is all
+	// host-side. Freeing them only on return meant the banded eigensolve allocated its own
+	// multi-gigabyte accumulator while a quarter of a terabyte of finished panels was still
+	// resident. freePanels is called explicitly after the loop and deferred as a safety net, so an
+	// early return still releases them exactly once.
+	panels := []backend.Vector{pcBuf, workBuf, tmpBuf, abuf, gbuf, pbuf}
+	freePanels := func() {
+		for _, v := range panels {
+			be.Free(v)
+		}
+		panels = nil
+	}
+	defer freePanels()
 	pc := backend.BlockView{V: pcBuf, Rows: n, Cols: 2 * b, Ld: n}
 
 	// Mode A retains the main-space slice of every basis vector on the host (main × dim),
@@ -264,10 +273,33 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 		}
 	}
 
+	freePanels()
+
 	// Assemble the projected matrix T from the block α/β and diagonalize.
+	//
+	// The reduction inside this gets its own checkpoint, on the SAME base path plus ".eig". It needs
+	// one: at the production DIP shape it is ~144 h of work under a 120 h walltime, so without a
+	// restart point inside it the daisychain restored the Krylov state, ground most of a generation
+	// into the reduction, was killed, and repeated — never converging. The Krylov checkpoint above
+	// cannot serve: it describes a phase that has already finished by this line.
+	var eigCkpt *bandEigCkpt
+	if lmCkpt {
+		eigCkpt = &bandEigCkpt{
+			path:     cp.Path + ".eig",
+			interval: bandEigCkptInterval,
+			stop:     cp.Stop,
+		}
+	}
 	tEig := time.Now()
-	theta, topVecs, botVecs, sDense := diagProjected(be, blocks, dim, b, main, modeB)
+	theta, topVecs, botVecs, sDense, stopped := diagProjected(be, blocks, dim, b, main, modeB,
+		opts.EigenWorkers, opts.EigenDevice, opts.EigenB2, opts.EigenProgress, eigCkpt)
 	tm.Eig = time.Since(tEig)
+	if stopped {
+		// The reduction saved itself and gave up. Returning Interrupted makes the driver exit 64
+		// ("resume needed") exactly as an interrupted Krylov phase does, so the successor generation
+		// picks the reduction up where it stopped instead of restarting it.
+		return Result{Interrupted: true, Timing: tm}
+	}
 
 	// Recover main-space components and pole strengths.
 	tBack := time.Now()
@@ -305,11 +337,39 @@ func reorthFull(be backend.Backend, hostQ [][]float64, v backend.BlockView, n, b
 	return rank, r
 }
 
+// eigenAccel picks the backend that will replay the eigensolve's rotations on a device, or nil.
+//
+// The direct assertion is not enough, and that gap shipped: under -mgpu the backend is a
+// distBackend, which embeds Gonum and does not implement BandEigKernels, so `be.(BandEigKernels)`
+// failed silently and -eig-device did nothing at all in the only configuration production runs in.
+//
+// The fallback asks PartitionedDevices for device 0, the same idiom internal/adc/dip/matfree_dist.go
+// uses to reach a single device. One device is the right answer rather than a compromise: the
+// eigensolve is a separate phase after the Krylov build, the accumulator is ~7.6 GB against an
+// H200's 141 GB, and the work is one dependency chain with no row partition to exploit.
+//
+// Resolving it HERE rather than by giving distBackend the method matters: a distributed backend over
+// host sub-backends would then advertise a capability it cannot honour, turning a graceful fallback
+// into a panic. A nil return lets the caller say so and carry on.
+func eigenAccel(be backend.Backend) backend.BandEigKernels {
+	if k, ok := be.(backend.BandEigKernels); ok {
+		return k
+	}
+	if pd, ok := be.(backend.PartitionedDevices); ok && pd.NumParts() > 0 {
+		if k, ok := pd.PartBackend(0).(backend.BandEigKernels); ok {
+			return k
+		}
+	}
+	return nil
+}
+
 // diagProjected builds the block-tridiagonal projected matrix T from the accepted blocks and
-// diagonalizes it. Mode B returns the 2·band top/bottom eigenvector slices via the banded
-// solver (topVecs/botVecs, each main-relevant rows × dim); Mode A returns the full dense
-// eigenvectors sDense (dim×dim) instead. theta is ascending in both.
-func diagProjected(be backend.Backend, blocks []lmBlock, dim, b, main int, modeB bool) (theta []float64, topVecs, botVecs [][]float64, sDense backend.Mat) {
+// diagonalizes it. Mode B returns the top/bottom eigenvector slices via the banded solver
+// (topVecs is `main` rows, botVecs the last block's rows, each × dim); Mode A returns the full
+// dense eigenvectors sDense (dim×dim) instead. theta is ascending in both.
+func diagProjected(be backend.Backend, blocks []lmBlock, dim, b, main int, modeB bool,
+	eigenWorkers int, eigenDevice bool, eigenB2 int,
+	progress func(col, cols int, elapsed time.Duration), ckpt *bandEigCkpt) (theta []float64, topVecs, botVecs [][]float64, sDense backend.Mat, interrupted bool) {
 	if modeB {
 		band := max(min(2*b-1, dim-1), 0)
 		lastSize := 0
@@ -326,7 +386,11 @@ func diagProjected(be backend.Backend, blocks []lmBlock, dim, b, main int, modeB
 		// Both edges here have shipped: MaxBlocks = 1 with main > 1 gave a bottom slice one row
 		// short (index -1, job 14787917), and a one-dimensional main space gave band = 0. The
 		// block sweep in cmd/adcgo covers both.
-		if band < main || band < lastSize {
+		// main+lastSize > dim would make the two requested strips overlap, so the banded solver
+		// cannot serve both from one accumulator. Deflation can shrink the accepted blocks far
+		// enough for that (dim is the sum of the accepted sizes, not blocks*b), and like the two
+		// conditions before it, dim is tiny whenever it fires.
+		if band < main || band < lastSize || main+lastSize > dim {
 			T := backend.NewMat(dim, dim)
 			fillDense(T, blocks)
 			theta, sFull := be.SymEig(T)
@@ -345,39 +409,73 @@ func diagProjected(be backend.Backend, blocks []lmBlock, dim, b, main int, modeB
 					bot[r][k] = sFull.At(dim-bw+r, k)
 				}
 			}
-			return theta, top, bot, backend.Mat{}
+			return theta, top, bot, backend.Mat{}, false
 		}
 		bs := newBandStorage(dim, band)
 		fillBand(bs, blocks)
-		theta, z := bandSymDiagFast(bs)
-		nm := 2 * band
-		// Split z (nm×dim column-major) into the top `main` rows and the bottom `size_last`
-		// rows per eigenvector. Callers only need the top `main` (main space) and the whole
-		// bottom band (for the residual); expose both as row-major [row][k].
+		// Ask the banded solver for exactly the rows that get used: the top `main` (main-space
+		// components, hence the pole strengths) and the last block's rows (the Ritz residual).
+		// The bandwidth stays at `band` — fillBand needs it — but the accumulator does not: at
+		// main = b and band = 2b-1 this is about half the rows the symmetric 2*band form would
+		// carry, which halves both the rotation work and z's footprint (15.2 GB -> 7.6 GB at the
+		// production DIP shape). See bandEigOpts.
+		// The device replay is opt-in and silently unavailable on a host backend, which is what a
+		// CPU-only build or -backend gonum gives. Under -mgpu the distributed backend forwards it to
+		// one device (backend/distributed.go), so this assertion succeeds there too — it did not
+		// before, and -eig-device was a no-op in exactly the configuration production uses.
+		var accel backend.BandEigKernels
+		if eigenDevice {
+			if accel = eigenAccel(be); accel == nil {
+				fmt.Fprintf(os.Stderr, "adcgo: -eig-device requested but backend %T cannot replay the "+
+					"eigensolve on a device; running it on the host\n", be)
+			}
+		}
+		eo := bandEigOpts{
+			topRows: main, botRows: lastSize, workers: eigenWorkers, accel: accel,
+			progress: progress, ckpt: ckpt,
+		}
+		// Stage 1, after the guard above so that guard keeps testing the ORIGINAL bandwidth: it decides
+		// whether the strips can be served at all, and handing it the narrowed value would divert every
+		// production run to the dense path.
+		if eigenB2 > 0 && eigenB2 < band {
+			if narrow, z1 := narrowProjected(blocks, dim, eigenB2, eo, bs); z1 != nil {
+				bs, eo.resumeZ = narrow, z1
+			}
+		}
+		theta, z, ld, stopped := bandSymDiagFastOpts(bs, eo)
+		if stopped {
+			return nil, nil, nil, backend.Mat{}, true
+		}
+		// Transpose the column-major accumulator into row-major [row][k] slices. Every cell is
+		// written exactly once from one source cell, so splitting k is bit-for-bit the serial
+		// result; Chunks (not Rows) because it has no serial floor and its contiguous ranges
+		// are fixed run to run.
 		top := make([][]float64, main)
 		for r := range main {
 			top[r] = make([]float64, dim)
 		}
-		bot := make([][]float64, band)
-		for r := range band {
+		bot := make([][]float64, lastSize)
+		for r := range lastSize {
 			bot[r] = make([]float64, dim)
 		}
-		for k := range dim {
-			col := z[k*nm : k*nm+nm]
-			for r := range main {
-				top[r][k] = col[r]
+		parallel.Chunks(dim, parallel.ChunkWorkers(dim), func(_, k0, k1 int) {
+			for k := k0; k < k1; k++ {
+				col := z[k*ld : k*ld+main+lastSize]
+				for r := range main {
+					top[r][k] = col[r]
+				}
+				for r := range lastSize {
+					bot[r][k] = col[main+r]
+				}
 			}
-			for r := range band {
-				bot[r][k] = col[band+r]
-			}
-		}
-		return theta, top, bot, backend.Mat{}
+		})
+		return theta, top, bot, backend.Mat{}, false
 	}
 	// Mode A: dense T, dense SymEig.
 	T := backend.NewMat(dim, dim)
 	fillDense(T, blocks)
 	theta, s := be.SymEig(T)
-	return theta, nil, nil, s
+	return theta, nil, nil, s, false
 }
 
 // fillBand scatters the block α/β scalars into the banded storage bs. α_bk contributes the
@@ -494,17 +592,17 @@ func packLowMem(theta []float64, topVecs, botVecs [][]float64, sDense backend.Ma
 				for t := range last.size {
 					var comp float64
 					if modeB {
-						// Global row of this last-block component. The banded solver returns only
-						// the first and last `band` rows of each eigenvector, so read it from
-						// whichever slice actually covers that row.
+						// Global row of this last-block component. Mode B keeps only a top and a
+						// bottom strip of each eigenvector, so read it from whichever covers that
+						// row.
 						//
-						// The bottom slice normally does: it holds rows [dim-band, dim) and
-						// band = min(2b-1, dim-1) >= last.size whenever two or more blocks were
-						// accepted. With exactly ONE accepted block the cap bites — dim ==
-						// last.size == main and band == dim-1 — leaving the bottom slice one row
-						// short and indexing it at -1 (the mgpu smoke, job 14787917, hit exactly
-						// this at -blocks 1). In that case the TOP slice spans the whole vector,
-						// because main == dim, so the component is there instead.
+						// The bottom strip normally does, exactly: diagProjected asks the banded
+						// solver for last.size bottom rows, so lo == dim-last.size == last.off and
+						// g-lo == t. The fallbacks are for the dense path diagProjected takes when
+						// the strips cannot be served — with exactly ONE accepted block, dim ==
+						// last.size == main and band == dim-1 left the bottom slice one row short
+						// and indexed it at -1 (the mgpu smoke, job 14787917, at -blocks 1) — where
+						// the TOP slice spans the whole vector instead, because main == dim.
 						g := last.off + t
 						if lo := dim - len(botVecs); g >= lo {
 							comp = botVecs[g-lo][k]

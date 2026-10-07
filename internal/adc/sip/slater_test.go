@@ -2,7 +2,12 @@ package sip
 
 import (
 	"math"
+	"strconv"
 	"testing"
+
+	"github.com/leiaSQ/ADCgo/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/integrals"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
 )
 
 // detOf turns a primitive 2h1p operator string c†_A c_K c_L into its sorted
@@ -51,8 +56,23 @@ func (e *elements) c22_01SO(row, col Config, e0 float64) float64 {
 // every new ADC(2,2) block is in. A single global sign is allowed (the paper's
 // M = -(K+C) against ADCgo's own convention) but it is pinned on the DIAGONAL,
 // where no basis phase can hide, and then held fixed for every off-diagonal.
+//
+// It runs in C1 and in every C2v irrep. Only the symmetry blocking stores a 2h1p
+// pair with Occ[0] < Occ[1], which is where holeOrderPhase matters; the C1 gate
+// alone passed while ADC(2,2) main lines were off by 0.27 eV under symmetry.
 func TestSlaterGateC22(t *testing.T) {
-	mx := buildH2O(t, 3)
+	slaterGateC22(t, "C1", buildH2O(t, 3))
+	d, nocc := h2o22(t)
+	eps := mp.OrbitalEnergies(d, nocc)
+	ints := integrals.New(d, nocc, nil)
+	for sym := range numIrreps(d.OrbSym, d.NORB) {
+		sp := NewSpace(nocc, d.NORB, d.OrbSym, sym)
+		slaterGateC22(t, "C2v irrep "+strconv.Itoa(sym), New(sp, ints, eps, 3, backend.Gonum{}))
+	}
+}
+
+func slaterGateC22(t *testing.T, name string, mx *Matrix) {
+	t.Helper()
 	e, sp := mx.el, mx.sp
 	e0 := e.refEnergy()
 
@@ -63,8 +83,8 @@ func TestSlaterGateC22(t *testing.T) {
 	if dRef*dGot < 0 {
 		conv = -1
 	}
-	t.Logf("convention sign pinned on the diagonal to %+.0f (reference %.12g, oracle %.12g)",
-		conv, dRef, dGot)
+	t.Logf("%s: convention sign pinned on the diagonal to %+.0f (reference %.12g, oracle %.12g)",
+		name, conv, dRef, dGot)
 
 	var maxDiag, maxOff, maxAbs float64
 	n := len(sp.Configs)
@@ -90,12 +110,12 @@ func TestSlaterGateC22(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("satellite space %d configs, max |element| = %.6g, max deviation: diagonal %.3g, off-diagonal %.3g",
-		n-sp.BeginSat, maxAbs, maxDiag, maxOff)
+	t.Logf("%s: satellite space %d configs, max |element| = %.6g, max deviation: diagonal %.3g, off-diagonal %.3g",
+		name, n-sp.BeginSat, maxAbs, maxDiag, maxOff)
 	if maxDiag > 1e-12 {
-		t.Errorf("diagonal deviates by %.3g (limit 1e-12)", maxDiag)
+		t.Errorf("%s: diagonal deviates by %.3g (limit 1e-12)", name, maxDiag)
 	}
 	if maxOff > 1e-12 {
-		t.Errorf("off-diagonal deviates by %.3g (limit 1e-12)", maxOff)
+		t.Errorf("%s: off-diagonal deviates by %.3g (limit 1e-12)", name, maxOff)
 	}
 }

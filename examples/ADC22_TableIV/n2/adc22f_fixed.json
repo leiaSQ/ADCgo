@@ -1,0 +1,78 @@
+{
+  "norb": 44,
+  "nelec": 10,
+  "order": 22,
+  "solver": "davidson",
+  "sectors": [
+    {
+      "irrep": 1,
+      "spin": 2,
+      "states": [
+        {
+          "index": 1,
+          "energy_ev": 15.777328855569516,
+          "ps_percent": 88.44254675872402,
+          "residue": 0.00008113208809744722,
+          "main": [
+            {
+              "orbital": 3,
+              "coeff": -0.9399194977352199
+            }
+          ],
+          "root": 1
+        },
+        {
+          "index": 2,
+          "energy_ev": 18.761828581635523,
+          "ps_percent": 77.93433982251058,
+          "residue": 0.00015322254334389275,
+          "main": [
+            {
+              "orbital": 2,
+              "coeff": 0.882804280814896
+            }
+          ],
+          "root": 2
+        }
+      ]
+    },
+    {
+      "irrep": 3,
+      "spin": 2,
+      "states": [
+        {
+          "index": 1,
+          "energy_ev": 17.17653087227315,
+          "ps_percent": 90.87541911576005,
+          "residue": 0.00009120405190308002,
+          "main": [
+            {
+              "orbital": 4,
+              "coeff": -0.953285996518149
+            }
+          ],
+          "root": 1
+        }
+      ]
+    },
+    {
+      "irrep": 4,
+      "spin": 2,
+      "states": [
+        {
+          "index": 1,
+          "energy_ev": 17.176530872216873,
+          "ps_percent": 90.87540925470522,
+          "residue": 0.00007396865361383095,
+          "main": [
+            {
+              "orbital": 5,
+              "coeff": -0.9532859447967604
+            }
+          ],
+          "root": 1
+        }
+      ]
+    }
+  ]
+}

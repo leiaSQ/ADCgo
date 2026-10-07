@@ -349,9 +349,11 @@ var helpTopics = []helpTopic{
 			"- -lowmem-block 0 (default) is the faithful theADCcode short recurrence: block width == the 2h main-space size, a Tarantelli subspace-iteration gate plus a banded eigensolver, ~4 n x main panels live at once. This is Mode B, the only mode -mgpu and -checkpoint support.",
 			"- -lowmem-block N below main selects the device-frugal full-reorthogonalization variant: 3 blocks on the GPU, the full basis staged in host RAM. Exact on the states it reaches, but a block narrower than main cannot span every pole-carrying direction, and it retains the basis on the host so it is not resumable.",
 			"",
+			"Mode B ends in a banded eigensolve of the projected matrix, and at production width that stage costs days rather than minutes: it is O(dim^2 x band) and runs on the CPU (no cuSOLVER band routine exists). -checkpoint or -profile makes it report the column it has reached, so a run is no longer silent between its last block and its results. -eig-workers turns on the parallel replay of that stage on the CPU, which is bit-exact but measured SLOWER than serial at the production bandwidth, so it is off by default. -eig-device instead replays the eigenvector rotations on a CUDA/HIP GPU, which is the one part of the stage a device suits: bandwidth-bound streaming over a multi-gigabyte accumulator, independent per row. -eig-b2 narrows the projected matrix's half-bandwidth first, which is the one structural saving: the reduction's band work is proportional to the bandwidth while its eigenvector work is not, so halving the bandwidth halves the larger half. The band reduction itself stays on the CPU, and no solver library helps — neither cuSOLVER nor hipSOLVER has a banded or tridiagonal eigensolver, and their dense syevd would want all dim x dim eigenvectors where this needs about 3000 rows of them.",
+			"",
 			"    adcgo -fcidump testdata/h2o.fcidump -dip -solver lanczos-lowmem -sym all",
 		},
-		flags: []string{"solver", "lowmem-block"},
+		flags: []string{"solver", "lowmem-block", "eig-workers", "eig-device", "eig-b2"},
 		see:   []string{"mgpu", "matfree", "checkpoint"},
 	},
 	{

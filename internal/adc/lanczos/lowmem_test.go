@@ -198,3 +198,39 @@ func TestSolveLowMemModeB_SingleBlock(t *testing.T) {
 		}
 	}
 }
+
+// TestEigenAccelReachesADeviceUnderMGPU is the regression guard for a defect that shipped silently:
+// under -mgpu the backend is a distributed one, which does not itself implement BandEigKernels, so
+// the direct type assertion returned nil and -eig-device was a no-op in the only configuration
+// production uses. Nothing failed, nothing was logged — the replay just ran on the host.
+//
+// The test asserts the resolution rule rather than the outcome, so it works without a GPU: a
+// distributed backend must be reachable THROUGH PartitionedDevices, and a backend whose devices
+// cannot replay must yield nil rather than a handle that panics when used.
+func TestEigenAccelReachesADeviceUnderMGPU(t *testing.T) {
+	const n, main = 12, 2 // n > 2*main^2, the distributed shape invariant
+	subs := []backend.Backend{backend.Gonum{}, backend.Gonum{}}
+	dist, err := backend.NewDistributed(subs, n, main, []int{0, 6, n})
+	if err != nil {
+		t.Fatalf("NewDistributed: %v", err)
+	}
+
+	// The wiring the defect broke: a distributed backend must expose its devices this way.
+	pd, ok := dist.(backend.PartitionedDevices)
+	if !ok {
+		t.Fatal("the distributed backend no longer implements PartitionedDevices, so eigenAccel " +
+			"cannot reach a device under -mgpu and -eig-device silently does nothing")
+	}
+	if pd.NumParts() != len(subs) {
+		t.Errorf("NumParts() = %d, want %d", pd.NumParts(), len(subs))
+	}
+
+	// Host sub-backends cannot replay, so the answer must be nil — a graceful fallback the caller
+	// reports — and NOT a non-nil handle that panics on first use.
+	if got := eigenAccel(dist); got != nil {
+		t.Errorf("eigenAccel over host sub-backends = %T, want nil", got)
+	}
+	if got := eigenAccel(backend.Gonum{}); got != nil {
+		t.Errorf("eigenAccel(Gonum) = %T, want nil", got)
+	}
+}

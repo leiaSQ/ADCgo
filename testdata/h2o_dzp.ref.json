@@ -5,9 +5,9 @@
   "norb": 29,
   "nelec": 8,
   "ncore_frozen": 1,
-  "e_scf": -76.04980714284174,
+  "e_scf": -76.04980714284149,
   "e_scf_reference": -76.0498071428,
-  "e_core_fcidump": -52.028983566491895,
+  "e_core_fcidump": -52.02898356649196,
   "active_orbsym_gamess": [
     1,
     4,

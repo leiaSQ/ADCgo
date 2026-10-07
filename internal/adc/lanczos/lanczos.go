@@ -103,6 +103,45 @@ type Options struct {
 	// a block's cost is trending. nil keeps the package free of I/O.
 	Progress func(iter, dim, blockSize int, tm Timing)
 
+	// EigenProgress, when non-nil, is called during Mode B's projected banded eigensolve with
+	// the column reached, the total, and the time spent in the reduction so far. Only
+	// SolveLowMem's Mode B reaches that stage — Solve and SolveDense diagonalize the projected
+	// matrix with a dense SymEig, and SolveDavidson builds no band — so only it honors this.
+	//
+	// It exists for the same reason Progress does, one stage later. The banded reduction is a
+	// single call that at the production DIP shape (dim 308000, half-bandwidth 3079) grinds for
+	// hours after the last block is logged, so a run that had finished its Krylov basis looked
+	// indistinguishable from one that had hung: melanin DIP job 14834817 sat 2 d 15 h past its
+	// last "progress" line with one core busy and every GPU idle, and the only way to tell it was
+	// alive was to sample its core-seconds from sacct. nil keeps the package free of I/O.
+	EigenProgress func(col, cols int, elapsed time.Duration)
+
+	// EigenWorkers overrides how many workers Mode B's projected banded eigensolve replays its
+	// deferred rotations on. 0 (the default) uses the package default, which is 1 — see
+	// bandEigDefaultWorkers for the measurement that made serial the default, and for what is
+	// still unknown about the band-matrix side at production chase length. This is the knob for
+	// settling that on a real run.
+	EigenWorkers int
+
+	// EigenDevice asks Mode B's banded eigensolve to replay its deferred eigenvector rotations on
+	// the compute backend's device instead of on the host, when that backend implements
+	// backend.BandEigKernels. It is off by default: the rotations are the bandwidth-bound half of
+	// the stage and a GPU has an order of magnitude more of it, but the device path has to be shown
+	// bit-identical on the actual hardware first (TestGPUBandEigReplayParity), and a mismatch would
+	// be a wrong pole strength rather than a crash.
+	EigenDevice bool
+
+	// EigenB2 asks Mode B to narrow the projected matrix's half-bandwidth to at most this before the
+	// band->tridiagonal chase. The chase's band work is proportional to the bandwidth while its
+	// eigenvector work is independent of it, so narrowing first is the one structural saving
+	// available: at the production shape the band half is ~63 h of the ~100 h stage.
+	//
+	// The reduction exploits the projected matrix's block-tridiagonal structure and reaches about the
+	// Krylov block width — a factor of two — as GEMMs costing seconds. Asking for less than that is
+	// accepted and reported, but not delivered: going below the block width means reducing within the
+	// diagonal blocks, which is general successive band reduction. 0 disables it.
+	EigenB2 int
+
 	// Block overrides the Krylov block width, which is MainBlockSize() by default.
 	// 0 (the default) keeps every existing path unchanged, including its checkpoints.
 	//

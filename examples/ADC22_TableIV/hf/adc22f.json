@@ -1,0 +1,78 @@
+{
+  "norb": 31,
+  "nelec": 8,
+  "order": 22,
+  "solver": "dense",
+  "sectors": [
+    {
+      "irrep": 1,
+      "spin": 2,
+      "states": [
+        {
+          "index": 1,
+          "energy_ev": 19.722996378441703,
+          "ps_percent": 91.75479359974166,
+          "residue": 0,
+          "main": [
+            {
+              "orbital": 2,
+              "coeff": 0.957189964016324
+            }
+          ],
+          "root": 1
+        },
+        {
+          "index": 2,
+          "energy_ev": 39.27042620224821,
+          "ps_percent": 67.17759714383735,
+          "residue": 0,
+          "main": [
+            {
+              "orbital": 1,
+              "coeff": -0.8175825727840732
+            }
+          ],
+          "root": 3
+        }
+      ]
+    },
+    {
+      "irrep": 3,
+      "spin": 2,
+      "states": [
+        {
+          "index": 1,
+          "energy_ev": 15.730722558361744,
+          "ps_percent": 90.77988057398592,
+          "residue": 0,
+          "main": [
+            {
+              "orbital": 3,
+              "coeff": 0.9527847635955663
+            }
+          ],
+          "root": 1
+        }
+      ]
+    },
+    {
+      "irrep": 4,
+      "spin": 2,
+      "states": [
+        {
+          "index": 1,
+          "energy_ev": 15.7307225583615,
+          "ps_percent": 90.77988057398659,
+          "residue": 0,
+          "main": [
+            {
+              "orbital": 4,
+              "coeff": -0.9527847635955699
+            }
+          ],
+          "root": 1
+        }
+      ]
+    }
+  ]
+}

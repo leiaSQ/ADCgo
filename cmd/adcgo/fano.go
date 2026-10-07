@@ -1021,8 +1021,8 @@ func (f khciFamily) matrix(ch *chooser, label string, sp fano.Space) (fanoMatrix
 		if op.Materialize(f.csrBytes) {
 			fmt.Fprintf(os.Stderr, "adcgo: fano: %s: %d couplings stored (CSR)\n", label, op.NNZ())
 		} else {
-			fmt.Fprintf(os.Stderr, "adcgo: fano: %s: couplings exceed %.3g GB, applied by enumeration\n",
-				label, float64(f.csrBytes)/(1<<30))
+			fmt.Fprintf(os.Stderr, "adcgo: fano: %s: couplings need %.3g GB, over the %.3g GB of -maxmem; applied by enumeration\n",
+				label, float64(op.CSRBytes())/(1<<30), float64(f.csrBytes)/(1<<30))
 		}
 	}
 	return op, nil

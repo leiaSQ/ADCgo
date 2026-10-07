@@ -1,0 +1,7 @@
+{
+  "norb": 40,
+  "nelec": 8,
+  "order": 22,
+  "solver": "dense",
+  "sectors": null
+}

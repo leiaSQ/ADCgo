@@ -1,0 +1,22 @@
+{
+  "molecule": "he3_ghost",
+  "basis": "6-31g",
+  "cartesian": false,
+  "norb": 9,
+  "nelec": 6,
+  "ncore_frozen": 0,
+  "e_scf": -8.471322672504646,
+  "orbsym_gamess": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "canonical": false,
+  "e_mp2_corr": -0.032751376804075596
+}

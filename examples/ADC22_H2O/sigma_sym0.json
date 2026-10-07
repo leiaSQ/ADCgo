@@ -1,0 +1,94 @@
+{
+  "norb": 40,
+  "nelec": 8,
+  "order": 22,
+  "solver": "dense",
+  "sectors": [
+    {
+      "irrep": 1,
+      "spin": 2,
+      "states": [
+        {
+          "index": 1,
+          "energy_ev": 15.027569155738265,
+          "ps_percent": 91.26855515131915,
+          "residue": 0,
+          "main": null,
+          "root": 1
+        },
+        {
+          "index": 2,
+          "energy_ev": 25.979547127350862,
+          "ps_percent": 1.0028097826531568,
+          "residue": 0,
+          "main": null,
+          "root": 2
+        },
+        {
+          "index": 3,
+          "energy_ev": 31.87234740300831,
+          "ps_percent": 23.761861580163853,
+          "residue": 0,
+          "main": null,
+          "root": 6
+        },
+        {
+          "index": 4,
+          "energy_ev": 33.30751107172323,
+          "ps_percent": 33.91981376629631,
+          "residue": 0,
+          "main": null,
+          "root": 8
+        },
+        {
+          "index": 5,
+          "energy_ev": 34.88962459037831,
+          "ps_percent": 13.448011101548147,
+          "residue": 0,
+          "main": null,
+          "root": 11
+        },
+        {
+          "index": 6,
+          "energy_ev": 35.79567478261254,
+          "ps_percent": 3.7769100932955664,
+          "residue": 0,
+          "main": null,
+          "root": 13
+        },
+        {
+          "index": 7,
+          "energy_ev": 37.36520257554251,
+          "ps_percent": 2.3859058942311444,
+          "residue": 0,
+          "main": null,
+          "root": 15
+        },
+        {
+          "index": 8,
+          "energy_ev": 38.08644929526426,
+          "ps_percent": 1.6932936437492496,
+          "residue": 0,
+          "main": null,
+          "root": 18
+        },
+        {
+          "index": 9,
+          "energy_ev": 39.77287102608983,
+          "ps_percent": 1.4594571632623339,
+          "residue": 0,
+          "main": null,
+          "root": 22
+        },
+        {
+          "index": 10,
+          "energy_ev": 45.00641016456277,
+          "ps_percent": 1.2402438504969766,
+          "residue": 0,
+          "main": null,
+          "root": 29
+        }
+      ]
+    }
+  ]
+}

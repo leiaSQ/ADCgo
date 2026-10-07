@@ -1,0 +1,17 @@
+adcgo: GOMEMLIMIT auto-set to 170 GiB (85% of the 200 GiB cgroup cap) to keep RSS under the SLURM --mem limit
+
+ ADCgo: a modern implementation of ADC 
+ Authors: Leia Wertebach, Alexander Kuleff 
+
+ Derived from: 
+ TheADCcode: A collection of ADC/ISR source codes.
+ Contributors: Nikolay Golubev,
+ Yasen Velkov (developer of the original version),
+ Alexander Kuleff,
+ Anthony Dutoi, Nicolas Sisourat, Tsveta Miteva,
+ Joerg Breidbach, Imke Mueller, Nayana Vaval,
+ Francesco Tarantelli, Soeren Kopelke,
+ Sajeev Yesodharan, Kirill Gokhberg, Robin Santra
+
+
+adcgo: sip sym=0 main block: cached to /gpfs/bwfor/home/hd/hd_hd/hd_hh323/ADCgo/examples/ADC22_TableIV/n2/n2.fcidump.mainblock.o22.i0.cache

@@ -1,0 +1,19 @@
+{
+  "molecule": "he3_chain",
+  "basis": "6-31g",
+  "cartesian": false,
+  "norb": 6,
+  "nelec": 6,
+  "ncore_frozen": 0,
+  "e_scf": -8.470912898769287,
+  "orbsym_gamess": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "canonical": false,
+  "e_mp2_corr": -0.0324852424550819
+}

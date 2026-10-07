@@ -1,0 +1,17 @@
+# khci / quip fixture: He3 chain (1.30 A) in 6-31G, canonical orbitals of one SCF; with the
+# other orbital set it gates the rotated representation (internal/adc/quip).
+# Regenerate: OMP_NUM_THREADS=4 python scripts/fcidump/dump_fcidump.py --input testdata/khci/he3chain_631g_canonical.in
+&geometry
+  file   he3_chain.xyz
+  unit   angstrom
+&basis
+  name   6-31g
+&scf
+  charge 0
+  spin   0
+  symmetry off
+  max_cycle 200
+&output
+  fcidump  he3chain_631g_canonical.fcidump
+  sidecar  he3chain_631g_canonical.mo.json
+  manifest he3chain_631g_canonical.ref.json

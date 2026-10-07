@@ -35,6 +35,13 @@ fi
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 
+# OUT lets a candidate build land somewhere other than $root/adcgo-cuda. That default path is what
+# every queued melanin/naph2 generation resolves when ADCGO is unset, so overwriting it hands a
+# brand-new binary to a chain that is mid-solve, under a checkpoint written by the old one. Build to
+# a dated snapshot, smoke it (scripts/gpu/cuda_smoke.sbatch, which has the matching ADCGO override),
+# and only then point a chain at it.
+OUT="${OUT:-$root/adcgo-cuda}"
+
 # CUDA install prefix: prefer the module's env var, fall back to the default location.
 : "${CUDA_HOME:=${CUDA_INSTALL_PATH:-${CUDA_ROOT:-/usr/local/cuda}}}"
 export CGO_CFLAGS="-I$CUDA_HOME/include ${CGO_CFLAGS:-}"
@@ -76,7 +83,11 @@ ptxas_v="-Xptxas -v"
 [ "${PTXAS_VERBOSE:-1}" = "0" ] && ptxas_v=""
 
 echo "#begin<nvcc>"
-for ker in adc4_kernels adc2dip_kernels tensor_kernels; do
+# bandeig_kernels.cu is compiled like the rest: it uses explicit __dmul_rn/__dadd_rn/__dsub_rn
+# intrinsics rather than relying on -fmad=false, so its bit-exactness against the Go host path does
+# not depend on the flags used here. See the note at the top of that file, and
+# TestGPUBandEigReplayParity, which is the only thing that can actually confirm it.
+for ker in adc4_kernels adc2dip_kernels tensor_kernels bandeig_kernels; do
     echo "nvcc: $ker.cu"
     nvcc -O3 -std=c++14 \
          $ptxas_v \
@@ -90,6 +101,7 @@ echo "#end<nvcc>"
 
 # 2. Build the cuda-tagged binary (links the .o via cuda_kernels.go).
 echo "#begin<go build>"
-go build -tags cuda -o adcgo-cuda ./cmd/adcgo
+go build -tags cuda -o "$OUT" ./cmd/adcgo
 echo "#end<go build>"
-echo "built: $root/adcgo-cuda"
+echo "built: $OUT"
+ls -l --time-style=+%F_%T "$OUT"

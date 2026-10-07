@@ -1,0 +1,22 @@
+{
+  "norb": 40,
+  "nelec": 8,
+  "order": 22,
+  "solver": "dense",
+  "sectors": [
+    {
+      "irrep": 4,
+      "spin": 2,
+      "states": [
+        {
+          "index": 1,
+          "energy_ev": 19.13821080434869,
+          "ps_percent": 92.26108010878934,
+          "residue": 0,
+          "main": null,
+          "root": 1
+        }
+      ]
+    }
+  ]
+}

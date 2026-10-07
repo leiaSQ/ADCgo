@@ -1,0 +1,17 @@
+# n2 aug-cc-pVDZ, experimental geometry; Kolorenc & Averbukh, JCP 152, 214107 (2020), Table IV
+&geometry
+  file   n2.xyz
+  unit   angstrom
+&basis
+  name   aug-cc-pvdz
+&scf
+  charge 0
+  spin   0
+  symmetry C2v
+  max_cycle 200
+&active
+  frozen-core 2
+&output
+  fcidump  n2.fcidump
+  sidecar  n2.mo.json
+  manifest n2.ref.json

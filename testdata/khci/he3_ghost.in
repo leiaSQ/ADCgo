@@ -1,0 +1,23 @@
+# Labelled-sidecar fixture: He3 chain in 6-31G with a KBJ s ghost on the middle atom and an
+# off-atom ghost, localized orbitals. Small enough to commit (8+3 orbitals).
+# Regenerate: OMP_NUM_THREADS=4 python scripts/fcidump/dump_fcidump.py --input testdata/khci/he3_ghost.in
+&geometry
+  file   he3_ghost.xyz
+  unit   angstrom
+&basis
+  name   6-31g
+&scf
+  charge 0
+  spin   0
+  symmetry off
+&ghost_sites
+  GT    1.30 0.0 0.0  kbj:0:2-3
+  GOFF  1.30 1.5 0.0  kbj:0:4-4
+&orbitals
+  scheme        localized
+  compact_basis 6-31g
+  lindep        1e-6
+&output
+  fcidump  he3_ghost.fcidump
+  sidecar  he3_ghost.mo.json
+  manifest he3_ghost.ref.json

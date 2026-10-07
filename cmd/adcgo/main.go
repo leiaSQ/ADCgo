@@ -87,6 +87,9 @@ func main() {
 	coreOrb := flag.String("core", "", "CVS core orbitals for -order 4: comma-separated 0-based occupied indices (e.g. 0)")
 	backendName := flag.String("backend", "gonum", "linear-algebra backend: gonum | hip | cuda | auto (auto calibrates and picks per sector; build-tag gated)")
 	gpus := flag.Int("gpus", 0, "-backend cuda|hip only: max GPUs for concurrent per-sector solves (0 = all visible). Independent sectors (DIP spin×irrep, SIP irrep) run one per GPU")
+	eigWorkers := flag.Int("eig-workers", 0, "-dip -solver lanczos-lowmem -lowmem-block 0: workers for the projected banded eigensolve's deferred rotations (0 = the measured default, which is serial). The parallel path is tested bit-exact but measured SLOWER at the production half-bandwidth — 3.32x serial against 2.35x at 16 workers, band 3079 — so it is off unless asked for. What is still unmeasured is the band-matrix side at production chase length, and this is the knob for settling that on a real run")
+	eigB2 := flag.Int("eig-b2", 0, "-dip -solver lanczos-lowmem -lowmem-block 0: narrow the projected matrix's half-bandwidth to at most N before the band->tridiagonal reduction. That reduction's band work is proportional to the bandwidth while its eigenvector work is independent of it, so narrowing first is the one structural saving available — at production scale the band half is ~63 h of a ~100 h stage. The reduction exploits the block-tridiagonal structure and reaches about the Krylov block width (a factor of two) in seconds of GEMM; a smaller N is reported but not delivered, since going below the block width needs successive band reduction. 0 = off")
+	eigDevice := flag.Bool("eig-device", false, "-dip -solver lanczos-lowmem -lowmem-block 0 on a CUDA/HIP backend: replay the projected banded eigensolve's eigenvector rotations on the GPU. That half of the stage is bandwidth-bound streaming over a multi-gigabyte accumulator, which is what HBM is for; the band reduction driving it stays on the CPU because it synchronizes far too often for kernel launches. Off by default until the device path is confirmed bit-identical on the hardware in question")
 	mgpu := flag.Int("mgpu", 0, "-dip -solver lanczos-lowmem -lowmem-block 0, or -isr (each apply split by panel column): row-partition ONE sector across this many GPUs (0 = off), so a whole-band Mode B Krylov block that dwarfs a single GPU fits across a node. Sectors run serially, each spanning the pool; needs a fast inter-GPU link (NVLink)")
 	satChunk := flag.Int("satchunk", dip.SatChunkCols, "-mgpu matrix-free DIP only: column-chunk width of the per-device satellite gather. Each device stages a full-height n×w slab (n·w·8 bytes), and the applier fences twice per chunk — so raising this cuts both the ceil(b/w) element recompute (~15% at 64, ~8% at 128) and the barrier count, at proportionally more slab VRAM")
 	satTrace := flag.Bool("sat-trace", false, "-mgpu matrix-free DIP only: print a per-column-chunk timing breakdown of the satellite apply to stderr (gather / fences / operator fill / batched GEMM). A whole-band production mat-vec is 40 h and lanczos reports it as one number only once the block ends; the apply is ceil(b/-satchunk) chunks, so tracing per chunk gives the same split in ~1/27th of the time")
@@ -102,7 +105,7 @@ func main() {
 	out := flag.String("out", "", "write the output to this file (default stdout)")
 	format := flag.String("format", "json", "output format for the -dip/-sip solver document: json = ADCgo's native document | ref = theADCcode's own \"Eigenvalue (eV), ps (%), residue\" state list, byte-compatible with adcdip*.out so a run can be diffed straight against the reference implementation (main-space overlaps only, and the residue column in a.u. as the reference prints it). ref covers the solver document alone — -spectrum, -tdm and -convert have no reference format and reject it")
 	profile := flag.Bool("profile", false, "print per-sector solver phase timings to stderr")
-	checkpoint := flag.String("checkpoint", "", "base path for Krylov checkpoints, so a solve can resume in a later process after a walltime kill or a crash. Supported by -solver lanczos (SIP and DIP) and by -solver lanczos-lowmem with -lowmem-block 0 (DIP Mode B only — Mode A retains the whole basis on the host and is not resumable). Each sector appends a suffix: SIP .i<irrep>, DIP .s<spin>.i<irrep>. A SIGUSR1 (SLURM --signal=B:USR1@<grace>) makes the run checkpoint and exit 64 (\"resume needed\"); exit 0 means done. Empty = no checkpointing")
+	checkpoint := flag.String("checkpoint", "", "base path for Krylov checkpoints, so a solve can resume in a later process after a walltime kill or a crash. Supported by -solver lanczos (SIP and DIP) and by -solver lanczos-lowmem with -lowmem-block 0 (DIP Mode B only — Mode A retains the whole basis on the host and is not resumable). Each sector appends a suffix: SIP .i<irrep>, DIP .s<spin>.i<irrep>. A SIGUSR1 (SLURM --signal=B:USR1@<grace>) makes the run checkpoint and exit 64 (\"resume needed\"); exit 0 means done. Empty = no checkpointing. Mode B additionally checkpoints the projected banded eigensolve, in <path>.eig, every 30 minutes and on a stop signal: at production width that reduction is longer than a 120 h walltime, so without its own restart point the daisychain restored the Krylov state, ground most of a generation into the reduction and was killed, forever")
 	checkpointEvery := flag.Int("checkpoint-every", 25, "-checkpoint only: also save every N blocks for crash resilience (<=0 = save only on the stop signal)")
 
 	doTDM := flag.Bool("tdm", false, "emit RASSI-like transition dipole moments instead of the solver document: ion→ion emission (element 1), Dyson photoionization (element 2), and — for -order 4 — core→valence X-ray emission; needs -sip -mo (with dipole integrals)")
@@ -416,6 +419,9 @@ func main() {
 			psThresh: *psThresh, coeffThresh: *coeffThresh, blocks: *blocks, format: *format,
 			nroots: *nroots, maxdavsp: *maxdavsp, maxdavit: *maxdavit, convthr: *convthr,
 			lowmemBlock: *lowmemBlock,
+			eigWorkers:  *eigWorkers,
+			eigDevice:   *eigDevice,
+			eigB2:       *eigB2,
 			profile:     *profile,
 			spec:        specCfg,
 		}
@@ -566,6 +572,9 @@ type dipConfig struct {
 	nroots, maxdavsp, maxdavit                 int     // -solver davidson
 	convthr                                    float64 // -solver davidson
 	lowmemBlock                                int     // -solver lanczos-lowmem block width (0 = main)
+	eigWorkers                                 int     // -eig-workers: banded eigensolve replay workers (0 = default)
+	eigDevice                                  bool    // -eig-device: replay the banded eigensolve's rotations on the GPU
+	eigB2                                      int     // -eig-b2: narrow the projected bandwidth before the reduction
 	profile                                    bool
 	spec                                       specConfig
 	matFree                                    sip.MatFreeMode // dense (default) vs matrix-free 3h1p↔3h1p satellite region
@@ -589,7 +598,8 @@ func dipCkptPath(base string, spin dip.Spin, sym int) string {
 // reporting. Both solve paths route through it so the two cannot drift — solveDIPSector and
 // solveDIPSectorMGPU previously each constructed Options independently.
 func dipLanczosOpts(cfg dipConfig, spin dip.Spin, targetSym int) lanczos.Options {
-	o := lanczos.Options{MaxBlocks: cfg.blocks, LowMemBlock: cfg.lowmemBlock}
+	o := lanczos.Options{MaxBlocks: cfg.blocks, LowMemBlock: cfg.lowmemBlock,
+		EigenWorkers: cfg.eigWorkers, EigenDevice: cfg.eigDevice, EigenB2: cfg.eigB2}
 	if cfg.ckpt != "" && (cfg.solver == "lanczos" || cfg.solver == "lanczos-lowmem") {
 		o.Checkpoint = &lanczos.Checkpoint{
 			Path:  dipCkptPath(cfg.ckpt, spin, targetSym),
@@ -602,7 +612,9 @@ func dipLanczosOpts(cfg dipConfig, spin dip.Spin, targetSym int) lanczos.Options
 	// pre-gate ApplyBlock arm) revealed it had not finished two blocks. Without this there is no
 	// way to know whether a checkpoint interval is ever reached.
 	if cfg.profile || cfg.ckpt != "" {
-		o.Progress = progressReporter(fmt.Sprintf("dip spin=%d irrep=%d", spin, targetSym+1))
+		prefix := fmt.Sprintf("dip spin=%d irrep=%d", spin, targetSym+1)
+		o.Progress = progressReporter(prefix)
+		o.EigenProgress = eigenProgressReporter(prefix)
 	}
 	return o
 }
@@ -621,6 +633,26 @@ func dipLanczosOpts(cfg dipConfig, spin dip.Spin, targetSym int) lanczos.Options
 // The cumulative fields keep the original second resolution; the deltas are milliseconds,
 // because a per-block difference rounded to the second reads as a column of "0s" on every
 // sector small enough to debug on.
+// eigenProgressReporter builds the Mode B banded-eigensolve callback. It prints one line every
+// lanczos.EigenProgress tick with the column reached, the percentage, and a projected finish from
+// the rate so far — the reduction's cost is linear in the column index, so the extrapolation is
+// meaningful rather than decorative.
+//
+// Without it the run goes silent between its last block line and its results. That is what made
+// melanin DIP job 14834817 unreadable: it had in fact finished all 200 blocks and was grinding
+// through the reduction, but nothing distinguished that from a hang.
+func eigenProgressReporter(prefix string) func(col, cols int, elapsed time.Duration) {
+	return func(col, cols int, elapsed time.Duration) {
+		pct, eta := 0.0, time.Duration(0)
+		if col > 0 && cols > 0 {
+			pct = 100 * float64(col) / float64(cols)
+			eta = time.Duration(float64(elapsed) * float64(cols-col) / float64(col))
+		}
+		fmt.Fprintf(os.Stderr, "progress %s eigensolve col=%d/%d (%.1f%%) elapsed=%s eta=%s\n",
+			prefix, col, cols, pct, elapsed.Round(time.Second), eta.Round(time.Second))
+	}
+}
+
 func progressReporter(prefix string) func(iter, dim, blockSize int, tm lanczos.Timing) {
 	var prev lanczos.Timing
 	return func(iter, dim, blockSize int, tm lanczos.Timing) {

@@ -132,7 +132,7 @@ and build an ordinary matrix over it.
 | theADCcode | ADCgo | Notes |
 |---|---|---|
 | `libLanczos/lanczos.h`, `lanczos_engine.h` | `adc/lanczos/lanczos.go` (`Solve`), `lowmem.go` (`SolveLowMem`) | same start block: the main-space unit vectors |
-| `libLanczos/bnd2td.f`, `tddiag.f` | `adc/lanczos/bandeig.go` | line-by-line port, used by `SolveLowMem` |
+| `libLanczos/bnd2td.f`, `tddiag.f` | `adc/lanczos/bandeig.go` | statement-for-statement port of the control flow, used by `SolveLowMem`; parallelized, and the band matrix transposed, both bit-exact against a frozen copy of the serial code |
 | `adc4core/adc4_diag/davidson.F` | `adc/lanczos/davidson.go` | same preconditioner and restart |
 | `analysis/adc_diagonalizer.cpp` | `lanczos.Solve*` plus `solveDIPSector` / `solveSIPSpace` in `cmd/adcgo` | |
 | `analysis/adc2_dip_analyzer.cpp` (popana) | `adc/analyze/analyze.go`, `populations.go` | two-hole populations; `au2eV` identical |

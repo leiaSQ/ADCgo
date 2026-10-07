@@ -346,6 +346,48 @@ type PartitionedDevices interface {
 // coupling never occupies VRAM. Device counterpart of HostData. Implemented by the cuda
 // backend (cuda_kernels.go, kernel in adc4_kernels.cu); the hip backend and Gonum do not
 // implement it, so those take the dense / HostData paths. See docs/adc4_matfree_gpu.md.
+// BandEigKernels is the optional capability a device backend advertises when it can replay the
+// projected banded eigensolver's deferred eigenvector rotations on the device
+// (internal/adc/lanczos, zTape). Detect it with a type assertion, as the sip matrix does for
+// DeviceKernels; a backend without it leaves the replay on the host, which is the default.
+//
+// It exists because that replay is the one part of the Mode B eigensolve that suits a GPU: ~10^14
+// two-cell updates streaming over a multi-gigabyte accumulator, independent per row, with no
+// reduction. The band reduction that drives it stays on the host — it is a sequential chase that
+// synchronizes far too often for kernel launches — so this accelerates a half, not the whole.
+type BandEigKernels interface {
+	// NewBandEigZ allocates a device-resident rows x n column-major accumulator with leading
+	// dimension ld, initialized from host z (which the caller has already seeded). The handle owns
+	// the device memory until Free.
+	NewBandEigZ(z []float64, rows, ld, n int) BandEigZ
+}
+
+// BandEigZ is a device-resident eigenvector accumulator. Replay applies one recorded batch;
+// SwapCols serves the eigenvalue sort; Download brings the finished accumulator back.
+//
+// The op encoding is the zOp* numbering in internal/adc/lanczos/bandeig.go, and col is the second
+// (higher) column of a rotation, 1-based. Implementations must reproduce the host replay's
+// arithmetic bit for bit — see the note on FMA contraction in backend/bandeig_kernels.cu.
+type BandEigZ interface {
+	// Replay applies kind[:nops] in order.
+	//
+	// seg partitions [0,nops) into runs by end offset, and segPar says per run whether its ops may be
+	// applied CONCURRENTLY — which they may exactly when they touch pairwise-disjoint columns. The
+	// band reduction's rotations do (its chase advances by the bandwidth, so consecutive rotations
+	// touch disjoint column pairs); the QL sweep's do not (its rotations are chained). An
+	// implementation may ignore both and apply everything in order, which is always correct; honouring
+	// them is what lets a device use more than `rows`-way parallelism.
+	//
+	// A nil seg means one sequential run. segPar, when non-nil, is as long as seg.
+	Replay(kind []uint8, col []int32, f1, f2 []float64, nops int, seg []int32, segPar []bool)
+	// SwapCols exchanges columns i and k (1-based).
+	SwapCols(i, k int)
+	// Download copies the accumulator into z, which must have room for ld*n.
+	Download(z []float64)
+	// Free releases the device memory.
+	Free()
+}
+
 type DeviceKernels interface {
 	// SetCoeff1 uploads the flattened [3][13][30] spin table to constant memory (once).
 	SetCoeff1(coeff1 []float64)

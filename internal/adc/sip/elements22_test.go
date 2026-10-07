@@ -3,6 +3,7 @@ package sip
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"testing"
 
@@ -87,6 +88,54 @@ func TestADC22Characterization(t *testing.T) {
 					"the paper reports the main lines as essentially unchanged",
 					v, i, dd, m2[i], mm[i])
 			}
+		}
+	}
+}
+
+// TestADC22SymmetryMatchesC1 checks that the per-irrep ADC(2,2) matrices of a C2v
+// molecule together carry exactly the spectrum of the same molecule with symmetry
+// off. Every other ADC(2,2) test runs with orbSym nil, which is how a symmetry-only
+// defect shifted the aug-cc-pVDZ H2O and CO main lines by up to 0.27 eV while C1
+// reproduced Prema's oracle and Table IV exactly.
+func TestADC22SymmetryMatchesC1(t *testing.T) {
+	if testing.Short() {
+		t.Skip("dense ADC(2,2) solves per irrep; -short skips it")
+	}
+	d, nocc := h2o22(t)
+	eps := mp.OrbitalEnergies(d, nocc)
+	ints := integrals.New(d, nocc, nil)
+	const norb = 11
+	orbSym := d.OrbSym[:norb]
+	nSym := numIrreps(orbSym, norb)
+
+	spectrum := func(sp *Space, v Variant) []float64 {
+		mx := New(sp, ints, eps, Order22, backend.Gonum{})
+		mx.SetVariant(v)
+		vals, _ := backend.Gonum{}.SymEig(mx.BuildMatrix())
+		return vals
+	}
+	for _, v := range []Variant{VariantM, VariantX, VariantF} {
+		want := spectrum(NewSpace22(nocc, norb, nil, 0), v)
+		var got []float64
+		for sym := range nSym {
+			got = append(got, spectrum(NewSpace22(nocc, norb, orbSym, sym), v)...)
+		}
+		sort.Float64s(got)
+		if len(got) != len(want) {
+			t.Errorf("variant %s: %d states over the irreps, %d in C1", v, len(got), len(want))
+			continue
+		}
+		var worst float64
+		at := 0
+		for i := range want {
+			if dd := math.Abs(got[i] - want[i]); dd > worst {
+				worst, at = dd, i
+			}
+		}
+		t.Logf("variant %s: max |E_sym - E_C1| = %.3e Eh at state %d (%.6f vs %.6f eV)",
+			v, worst, at, got[at]*hartreeToEV, want[at]*hartreeToEV)
+		if worst > 1e-9 {
+			t.Errorf("variant %s: symmetry-blocked spectrum differs from C1 by %.3e Eh", v, worst)
 		}
 	}
 }

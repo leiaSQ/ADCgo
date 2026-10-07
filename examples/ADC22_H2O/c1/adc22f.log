@@ -1,0 +1,29 @@
+adcgo: GOMEMLIMIT auto-set to 196 GiB (85% of the 230 GiB cgroup cap) to keep RSS under the SLURM --mem limit
+
+ ADCgo: a modern implementation of ADC 
+ Authors: Leia Wertebach, Alexander Kuleff 
+
+ Derived from: 
+ TheADCcode: A collection of ADC/ISR source codes.
+ Contributors: Nikolay Golubev,
+ Yasen Velkov (developer of the original version),
+ Alexander Kuleff,
+ Anthony Dutoi, Nicolas Sisourat, Tsveta Miteva,
+ Joerg Breidbach, Imke Mueller, Nayana Vaval,
+ Francesco Tarantelli, Soeren Kopelke,
+ Sajeev Yesodharan, Kirill Gokhberg, Robin Santra
+
+
+adcgo: sip sym=0 assemble ADC(2,2)f: n=29020 (main=4 2h1p=576 3h2p=28440)
+adcgo: sip sym=0 assemble: 1h/1h main block (4×4) ...
+adcgo: sip sym=0 main block: cached to /gpfs/bwfor/home/hd/hd_hd/hd_hh323/ADCgo/examples/ADC22_H2O/c1/h2o_c1.fcidump.mainblock.o22.i0.cache
+adcgo: sip sym=0 assemble: 1h/1h main block (4×4) done in 0s
+adcgo: sip sym=0 assemble: 1h/2h1p coupling (4×576) ...
+adcgo: sip sym=0 assemble: 1h/2h1p coupling (4×576) done in 0s
+adcgo: sip sym=0 assemble: 2h1p/2h1p block (576×576) ...
+adcgo: sip sym=0 assemble: 2h1p/2h1p block (576×576) done in 0s
+adcgo: sip sym=0 assemble: 2h1p/3h2p coupling, dense (576×28440) ...
+adcgo: sip sym=0 assemble: 2h1p/3h2p coupling, dense (576×28440) done in 5s
+adcgo: sip sym=0 assemble: 3h2p/3h2p block, dense (28440×28440) ...
+adcgo: sip sym=0 assemble: 3h2p/3h2p block, dense (28440×28440) done in 4m54s
+adcgo: sip sym=0 assemble complete in 4m59s; entering the solver

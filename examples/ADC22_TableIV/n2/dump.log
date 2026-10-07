@@ -1,0 +1,5 @@
+converged SCF energy = -108.960647415565
+wrote /gpfs/bwfor/home/hd/hd_hd/hd_hh323/ADCgo/examples/ADC22_TableIV/n2/n2.fcidump  NORB=44 NELEC=10 nocc=5 ncore_frozen=2
+wrote /gpfs/bwfor/home/hd/hd_hd/hd_hh323/ADCgo/examples/ADC22_TableIV/n2/n2.mo.json  nAO=46 atoms=['N1', 'N2'] dipole_origin=[0.0, 0.0, 1.0371761834675342]
+wrote /gpfs/bwfor/home/hd/hd_hd/hd_hh323/ADCgo/examples/ADC22_TableIV/n2/n2.ref.json
+E(SCF) = -108.9606474156 Ha  NORB=44 NELEC=10  ORBSYM=[1, 1, 1, 3, 4, 1, 3, 4, 1, 3, 4, 1, 3, 4, 1, 1, 2, 1, 1, 3, 4, 1, 2, 1, 3, 4, 3, 4, 1, 1, 3, 4, 1, 3, 4, 1, 2, 1, 2, 1, 1, 3, 4, 1]

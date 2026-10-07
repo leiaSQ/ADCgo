@@ -23,7 +23,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:H200:4
-#SBATCH --mem=60gb
+#SBATCH --mem=240gb
 #SBATCH --time=00:15:00
 #SBATCH --output=cuda-smoke-%j.out
 set -u
@@ -62,8 +62,20 @@ echo; echo "#### 2. one DIP -mgpu block under ADCGO_CUDA_STRICT=1 (remote-band p
 # away the stack under it, which is why run 14787917's "index out of range [-1]" could not be
 # located at all — the one thing the run existed to find. Same shape as step 1.
 echo "binary=$ADCGO"
+# The input is a VARIABLE with an existence check, because it used to be a hardcoded path into
+# ws/hd_hh323-uracil2W_dz — a workspace that has since expired. The run then failed with
+# "no such file or directory" and the smoke reported CUDA SMOKE: FAIL, i.e. a missing input was
+# indistinguishable from a GPU regression (job 15194656: all 38 stage-1 tests passed and the FAIL
+# was purely the dead path). Workspaces expire by design, so this check is permanent, not a patch.
+SMOKE_FCIDUMP="${SMOKE_FCIDUMP:-/gpfs/bwfor/work/ws/hd_hh323-uracil1W/adcgo/uracil1W/uracil1W.fcidump}"
+if [ ! -f "$SMOKE_FCIDUMP" ]; then
+    echo "SKIP: no FCIDUMP at $SMOKE_FCIDUMP (expired workspace?). Set SMOKE_FCIDUMP to an existing"
+    echo "      one — ws_list, then <ws>/adcgo/<sys>/<sys>.fcidump. This is NOT a code failure, so"
+    echo "      it does not set fail; stage 1 above still gates the binary."
+else
+echo "fcidump=$SMOKE_FCIDUMP ($(stat -c %s "$SMOKE_FCIDUMP") bytes)"
 ADCGO_CUDA_STRICT=1 timeout 500 "$ADCGO" \
-  -fcidump /gpfs/bwfor/work/ws/hd_hh323-uracil2W_dz/adcgo/uracil2W_dz/uracil2W_dz.fcidump \
+  -fcidump "$SMOKE_FCIDUMP" \
   -dip -order 2 -solver lanczos-lowmem -lowmem-block 0 -mgpu 4 \
   -spin singlet -blocks 1 -backend cuda -sym all -profile -matfree on \
   -out /dev/null > "$LOG2" 2>&1
@@ -78,6 +90,7 @@ if [ "$rc" != 0 ]; then
   else
     tail -60 "$LOG2"
   fi
+fi
 fi
 
 echo; echo "#### RESULT ####"
