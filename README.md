@@ -2,6 +2,8 @@
 
 An exact, hardware-accelerated **ADC(n) ionization** solver in Go.
 
+Developed by Leia Wertebach (Meyer) & Alexander Kuleff. Derived from theADCcode of TC Group Heidelberg.
+
 ADCgo builds and diagonalizes the algebraic-diagrammatic-construction secular problem
 for electron removal *exactly* — no reduced-scaling truncations — and reaches larger
 systems through acceleration (multicore OpenBLAS, GPU block-Lanczos via **hipBLAS** on
