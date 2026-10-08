@@ -105,6 +105,43 @@ The run log prints both diagnostics:
 - Works in both grammars: hole terms (`x:2/2,4,6:2`) and net-charge terms
   (`x: 6/charge A1=2`).
 
+## Scheme B — adapted intermediate states (`-fano-scheme b`)
+
+- **Why:** hole rules presume a hole pair is one-site or two-site. With orbitals shared
+  between subunits (Ne₂'s g/u pairs; the water dimer's outer valence, e.g. 77/23 % D/A) a
+  2h1p configuration is neither, and the excluded one-site physics leaks into P.
+- **What:**
+  1. Per particle orbital p, the 2h1p block of the secular matrix is diagonalized; its
+     eigenvectors are the adapted states (Kolorenč & Averbukh 2020, §III B 2).
+  2. Each adapted state is classified by its two-hole character over site-localized
+     occupied orbitals (projection onto each `-group` site's AO span, Löwdin):
+     inner-valence → Q; one-site → excluded (`-fano-b-onesite x`, default) or Q;
+     two-site → P, but with `-fano-b-particle free` (default) only when the particle is a
+     free virtual. The virtuals are first rotated per irrep into the real-atom AO span
+     (compact) and its ghost/diffuse complement (free), an exact orthogonal change of the
+     particle index. A two-site state with a compact particle is a bound D⁺A* state:
+     excluded. `-fano-b-particle any` is the paper's rule.
+  3. 1h stays Q; 3h2p follows the `-fano-qp` hole rule (closed triple ionization for a
+     valence vacancy).
+- **Cost:** each QMQ/PMP product is one parent mat-vec between Tᵀ and T (host-side
+  transforms); the blocks come from the exact parent sub-blocks.
+- **Gates:**
+  - T round trip; TᵀMT against the dense product (4e-16); the blocks become diagonal.
+  - U = identity reproduces scheme A's QMQ and coupling exactly.
+  - A rotation inside P leaves the PMP spectrum and every γᵢ unchanged (1e-14).
+  - The one-site/inner block traces are basis invariant.
+- **Needs** `-mo` and `-group` sites covering the molecules (`site_localization_min` in the
+  document reports the localization; near 1 is good). No partial widths: P rows are adapted
+  states.
+- **Measured (water dimer, donor 2a1):**
+  - Shared orbitals: 6-31G + small KBJ, ADC(2)x: 206 meV (scheme A exclusion) → 44 meV
+    (scheme B), at the same E_Φ and |Φ⟩ weight.
+  - Bound-particle states: Fano-CI over fragment-localized orbitals (`&orbitals scheme
+    fragment`), cc-pVDZ + 5s5p5d KBJ: 129 meV with any particle → 3.7 meV with free
+    particles only; acceptor 102 → 4.1 meV. Richter et al. 2018: 9.1 / 5.0 meV.
+- **Gate for the particle rotation:** TᵀMT is diagonal on every rotated particle block,
+  with the block eigenvalues as its diagonal, and has M's spectrum.
+
 ## Localized orbitals and tiny widths (`-khci`)
 
 - With a labelled sidecar (`dump_fcidump`'s `&orbitals localized` scheme), `-fano-qp` takes a

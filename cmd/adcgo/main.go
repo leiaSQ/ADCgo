@@ -137,6 +137,12 @@ func main() {
 	fanoNth := flag.Int("fano-nth", 0, "-fano: which qualifying QMQ root to take as |Phi>, 0-based in ascending energy (the reference's ninista-1). Only roots whose weight on the vacancy configuration reaches -fano-qmin are counted")
 	fanoPhiHoles := flag.String("fano-phi-holes", "", "-fano: select |Phi> as the INTERIOR root of QMQ with the largest weight on the main-class configuration with these holes (comma-separated 0-based occupied orbitals, a doubly emptied orbital twice, e.g. 0,0,4,4 for He2+ on atoms 0 and 4), found by Jacobi-Davidson and polished by shifted inverse iteration, instead of the nth qualifying root from the bottom. Needed for multiply ionized initial states, which sit above charge-transfer states of Q")
 	fanoPhiTol := flag.Float64("fano-phi-tol", 1e-10, "-fano-phi-holes: residual goal ||(QHQ - E) Phi|| in hartree; a polish that stops above it (the float64 floor) is reported in the document, not hidden")
+	fanoScheme := flag.String("fano-scheme", "a", "-fano: Q/P selection scheme. a = configurations by their holes (-fano-q/-fano-rule/-fano-qp). b = adapted intermediate states (Kolorenc & Averbukh 2020 §III B 2): the 2h1p configurations of each particle orbital are rotated onto the eigenstates of their block, and each adapted state is classified by its own two-hole character over site-localized occupied orbitals (needs -mo and -group sites covering the molecules): inner-valence -> Q, one-site -> excluded (-fano-b-onesite), two-site -> P. 1h stays Q, 3h2p follows the hole rule. -sip only")
+	fanoBInner := flag.String("fano-b-inner", "e<-1.0", "-fano-scheme b: the inner-valence occupied orbitals (an orbital list: indices, @SITE[.k], e<X); an adapted state with at least -fano-b-cut of its two-hole weight on pairs containing one of them is bound")
+	fanoBCut := flag.Float64("fano-b-cut", 0.5, "-fano-scheme b: weight above which an adapted state counts as inner-valence or one-site")
+	fanoBParticle := flag.String("fano-b-particle", "free", "-fano-scheme b: which two-site adapted states are P. free (default) = only those whose particle is a FREE virtual (the virtuals are rotated, per irrep, into the real-atom AO span 'compact' and its complement 'free', i.e. the ghost/diffuse continuum content); a compact particle is a bound D+A* charge-transfer/excitation state and is excluded. any = every two-site state, the paper's rule. On the water dimer the bound-particle states carried ~125 meV of spurious width at Fano-CI level")
+	fanoBCompact := flag.Float64("fano-b-compact", 0.02, "-fano-scheme b -fano-b-particle free: projection eigenvalue above which a virtual direction counts as compact")
+	fanoBOneSite := flag.String("fano-b-onesite", "x", "-fano-scheme b: where one-site adapted states go: x (excluded from both, default) or q (bound)")
 	fanoQP := flag.String("fano-qp", "", "-fano: a Q/P partition stated PER EXCITATION CLASS, which -fano-q cannot express. Grammar: clauses separated by ';', each prefixed q:, p: or x:, each a conjunction of terms joined by '&', each term [class/]orbitals:min[:max] with orbitals a comma-separated list of 0-based occupied indices and a-b ranges, class an excitation class as a hole count (omitted = every class), and max omitted = unbounded. A configuration is bound if some q clause matches, or if p clauses were given and none matches. Two of the four atoms in the paper's Table V need this: Mg(2s^-1) is 'q:0:1;p:2/4:1;p:3/4:2' — 2s vacancies bound, continuum is 2h1p with a 3s hole and 3h2p with TWO of them, which is what keeps the CLOSED 2p^-2 channel out of P — and Kr(3d^-1) is 'q:0-4:1;q:3/5:2:2&3/6-8:1', a 3d any-hole rule plus the 4s^-2 4p^-1 shake-up family in Q. An x: clause EXCLUDES what it matches from both Q and P (tested first): the width is then that of the Hamiltonian restricted to Q (+) P, the usual practice for configurations that are neither part of the decaying state nor an open channel, e.g. ICD's one-site outer-valence configurations 'x:2/@W1:2&2/e<-1.0:0:0' (adcgo -h fano). Supersedes -fano-q and -fano-rule")
 	fanoQMin := flag.Float64("fano-qmin", 0.1, "-fano: minimum weight of |Phi> on the vacancy's 1h configuration (the reference's mspacewi). A root below this is not the state that was ionized")
 	fanoQSolver := flag.String("fano-qsolver", "", "-fano: eigensolver for the QMQ (bound) half, which wants a different one from the PMP half that -solver governs. Empty = davidson, or dense when -solver is dense. Only a few of QMQ's LOWEST roots are wanted — |Phi> is the bottom of that spectrum, since every Q configuration past the 1h class carries an extra hole — and under this partition Q's main block is often a single configuration, so a block-Lanczos seeded from it would be one column wide")
@@ -326,6 +332,21 @@ func main() {
 		if err != nil {
 			return fanoConfig{}, err
 		}
+		switch *fanoScheme {
+		case "a", "b":
+		default:
+			return fanoConfig{}, fmt.Errorf("bad -fano-scheme %q (want a or b)", *fanoScheme)
+		}
+		switch *fanoBParticle {
+		case "free", "any":
+		default:
+			return fanoConfig{}, fmt.Errorf("bad -fano-b-particle %q (want free or any)", *fanoBParticle)
+		}
+		switch *fanoBOneSite {
+		case "x", "q":
+		default:
+			return fanoConfig{}, fmt.Errorf("bad -fano-b-onesite %q (want x or q)", *fanoBOneSite)
+		}
 		// Symbolic lists (@SITE, e<X) wait for the FCIDUMP and sidecar: resolveOrbitals.
 		vacancy := -1
 		if !symbolicOrbitals(*fanoInit) {
@@ -357,6 +378,8 @@ func main() {
 		return fanoConfig{
 			sip: base, variant: variant, vacancy: vacancy, qOrbs: qOrbs, rule: rule,
 			vacancySpec: *fanoInit, qSpec: *fanoQ, phiSpec: *fanoPhiHoles,
+			scheme: *fanoScheme, bInner: *fanoBInner, bCut: *fanoBCut, bOneSite: *fanoBOneSite,
+			bParticle: *fanoBParticle, bCompactThresh: *fanoBCompact,
 			nth: *fanoNth, qMin: *fanoQMin, qRoots: *fanoQRoots, qSolver: *fanoQSolver,
 			qpSpec: *fanoQP, phiHoles: phiHoles, phiTol: *fanoPhiTol,
 			engine: *fanoEngine, order: *fanoOrder, siShift: *fanoSIShift, gminRel: *fanoGMinRel,

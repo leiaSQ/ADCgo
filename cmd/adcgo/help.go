@@ -202,6 +202,8 @@ var helpTopics = []helpTopic{
 			"- What is excluded no longer relaxes |Phi> nor receives flux. If an excluded class carries real decay (an open channel) or real 2a1 strength, the width is wrong; compare against runs with that class in P and in Q.",
 			"- The run log prints the excluded count per class and the document carries x_size, so an exclusion is never silent.",
 			"",
+			"Scheme B — adapted intermediate states (-fano-scheme b, -sip). The hole rules above presume a hole pair is one-site or two-site; with orbitals shared between subunits (the g/u pairs of a homonuclear dimer, the partly delocalized outer valence of a water dimer) it is neither. Scheme B rotates the 2h1p configurations of each particle orbital onto the eigenstates of their block of the secular matrix and classifies each adapted state by its own two-hole character over site-localized occupied orbitals (needs -mo and -group sites covering the molecules): inner-valence (-fano-b-inner, default e<-1.0) -> Q; one-site -> excluded (-fano-b-onesite x) or Q; two-site -> P only when its particle is a FREE virtual (-fano-b-particle free, default: the virtuals are first rotated, per irrep, into the real-atom AO span and its ghost/diffuse complement; a compact particle makes the state a bound D+A* charge-transfer/excitation state, which is excluded), or any two-site state (-fano-b-particle any, the paper's rule); -fano-b-cut (0.5) is the weight threshold. 1h stays Q and 3h2p follows the hole rule. Each product is one parent mat-vec between the rotation and its transpose (both exact orthogonal basis changes). No partial widths (P rows are adapted states). Measured on the water dimer: shared orbitals inflate the width 2-5x (6-31G, ADC(2)x: 206 -> 44 meV), and bound-particle states in P carried ~125 meV of spurious width at Fano-CI level (cc-pVDZ + KBJ: 129 -> 3.7 meV, donor).",
+			"",
 			"With -mo, approximate partial widths per channel (Auger@A, ICD:A->B, ETMD, and `double` for the 3h2p/second-order channel), each imaged separately.",
 			"",
 			"Orbitals by name — -fano-init, -fano-q, -fano-qp and -fano-phi-holes take, besides 0-based indices:",
@@ -231,7 +233,7 @@ var helpTopics = []helpTopic{
 			"        -fano-qp 'q:1/e<0:1;q:e<-1.0:1;x:2/@W1:2&2/e<-1.0:0:0;...' -init-atom W1",
 			"    # (&2/e<-1.0:0:0 keeps W1's own 2a1-hole configurations out of the exclusion)",
 		},
-		flags: []string{"fano", "fano-init", "fano-q", "fano-rule", "fano-qp", "fano-nth", "fano-qmin", "fano-phi-holes", "fano-phi-tol"},
+		flags: []string{"fano", "fano-init", "fano-q", "fano-rule", "fano-qp", "fano-scheme", "fano-b-inner", "fano-b-cut", "fano-b-onesite", "fano-b-particle", "fano-b-compact", "fano-nth", "fano-qmin", "fano-phi-holes", "fano-phi-tol"},
 		see:   []string{"fanotuning", "stieltjes", "order22", "khci"},
 	},
 	{

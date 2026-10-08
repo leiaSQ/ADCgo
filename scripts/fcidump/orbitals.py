@@ -531,6 +531,175 @@ def build(mol, mf, roles, compact_basis="cc-pvdz", thresh=0.02, min_pop=0.99,
     return lb
 
 
+def _offatom_ghost_weight(mol, S, Co):
+    """Largest occupied weight outside the span of every AO except those on OFF-nuclear
+    ghost centres (see build): an electron must not live where there is no nucleus.
+    Ghost centres sitting on a nucleus are augmentations of that atom and do not count.
+    0 when every ghost is concentric with an atom."""
+    flags = ghost_flags(mol)
+    xyz = mol.atom_coords()
+    reals = real_atoms(mol)
+    offatom = [a for a, g in enumerate(flags) if g and
+               min(np.linalg.norm(xyz[a] - xyz[r]) for r in reals) >= 1e-6]
+    if not offatom:
+        return 0.0
+    keep = np.where(~np.isin(ao_atoms(mol), offatom))[0]
+    Skk = S[np.ix_(keep, keep)]
+    Skc = S[keep, :] @ Co
+    inside = np.einsum("ik,ik->k", Skc, np.linalg.solve(Skk, Skc))
+    return float(np.max(1.0 - inside))
+
+
+def build_fragments(mol, mf, fragments, compact_basis="cc-pvdz", thresh=0.02,
+                    min_pop=0.95):
+    """A LocalBasis whose orbitals belong to MOLECULAR FRAGMENTS (e.g. the waters of a
+    cluster) instead of single atoms, for Fano-CI partitions stated per molecule.
+
+    fragments is a list of (name, [mol atom indices]); every real atom must be in exactly
+    one. Each orbital is labelled with its fragment's FIRST atom, the representative a
+    net-charge rule names ("charge O1=1,O2=1" = each water +1).
+
+        [ occupied ]  for each fragment, the n_F occupied directions with the largest
+                      IAO population on it (n_F = its electron pairs; fragments must be
+                      neutral closed shells), Loewdin-orthonormalized together, then
+                      Fock-canonicalized WITHIN each fragment: for a water the five come
+                      out as 1s, 2a1, 1b2, 3a1, 1b1 in energy order, so the inner-valence
+                      vacancy is identifiable as the fragment's second orbital.
+        [ compact  ]  per fragment, its compact AOs projected onto the virtual space
+                      (eigenvalues > thresh kept), Loewdin across fragments, then Fock-
+                      canonicalized within each fragment.
+        [ free     ]  the orthonormal complement in the virtual space (all diffuse and
+                      ghost-centre content), Fock-canonicalized.
+
+    The localization fixes only WHICH fragment an orbital belongs to; the per-fragment
+    canonicalization then fixes the orbitals within it, without which the 2a1 would be
+    an arbitrary mixture of the fragment's valence orbitals. Occupied and virtual SPACES are the RHF
+    ones; the basis is not canonical, so only CI-type operators (adcgo -khci) may use it.
+    No point-group symmetry is assumed (every orbital is irrep 0).
+    """
+    S = mf.get_ovlp()
+    F = mf.get_fock()
+    reals = real_atoms(mol)
+    frag_of = -np.ones(mol.natm, dtype=int)
+    for k, (name, atoms) in enumerate(fragments):
+        for a in atoms:
+            if a < 0 or a >= mol.natm or a not in reals:
+                raise ValueError(f"fragment {name}: atom {a} is not a real atom")
+            if frag_of[a] >= 0:
+                raise ValueError(f"atom {a} is in fragments {fragments[frag_of[a]][0]} and {name}")
+            frag_of[a] = k
+    if missing := [a for a in reals if frag_of[a] < 0]:
+        raise ValueError(f"real atoms {missing} belong to no fragment")
+    rep = [atoms[0] for _, atoms in fragments]
+
+    # occupied: per fragment, the eigenvectors of the occupied space's population matrix on
+    # that fragment's IAOs. With IAOs spanning the occupied space exactly, Q_F summed over
+    # fragments is the identity, so a fragment that owns n_F orbitals shows n_F eigenvalues
+    # near 1. Pipek-Mezey with fragment charges is NOT used: its objective is flat for
+    # rotations among orbitals of the same fragment, and the Jacobi angle computed from two
+    # vanishing numbers never converges (measured on the water dimer).
+    occ = mf.mo_coeff[:, mf.mo_occ > 0]
+    iao, iao_atom = _iao_charges(mol, S, occ)
+    iao_frag = frag_of[iao_atom]
+    X = iao.T @ S @ occ                      # occupied orbitals in the IAO basis
+    nf = []
+    for k, (name, atoms) in enumerate(fragments):
+        z = sum(int(mol.atom_charge(a)) for a in atoms)
+        if z % 2:
+            raise ValueError(f"fragment {name} has an odd electron count ({z}); fragments must "
+                             "be closed-shell and neutral")
+        nf.append(z // 2)
+    if sum(nf) != occ.shape[1]:
+        raise ValueError(f"fragments hold {sum(nf)} electron pairs, the RHF has {occ.shape[1]}")
+    seeds, seed_frag, occ_pop = [], [], []
+    for k in range(len(fragments)):
+        Xk = X[iao_frag == k]
+        w, U = np.linalg.eigh(Xk.T @ Xk)
+        top = np.argsort(w)[::-1][:nf[k]]
+        for j in top:
+            seeds.append(occ @ U[:, j])
+            seed_frag.append(k)
+            occ_pop.append(float(w[j]))
+    Cl, _ = _loewdin(np.array(seeds).T, S)
+    seed_frag = np.array(seed_frag)
+    occ_cols, occ_atom = [], []
+    for k in range(len(fragments)):
+        Ck = Cl[:, seed_frag == k]
+        e, U = np.linalg.eigh(Ck.T @ F @ Ck)
+        occ_cols.append(Ck @ U)
+        occ_atom += [rep[k]] * Ck.shape[1]
+    Co = _fix_sign(np.hstack(occ_cols))
+    if min(occ_pop) < min_pop:
+        raise ValueError(f"fragment localization weak: min fragment population {min(occ_pop):.4f} "
+                         f"< {min_pop} (pops {np.round(occ_pop, 4).tolist()})")
+
+    # compact virtuals per fragment, free complement
+    Cv = mf.mo_coeff[:, mf.mo_occ == 0]
+    Pv = Cv @ Cv.T @ S
+    cmask = compact_ao_mask(mol, compact_basis)
+    aoat = ao_atoms(mol)
+    metrics = {"compact_thresh": thresh, "compact_eig_kept_min": {}, "compact_eig_drop_max": {}}
+    Y, yfrag = [], []
+    for k, (name, atoms) in enumerate(fragments):
+        sel = np.where(cmask & np.isin(aoat, atoms))[0]
+        if sel.size == 0:
+            continue
+        Xc = Pv[:, sel]
+        w, U = np.linalg.eigh(Xc.T @ S @ Xc)
+        keep = w > thresh
+        metrics["compact_eig_kept_min"][name] = float(w[keep].min()) if keep.any() else None
+        metrics["compact_eig_drop_max"][name] = float(w[~keep].max()) if (~keep).any() else None
+        for j in np.where(keep)[0]:
+            Y.append(Xc @ U[:, j] / np.sqrt(w[j]))
+            yfrag.append(k)
+    comp_cols, comp_atom = [], []
+    if Y:
+        Yall, mineig = _loewdin(np.array(Y).T, S)
+        metrics["compact_loewdin_min_eig"] = mineig
+        yfrag = np.array(yfrag)
+        for k in range(len(fragments)):
+            Ck = Yall[:, yfrag == k]
+            if Ck.shape[1] == 0:
+                continue
+            e, U = np.linalg.eigh(Ck.T @ F @ Ck)
+            comp_cols.append(Ck @ U)
+            comp_atom += [rep[k]] * Ck.shape[1]
+        Ccomp = _fix_sign(np.hstack(comp_cols))
+    else:
+        Yall = np.zeros((mol.nao, 0))
+        Ccomp = Yall
+    Vall = _orth(Cv, S, 1e-8)
+    Q = Vall - Yall @ (Yall.T @ S @ Vall)
+    Cf = _orth(Q, S, 1e-8)
+    if Cf.shape[1] != Cv.shape[1] - Ccomp.shape[1]:
+        raise ValueError(f"free space has {Cf.shape[1]} vectors, want "
+                         f"{Cv.shape[1]} - {Ccomp.shape[1]}")
+    if Cf.shape[1]:
+        e, U = np.linalg.eigh(Cf.T @ F @ Cf)
+        Cf = _fix_sign(Cf @ U)
+
+    C = np.hstack([Co, Ccomp, Cf])
+    err = np.abs(C.T @ S @ C - np.eye(C.shape[1])).max()
+    if err > 1e-9:
+        raise ValueError(f"rotated basis not orthonormal: {err:.2e}")
+    if C.shape[1] != mf.mo_coeff.shape[1]:
+        raise ValueError(f"rotated basis has {C.shape[1]} MOs, RHF has {mf.mo_coeff.shape[1]}")
+    lb = LocalBasis(C=C, nocc=Co.shape[1], ncompact=Ccomp.shape[1], nfree=Cf.shape[1],
+                    atom=occ_atom + comp_atom + [-1] * Cf.shape[1],
+                    kind=["occ"] * Co.shape[1] + ["compact"] * Ccomp.shape[1]
+                    + ["free"] * Cf.shape[1],
+                    irrep=[0] * C.shape[1],
+                    roles=[fragments[frag_of[a]][0] for a in reals], real_atoms=reals)
+    metrics["fragments"] = {name: [int(a) for a in atoms] for name, atoms in fragments}
+    metrics["occ_iao_pop_min"] = float(min(occ_pop))
+    metrics["occ_fragment_pop"] = occ_pop   # eigenvalues of Q_F kept, before Loewdin
+    metrics["occ_ghost_pop_max"] = _offatom_ghost_weight(mol, S, Co)
+    metrics["n_dropped_lindep"] = int(mol.nao - C.shape[1])
+    metrics["orthonormality_err"] = float(err)
+    lb.metrics = metrics
+    return lb
+
+
 def sidecar_labels(mol, lb, extra=None):
     """The mo-sidecar orbital-label group (internal/adc/mo readLabels)."""
     doc = {"orb_kind": list(lb.kind), "orb_atom": [int(a) for a in lb.atom],

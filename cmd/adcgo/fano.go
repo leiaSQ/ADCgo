@@ -77,11 +77,13 @@ type FanoDocument struct {
 	PSize int `json:"p_size"` // continuum subspace
 	// XSize counts configurations excluded from BOTH subspaces by x: clauses. Nonzero
 	// means the width is that of the Hamiltonian restricted to Q (+) P (see -h fano).
-	XSize  int `json:"x_size,omitempty"`
-	QMain  int `json:"q_main"`  // main-class configurations in Q
-	PMain  int `json:"p_main"`  // main-class configurations in P
-	PDecay int `json:"p_decay"` // decay-continuum configurations in P (all satellite classes)
-	Class3 int `json:"class_3h2p,omitempty"`
+	XSize int `json:"x_size,omitempty"`
+	// SchemeB describes the adapted basis of a -fano-scheme b run.
+	SchemeB *schemeBStats `json:"scheme_b,omitempty"`
+	QMain   int           `json:"q_main"`  // main-class configurations in Q
+	PMain   int           `json:"p_main"`  // main-class configurations in P
+	PDecay  int           `json:"p_decay"` // decay-continuum configurations in P (all satellite classes)
+	Class3  int           `json:"class_3h2p,omitempty"`
 
 	// The discrete state.
 	EPhiHartree float64 `json:"e_phi_hartree"`
@@ -222,6 +224,19 @@ type fanoConfig struct {
 	// the localized vacancy the name promises, and this is the only place that shows it.
 	vacancySite string
 	vacancyPop  float64
+	// scheme is the Q/P selection scheme: "a" (configurations by their holes) or "b"
+	// (adapted intermediate states, schemeb.go). bInner names the inner-valence orbitals,
+	// bCut the weight above which an adapted state counts as inner or one-site, and
+	// bOneSite whether one-site states are excluded ("x") or bound ("q").
+	scheme   string
+	bInner   string
+	bCut     float64
+	bOneSite string
+	// bParticle is "free" (a two-site adapted state is P only when its particle is a free
+	// virtual; compact ones are bound D+A* states, excluded) or "any" (the paper's rule).
+	// bCompactThresh is the projection eigenvalue above which a virtual direction is compact.
+	bParticle      string
+	bCompactThresh float64
 	// phiHoles (-fano-phi-holes) selects |Phi> as the interior QMQ root heaviest on the
 	// main-class configuration with these holes; phiTol is its residual goal.
 	phiHoles []int
@@ -314,33 +329,9 @@ func newOrbitalResolver(eps []float64, md *mo.Data, sites []spectrum.Site) (*orb
 	if err != nil {
 		return nil, err
 	}
-	col := make(map[string]int, len(md.AtomNames))
-	for a, n := range md.AtomNames {
-		col[n] = a
-	}
-	siteOf := make([]int, len(md.AtomNames))
-	for a := range siteOf {
-		siteOf[a] = -1
-	}
-	for s, st := range sites {
-		r.names = append(r.names, st.Name)
-		for _, m := range st.Members {
-			a, ok := col[m]
-			if !ok {
-				return nil, fmt.Errorf("site %q names %q, which is not a column of the sidecar %v",
-					st.Name, m, md.AtomNames)
-			}
-			if siteOf[a] >= 0 && siteOf[a] != s {
-				return nil, fmt.Errorf("column %q is in two sites, %q and %q", m, r.names[siteOf[a]], st.Name)
-			}
-			siteOf[a] = s
-		}
-	}
-	for a, n := range md.AtomNames {
-		if siteOf[a] < 0 {
-			siteOf[a] = len(r.names)
-			r.names = append(r.names, n)
-		}
+	var siteOf []int
+	if r.names, siteOf, err = columnSites(md, sites); err != nil {
+		return nil, err
 	}
 	r.pop = make([][]float64, len(atomPop))
 	r.owner = make([]int, len(atomPop))
@@ -358,6 +349,42 @@ func newOrbitalResolver(eps []float64, md *mo.Data, sites []spectrum.Site) (*orb
 		r.pop[i], r.owner[i] = p, best
 	}
 	return r, nil
+}
+
+// columnSites maps every atom column of the sidecar onto a site: the -group sites in
+// declaration order, then each column no site claims as a site of its own (the fallback
+// spectrum.Regroup uses). It returns the site names and the site of each column.
+func columnSites(md *mo.Data, sites []spectrum.Site) ([]string, []int, error) {
+	col := make(map[string]int, len(md.AtomNames))
+	for a, n := range md.AtomNames {
+		col[n] = a
+	}
+	siteOf := make([]int, len(md.AtomNames))
+	for a := range siteOf {
+		siteOf[a] = -1
+	}
+	var names []string
+	for s, st := range sites {
+		names = append(names, st.Name)
+		for _, m := range st.Members {
+			a, ok := col[m]
+			if !ok {
+				return nil, nil, fmt.Errorf("site %q names %q, which is not a column of the sidecar %v",
+					st.Name, m, md.AtomNames)
+			}
+			if siteOf[a] >= 0 && siteOf[a] != s {
+				return nil, nil, fmt.Errorf("column %q is in two sites, %q and %q", m, names[siteOf[a]], st.Name)
+			}
+			siteOf[a] = s
+		}
+	}
+	for a, n := range md.AtomNames {
+		if siteOf[a] < 0 {
+			siteOf[a] = len(names)
+			names = append(names, n)
+		}
+	}
+	return names, siteOf, nil
 }
 
 // token resolves one list item: an index, or one of the symbolic forms.
@@ -783,6 +810,31 @@ func runFano(d *fcidump.Data, cfg fanoConfig) error {
 		sel = hl
 	}
 	part := fano.NewPartition(parent, sel)
+	var bStats *schemeBStats
+	if cfg.scheme == "b" {
+		// Scheme B keeps the hole rule for the classes it does not rotate (1h, 3h2p) and
+		// re-sorts the 2h1p class as adapted states.
+		sf, ok := fam.(sipFamily)
+		if !ok {
+			return fmt.Errorf("-fano-scheme b is implemented for -sip (orders 2, 3, 22), not %T", fam)
+		}
+		pmx, err := fam.matrix(ch, "fano parent", parent)
+		if err != nil {
+			return err
+		}
+		defer pmx.Release()
+		var st schemeBStats
+		var af adaptedFamily
+		err = stage("scheme B adapted states", func() error {
+			var err error
+			part, af, st, err = buildSchemeB(cfg, sf.parent, sf, pmx, part, eps, nocc, orbSym)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		fam, bStats = af, &st
+	}
 	if err := part.Validate(); err != nil {
 		return err
 	}
@@ -805,6 +857,9 @@ func runFano(d *fcidump.Data, cfg fanoConfig) error {
 		QMain: part.QMain, PMain: psp.MainBlockSize(), Class3: class3,
 	}
 	doc.Census = part.CensusString()
+	if bStats != nil {
+		doc.Scheme, doc.SchemeB = "b", bStats
+	}
 	doc.Lambda = cfg.lambdaSpec
 	switch {
 	case cfg.khci > 0:
@@ -1207,6 +1262,12 @@ func imageAndClassify(doc *FanoDocument, cfg fanoConfig, psp fano.Space, res lan
 			doc.StieltjesBelow, doc.StieltjesAbove)
 	}
 
+	if cfg.scheme == "b" {
+		// PartialWidths routes each P row by its holes; an adapted row's holes are its
+		// parent configuration's, not the adapted state's, so the routing would be wrong.
+		doc.PartialNote = "not available for -fano-scheme b: P rows are adapted states"
+		return nil
+	}
 	if cfg.sip.moPath == "" || cfg.khci > 0 {
 		// For khci the sidecar carries the orbital labels of the partition, not the
 		// populations channel routing needs, and its decay classes are not two-hole.

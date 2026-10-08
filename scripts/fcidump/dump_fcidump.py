@@ -206,7 +206,7 @@ def dump(cfg):
     fcidump_path = cfg.resolve(cfg.fcidump)
     labels = None
 
-    if cfg.orbitals == "localized":
+    if cfg.orbitals in ("localized", "fragment"):
         # Rotated basis: localized occupied, per-atom compact virtuals, free complement
         # (orbitals.py beside this script). Not canonical: the FCIDUMP's Fock matrix is
         # not diagonal, which the sidecar and manifest record.
@@ -215,9 +215,13 @@ def dump(cfg):
         names = fcidump_common.atom_names(mol)
         compact = cfg.compact_basis or (cfg.basis_name or "").lower()
         if not compact:
-            raise SystemExit("&orbitals localized with a basis file needs compact_basis")
-        lb = orbitals.build(mol, mf, [names[a] for a in reals], compact_basis=compact,
-                            thresh=cfg.compact_thresh, one_per_atom=cfg.one_per_atom)
+            raise SystemExit(f"&orbitals {cfg.orbitals} with a basis file needs compact_basis")
+        if cfg.orbitals == "fragment":
+            lb = orbitals.build_fragments(mol, mf, cfg.fragments, compact_basis=compact,
+                                          thresh=cfg.compact_thresh)
+        else:
+            lb = orbitals.build(mol, mf, [names[a] for a in reals], compact_basis=compact,
+                                thresh=cfg.compact_thresh, one_per_atom=cfg.one_per_atom)
         h1e, eri, ecore = orbitals.mo_integrals(mol, mf, lb.C)
         orbsym = lb.orbsym_gamess()
         fcidump.from_integrals(fcidump_path, h1e, eri, lb.nmo, mol.nelectron,
@@ -239,7 +243,7 @@ def dump(cfg):
             "kbj": [__import__("kbj").describe(b) for g in cfg.ghost_sites
                     for b in g["basis"] if b.startswith("kbj:")],
         })
-        print(f"localized basis: {lb.nocc} occ, {lb.ncompact} compact, {lb.nfree} free; "
+        print(f"{cfg.orbitals} basis: {lb.nocc} occ, {lb.ncompact} compact, {lb.nfree} free; "
               f"IAO pop min {lb.metrics['occ_iao_pop_min']:.6f}, off-atom ghost weight "
               f"{lb.metrics['occ_ghost_pop_max']:.2e}, dropped {lb.metrics['n_dropped_lindep']}")
     elif sel.full:
@@ -284,7 +288,7 @@ def dump(cfg):
             "norb": int(norb), "nelec": int(nelec), "ncore_frozen": int(ncore),
             "e_scf": float(mf.e_tot),
             "orbsym_gamess": [int(x) for x in orbsym],
-            "canonical": cfg.orbitals != "localized",
+            "canonical": cfg.orbitals == "canonical",
         }
         if cfg.gate is not None:
             manifest["e_scf_gate"] = cfg.gate

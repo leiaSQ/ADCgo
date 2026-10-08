@@ -69,7 +69,7 @@ set -euo pipefail
 ROOT="${ADCGO_ROOT:-$SLURM_SUBMIT_DIR}"
 WS="$(ws_find icd 2>/dev/null || true)"
 [ -n "$WS" ] || { echo "no 'icd' workspace: run  ws_allocate icd 30" >&2; exit 1; }
-CASE="${ICD_CASE:?set ICD_CASE=wat2|ne2x|ne2f}"
+CASE="${ICD_CASE:?set ICD_CASE=wat2|wat2b|wat2frag|ne2x|ne2f}"
 PYBIN="${ICD_PYTHON:-$HOME/miniconda3/envs/adcgo/bin/python}"
 DUMP="$ROOT/scripts/fcidump/dump_fcidump.py"
 export GOMAXPROCS="${SLURM_CPUS_PER_TASK:-64}"
@@ -180,6 +180,93 @@ EOF
   echo "=== summary (reference Fano-CI: D 72 fs, A 131 fs) ==="
   summary "${out[@]}"
   ;;
+wat2b)
+  # Scheme B (-fano-scheme b): the 2h1p configurations of each particle orbital rotated onto
+  # adapted states, classified by their two-hole character over water-localized occupied
+  # orbitals (inner -> Q, one-site -> excluded, two-site -> P). It removes the leak of the
+  # x partition on canonical orbitals that are shared between the waters (cause 1 of the
+  # 25x overestimate). 3h2p keeps the x hole rule. ADC(2,2)f is the target method.
+  DIR="$WS/wat2"; cd "$DIR"
+  [ -s wat2_vdz_kbj5.fcidump ] || { echo "run ICD_CASE=wat2 once first (canonical fixture)" >&2; exit 1; }
+  SITES=(-group=D=O1,H1,H2,X1 -group=A=O2,H3,H4,X2)
+  QP_X="$QP_IV;x:2/@D:2&2/e<-1.0:0:0;x:2/@A:2&2/e<-1.0:0:0;x:3/@D:3&3/e<-1.0:0:0;x:3/@A:3&3/e<-1.0:0:0"
+  B=(-fcidump wat2_vdz_kbj5.fcidump -mo wat2_vdz_kbj5.mo.json "${SITES[@]}" -sip -sym all
+     -solver lanczos -fano-scheme b)
+  out=()
+  for meth in ${ICD_WAT2_METHODS:-o2x o22f}; do
+    case $meth in
+    o2x)  M=(-order 2);;
+    o22f) M=(-order 22 -adc22 f -matfree on -maxmem 8);;
+    esac
+    # free: P = two-site adapted states with a FREE particle (the L2 analogue; bound D+A*
+    # states excluded). any: every two-site state (the paper's rule; the L1 analogue).
+    for part in ${ICD_B_PARTICLE:-free any}; do
+      for v in D A; do
+        lab="wat2_${meth}_b${part}_$v"
+        width "$lab" "$QP_X" "${B[@]}" "${M[@]}" -fano-b-particle "$part" -fano-init "@$v.0" -init-atom "$v"
+        width "${lab}_gauss" "$QP_X" "${B[@]}" "${M[@]}" -fano-b-particle "$part" -fano-init "@$v.0" \
+            -init-atom "$v" -fano-engine gauss
+        out+=("$lab.json" "${lab}_gauss.json")
+      done
+    done
+  done
+  echo "=== summary (reference Fano-CI: D 72 fs, A 131 fs) ==="
+  summary "${out[@]}"
+  ;;
+wat2frag)
+  # Fano-CI over FRAGMENT-localized orbitals (&orbitals scheme fragment): occupied orbitals
+  # owned by one water each (1s, 2a1, 1b2, 3a1, 1b1 per water), compact virtuals per water,
+  # free virtuals (the KBJ continuum) unowned. CI is invariant to these rotations; ADC is
+  # not, which is why this diagnostic is CI. It separates the two suspected causes of the
+  # ~25x too large x-partition widths on canonical orbitals:
+  #   L1  one-site configurations excluded, holes localized: P = any two-site 2h1p.
+  #       Tests cause 1 (canonical outer-valence orbitals shared between the waters).
+  #   L2  L1 plus two-site configurations with a COMPACT particle excluded: P = each water
+  #       +1 and one free electron. Tests cause 2 (bound D+A* states in P near E_Phi).
+  # Nothing is frozen in a rotated basis, so the inner set per water is its 1s and 2a1.
+  DIR="$WS/wat2"; mkdir -p "$DIR"; cd "$DIR"
+  [ -s wat2.xyz ] || { echo "run ICD_CASE=wat2 once first (it writes wat2.xyz)" >&2; exit 1; }
+  if [ ! -s wat2_vdz_kbj5_frag.fcidump ]; then
+    cat > wat2_vdz_kbj5_frag.in <<'EOF'
+&geometry
+  file wat2.xyz
+&basis
+  name cc-pvdz
+&scf
+  charge 0
+  symmetry off
+  max_cycle 200
+&ghost_sites
+  KO_D  -1.551007  -0.114520   0.000000  kbj:2:1-5
+  KO_A   1.350625   0.111469   0.000000  kbj:2:1-5
+&orbitals
+  scheme fragment
+  fragments D:1-3 A:4-6
+  compact_basis cc-pvdz
+&output
+  fcidump  wat2_vdz_kbj5_frag.fcidump
+  sidecar  wat2_vdz_kbj5_frag.mo.json
+  manifest wat2_vdz_kbj5_frag.ref.json
+EOF
+    "$PYBIN" "$DUMP" --input wat2_vdz_kbj5_frag.in
+  fi
+  IN='@D.0,@D.1,@A.0,@A.1'
+  QP_L1="q:1/@D,@A:1;q:$IN:1;x:2/@D:2&2/$IN:0:0;x:2/@A:2&2/$IN:0:0"
+  QP_L2="$QP_L1;x:2/$IN:0:0&2/free=0"
+  F=(-fcidump wat2_vdz_kbj5_frag.fcidump -mo wat2_vdz_kbj5_frag.mo.json
+     -group=D=O1,H1,H2 -group=A=O2,H3,H4 -khci 1 -khci-maxclass 2 -sym none)
+  out=()
+  for v in D A; do
+    for L in L1 L2; do
+      qp=$([ $L = L1 ] && echo "$QP_L1" || echo "$QP_L2")
+      width "wat2_frag_${L}_$v" "$qp" "${F[@]}" -fano-init "@$v.1"
+      width "wat2_frag_${L}_${v}_gauss" "$qp" "${F[@]}" -fano-init "@$v.1" -fano-engine gauss
+      out+=("wat2_frag_${L}_$v.json" "wat2_frag_${L}_${v}_gauss.json")
+    done
+  done
+  echo "=== summary (reference Fano-CI: D 72 fs, A 131 fs) ==="
+  summary "${out[@]}"
+  ;;
 ne2x|ne2f)
   DIR="$WS/ne2"; mkdir -p "$DIR"; cd "$DIR"
   RS="${ICD_R:-2.6 3.1 3.5 4.0 5.0 6.0}"
@@ -241,5 +328,5 @@ EOF
   summary "${files[@]}"
   ;;
 *)
-  echo "unknown ICD_CASE=$CASE (want wat2, ne2x or ne2f)" >&2; exit 2;;
+  echo "unknown ICD_CASE=$CASE (want wat2, wat2b, wat2frag, ne2x or ne2f)" >&2; exit 2;;
 esac
