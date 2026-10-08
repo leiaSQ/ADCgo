@@ -4,6 +4,7 @@ import (
 	"math"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -358,7 +359,70 @@ func TestEmptyClauseNeverMatches(t *testing.T) {
 	if (Clause{}).match([]int{0}) {
 		t.Fatal("an empty clause matched; it must not")
 	}
-	if _, err := NewClassRule([]Clause{{}}, nil, ""); err == nil {
+	if _, err := NewClassRule([]Clause{{}}, nil, nil, ""); err == nil {
 		t.Fatal("NewClassRule accepted an empty clause")
+	}
+}
+
+// TestExclusionClausesRemoveFromBoth pins the x: semantics: an excluded row is in
+// neither Q nor P, x wins over a matching q clause, Q and P stay disjoint, and
+// Q + P + X still accounts for every row.
+func TestExclusionClausesRemoveFromBoth(t *testing.T) {
+	// Orbitals 0, 1: the two inner-valence holes. 2, 4 on site A; 3 on site B.
+	sp := &fakeSpace{main: 2, holes: [][]int{
+		{0}, {1}, // 1h
+		{0, 2}, // an inner-valence hole: Q
+		{2, 4}, // both on A: excluded
+		{3, 3}, // both on B (a doubly emptied orbital): excluded
+		{2, 3}, // A and B: P
+		{4, 3}, // B and A: P
+	}}
+	r, err := ParseClassRule("q:1/0-4:1;q:0,1:1;x:2/2,4:2;x:2/3:2", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := NewPartition(sp, r)
+	if err := part.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []int{0, 1, 2}; !slices.Equal(part.Q, want) {
+		t.Errorf("Q = %v, want %v", part.Q, want)
+	}
+	if want := []int{5, 6}; !slices.Equal(part.P, want) {
+		t.Errorf("P = %v, want %v", part.P, want)
+	}
+	if part.XSize() != 2 || part.QSize()+part.PSize()+part.XSize() != sp.Size() {
+		t.Errorf("X = %d; Q+P+X = %d of %d", part.XSize(), part.QSize()+part.PSize()+part.XSize(), sp.Size())
+	}
+	for _, row := range []int{3, 4} {
+		if part.QIndex(row) != -1 || part.PIndex(row) != -1 {
+			t.Errorf("excluded row %d has Q index %d, P index %d", row, part.QIndex(row), part.PIndex(row))
+		}
+	}
+	if got := part.CensusExcluded(); got[2] != 2 {
+		t.Errorf("excluded census %v, want 2 in the 2h class", got)
+	}
+	if !strings.Contains(part.CensusString(), "excluded=2") || !strings.Contains(part.String(), "EXCLUDED") {
+		t.Errorf("the log does not show the exclusion: %q / %q", part.CensusString(), part)
+	}
+
+	// x is tested before q: a configuration both match is excluded.
+	r2, err := ParseClassRule("q:0:1;x:0,2:2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r2.Excluded([]int{0, 2}) || r2.Excluded([]int{0}) {
+		t.Error("x clause does not take precedence over a matching q clause")
+	}
+	if p2 := NewPartition(sp, r2); p2.QIndex(2) != -1 || p2.PIndex(2) != -1 {
+		t.Error("row matched by both q and x was not excluded")
+	}
+
+	// x alone defines no bound subspace.
+	if _, err := ParseClassRule("x:2/2,4:2", ""); err == nil {
+		t.Error("a rule of exclusions only was accepted")
+	}
+	if _, err := ParseClassRule("z:0:1", ""); err == nil {
+		t.Error("an unknown clause prefix was accepted")
 	}
 }

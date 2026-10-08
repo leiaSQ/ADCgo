@@ -11,7 +11,8 @@ import (
 //
 // A configuration goes to Q or P by a predicate on its holes alone. No basis
 // transformation is involved, so QMQ and PMP are index sub-blocks of M and the
-// Feshbach projectors are exact: Q + P = 1 and QP = 0, by construction.
+// Feshbach projectors are exact: QP = 0 by construction, and Q + P = 1 unless the rule
+// excludes configurations from both (x: clauses, see Partition).
 //
 // This is what ../ADC/adc2_pol/select_fano.f90 implements. Two things are worth
 // recording about that code, because both are easy to mis-transfer:
@@ -24,9 +25,11 @@ import (
 //     takes holes from hcentre, the final space from hneighb, and the mixed cases —
 //     one hole from each — are commented out ("aukommentier -> Ne sonst HF",
 //     select_fano.f90:438-497). That is why partgammas.f90:648 has to warn about
-//     non-orthogonal subspaces. This package partitions instead: P is the complement
-//     of Q, so the subspaces are orthogonal by construction and the -E_Phi delta term
-//     in the coupling vanishes identically rather than approximately.
+//     non-orthogonal subspaces. This package keeps Q and P disjoint whatever the rule,
+//     so the -E_Phi delta term in the coupling vanishes identically rather than
+//     approximately. The NON-COMPLEMENTARITY itself — configurations in neither space —
+//     is available explicitly, as x: clauses, rather than as an accident of two
+//     independent selections.
 
 // HoleRule selects between the two readings of the scheme A predicate. The paper uses
 // both, for different decay processes, and they are not interchangeable.
@@ -136,8 +139,9 @@ func (h *HoleLocalization) String() string {
 	return b.String()
 }
 
-// Selector decides, per configuration, whether it belongs to the bound subspace Q.
-// P is always the complement, so a Selector defines a genuine Feshbach partition.
+// Selector decides, per configuration, whether it belongs to the bound subspace Q. P is
+// the complement of Q among the configurations the selector does not exclude (Excluder);
+// a selector with no exclusions defines a complete Feshbach partition.
 type Selector interface {
 	// Bound reports whether a configuration with these holes is in Q. It must be a
 	// pure function of holes — NewPartition evaluates it concurrently over the rows.
@@ -256,10 +260,15 @@ func (c Clause) String() string {
 // Ne and Ar are stated as Q rules ("all ISs characterized by at least one 1s vacancy
 // belong to Q"), which is Q alone with P left unrestricted. Mg is stated as a P rule
 // with a Q exception, which is both. Kr is a Q rule with an extra class-specific family,
-// which is two Q clauses. P remains the exact complement of Q in every case, so QP = 0
-// still holds by construction and the coupling's -E_Phi delta term still vanishes.
+// which is two Q clauses. P remains the exact complement of Q among the configurations
+// not excluded, so QP = 0 still holds by construction and the coupling's -E_Phi delta
+// term still vanishes.
+//
+// x clauses are tested first: a configuration any of them matches is in neither Q nor P,
+// whatever the q and p clauses say.
 type ClassRule struct {
 	q, p  []Clause
+	x     []Clause
 	label string
 	spec  string
 }
@@ -267,12 +276,14 @@ type ClassRule struct {
 // NewClassRule builds the selector. At least one clause is required overall: with
 // neither Q nor P clauses every configuration would land in P, leaving no bound state to
 // select and hence no width.
-func NewClassRule(q, p []Clause, label string) (*ClassRule, error) {
+//
+// x are the exclusion clauses; nil for a complete partition.
+func NewClassRule(q, p, x []Clause, label string) (*ClassRule, error) {
 	if len(q) == 0 && len(p) == 0 {
-		return nil, fmt.Errorf("fano: empty Q/P rule; scheme A needs at least one clause " +
-			"to define the bound subspace")
+		return nil, fmt.Errorf("fano: empty Q/P rule; scheme A needs at least one q or p " +
+			"clause to define the bound subspace (x clauses only remove configurations)")
 	}
-	for _, set := range [][]Clause{q, p} {
+	for _, set := range [][]Clause{q, p, x} {
 		for _, c := range set {
 			if len(c) == 0 {
 				return nil, fmt.Errorf("fano: empty clause in the Q/P rule")
@@ -298,7 +309,20 @@ func NewClassRule(q, p []Clause, label string) (*ClassRule, error) {
 			}
 		}
 	}
-	return &ClassRule{q: q, p: p, label: label}, nil
+	return &ClassRule{q: q, p: p, x: x, label: label}, nil
+}
+
+var _ Excluder = (*ClassRule)(nil)
+
+// Excluded reports whether an x clause removes a configuration with these holes from
+// both subspaces.
+func (r *ClassRule) Excluded(holes []int) bool {
+	for _, c := range r.x {
+		if c.match(holes) {
+			return true
+		}
+	}
+	return false
 }
 
 // Bound reports whether a configuration with these holes belongs to Q.
@@ -341,6 +365,13 @@ func (r *ClassRule) String() string {
 			parts[i] = "(" + c.String() + ")"
 		}
 		b.WriteString(", else Q unless P: " + strings.Join(parts, " or "))
+	}
+	if len(r.x) > 0 {
+		parts := make([]string, len(r.x))
+		for i, c := range r.x {
+			parts[i] = "(" + c.String() + ")"
+		}
+		b.WriteString("; EXCLUDED from both: " + strings.Join(parts, " or "))
 	}
 	if r.spec != "" {
 		fmt.Fprintf(&b, " [spec %s]", r.spec)
@@ -391,7 +422,7 @@ func parseOrbSet(s string) ([]int, error) {
 
 // ParseClassRule reads a Q/P rule from a flag string.
 //
-// The grammar is clauses separated by ';', each prefixed "q:" or "p:", each a
+// The grammar is clauses separated by ';', each prefixed "q:", "p:" or "x:", each a
 // conjunction of terms separated by '&', each term
 //
 //	[class/]orbitals:min[:max]
@@ -406,8 +437,16 @@ func parseOrbSet(s string) ([]int, error) {
 //	Mg+(2s^-1)  q:0:1;p:2/4:1;p:3/4:2          2s in Q; P is 2h1p with a 3s hole
 //	                                           and 3h2p with two of them
 //	Kr+(3d^-1)  q:0-4:1;q:3/5:2:2&3/6-8:1      3d in Q, plus 3h2p 4s^-2 4p^-1
+//
+// An x: clause excludes what it matches from both subspaces (see Partition). For ICD of
+// a water 2a1 vacancy (orbitals 0,1 = the two 2a1; 2,4,6 on water A, 3,5,7 on B):
+//
+//	q:1/0-7:1;q:0,1:1;x:2/2,4,6:2;x:2/3,5,7:2
+//
+// keeps every 1h and every 2a1-hole configuration in Q, drops the one-site outer-valence
+// 2h1p (shake-up satellites, closed double ionization), and leaves the two-site ones as P.
 func ParseClassRule(spec, label string) (*ClassRule, error) {
-	var q, p []Clause
+	var q, p, x []Clause
 	for _, cl := range strings.Split(spec, ";") {
 		cl = strings.TrimSpace(cl)
 		if cl == "" {
@@ -415,7 +454,7 @@ func ParseClassRule(spec, label string) (*ClassRule, error) {
 		}
 		kind, body, ok := strings.Cut(cl, ":")
 		if !ok {
-			return nil, fmt.Errorf("fano: clause %q has no q:/p: prefix", cl)
+			return nil, fmt.Errorf("fano: clause %q has no q:/p:/x: prefix", cl)
 		}
 		var clause Clause
 		for _, tm := range strings.Split(body, "&") {
@@ -438,11 +477,13 @@ func ParseClassRule(spec, label string) (*ClassRule, error) {
 			q = append(q, clause)
 		case "p":
 			p = append(p, clause)
+		case "x":
+			x = append(x, clause)
 		default:
-			return nil, fmt.Errorf("fano: clause prefix %q is neither q nor p", kind)
+			return nil, fmt.Errorf("fano: clause prefix %q is not q, p or x", kind)
 		}
 	}
-	r, err := NewClassRule(q, p, label)
+	r, err := NewClassRule(q, p, x, label)
 	if err != nil {
 		return nil, err
 	}

@@ -186,12 +186,27 @@ func (f freeTerm) String() string {
 // with terms that may look at particles.
 type ConfigRule struct {
 	q, p  [][]cterm
+	x     [][]cterm // exclusion clauses: matched configurations are in neither Q nor P
 	am    *AtomMap
 	label string
 	spec  string
 }
 
-var _ ConfigSelector = (*ConfigRule)(nil)
+var (
+	_ ConfigSelector = (*ConfigRule)(nil)
+	_ ConfigExcluder = (*ConfigRule)(nil)
+)
+
+// ExcludedConfig reports whether an x clause removes this configuration from both
+// subspaces.
+func (r *ConfigRule) ExcludedConfig(holes, parts []int) bool {
+	for _, c := range r.x {
+		if matchAll(c, holes, parts, r.am) {
+			return true
+		}
+	}
+	return false
+}
 
 // Bound cannot be answered from holes alone; NewPartition calls BoundConfig instead.
 func (r *ConfigRule) Bound(holes []int) bool {
@@ -255,6 +270,10 @@ func (r *ConfigRule) String() string {
 		b.WriteString(", else Q unless P: ")
 		b.WriteString(join(r.p))
 	}
+	if len(r.x) > 0 {
+		b.WriteString("; EXCLUDED from both: ")
+		b.WriteString(join(r.x))
+	}
 	if r.spec != "" {
 		fmt.Fprintf(&b, " [spec %s]", r.spec)
 	}
@@ -275,7 +294,7 @@ func isConfigTerm(tm string) bool {
 }
 
 // ParseConfigRule reads a net-charge Q/P rule. The grammar is ParseClassRule's
-// (clauses separated by ';', prefixed q: or p:, terms joined by '&', hole terms
+// (clauses separated by ';', prefixed q:, p: or x:, terms joined by '&', hole terms
 // [class/]orbitals:min[:max]) plus two particle-aware terms:
 //
 //	[class/]charge NAME=q,NAME=q,...   the named real atoms carry exactly net charge q
@@ -303,7 +322,7 @@ func ParseConfigRule(spec, label string, am *AtomMap) (*ConfigRule, error) {
 		}
 		kind, body, ok := strings.Cut(cl, ":")
 		if !ok {
-			return nil, fmt.Errorf("fano: clause %q has no q:/p: prefix", cl)
+			return nil, fmt.Errorf("fano: clause %q has no q:/p:/x: prefix", cl)
 		}
 		var clause []cterm
 		for _, tm := range strings.Split(body, "&") {
@@ -322,12 +341,14 @@ func ParseConfigRule(spec, label string, am *AtomMap) (*ConfigRule, error) {
 			r.q = append(r.q, clause)
 		case "p":
 			r.p = append(r.p, clause)
+		case "x":
+			r.x = append(r.x, clause)
 		default:
-			return nil, fmt.Errorf("fano: clause prefix %q is neither q nor p", kind)
+			return nil, fmt.Errorf("fano: clause prefix %q is not q, p or x", kind)
 		}
 	}
 	if len(r.q) == 0 && len(r.p) == 0 {
-		return nil, fmt.Errorf("fano: empty Q/P rule")
+		return nil, fmt.Errorf("fano: empty Q/P rule (x clauses only remove configurations)")
 	}
 	return r, nil
 }

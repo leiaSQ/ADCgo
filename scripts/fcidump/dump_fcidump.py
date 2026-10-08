@@ -139,6 +139,16 @@ def run_scf(cfg, mol):
         scf_hf.remove_overlap_zero_eigenvalue = True
         scf_hf.overlap_zero_eigenvalue_threshold = cfg.lindep
     mf = scf.RHF(mol)
+    if cfg.charges:
+        # Point-charge embedding: qmmm adds the charges to get_hcore() and their interaction
+        # with the nuclei to energy_nuc(), and every writer below takes both from mf, so the
+        # FCIDUMP's one-electron integrals and core energy carry the field.
+        from pyscf import qmmm
+        import numpy as np
+        q = np.array(cfg.charges)
+        mf = qmmm.mm_charge(mf, q[:, 1:], q[:, 0], unit=cfg.charges_unit)
+        print(f"embedding: {len(q)} point charges, total {q[:, 0].sum():+.6f} e",
+              file=sys.stderr)
     mf.conv_tol = cfg.conv_tol
     mf.conv_tol_grad = cfg.conv_tol_grad
     mf.max_cycle = cfg.max_cycle
@@ -280,6 +290,12 @@ def dump(cfg):
             manifest["e_scf_gate"] = cfg.gate
         if sel.full:
             manifest["e_mp2_corr"] = float(mp.MP2(mf).run().e_corr)
+        if cfg.charges:
+            manifest["point_charges"] = len(cfg.charges)
+            manifest["point_charge_total"] = float(sum(c[0] for c in cfg.charges))
+            # the nuclei-charges interaction, included in the FCIDUMP's core energy (and so
+            # in e_scf); the charges' mutual interaction is a constant and is not
+            manifest["e_nuc_charges"] = float(mf.energy_nuc() - mol.energy_nuc())
         fcidump_common.write_manifest(man, manifest)
         print(f"wrote {man}")
 
@@ -298,7 +314,7 @@ def config_from_args(args):
         raise SystemExit("need --fcidump (output path)")
     sym = {"auto": True, "off": False}.get(
         (args.sym_group or "auto").lower(), args.sym_group)
-    return Config(
+    cfg = Config(
         base_dir=".",
         geom_file=args.zmat, unit=args.unit,
         basis_file=args.basis_file, basis_name=args.basis,
@@ -309,6 +325,12 @@ def config_from_args(args):
         active=args.active,
         fcidump=args.fcidump, sidecar=args.sidecar, manifest=args.manifest,
     )
+    if args.point_charges:
+        from adcgo_input import read_charges
+        if isinstance(cfg.symmetry, str):
+            raise SystemExit("--point-charges breaks the point group; drop --sym-group")
+        cfg.charges, cfg.symmetry = read_charges(args.point_charges), False
+    return cfg
 
 
 def main(argv=None):
@@ -323,6 +345,8 @@ def main(argv=None):
     p.add_argument("--cartesian", action="store_true",
                    help="use cartesian GTOs (needed for GAMESS-UK bases)")
     p.add_argument("--charge", type=int, default=0)
+    p.add_argument("--point-charges", dest="point_charges",
+                   help="file of 'q x y z' point charges (angstrom) to embed in")
     p.add_argument("--spin", type=int, default=0, help="2S (unpaired electrons)")
     p.add_argument("--sym-group", help="point group: auto|off|C2v|Cs|...")
     p.add_argument("--gate", type=float, help="reference E(SCF) gate (Ha)")

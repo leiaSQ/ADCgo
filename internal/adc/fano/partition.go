@@ -11,9 +11,19 @@ import (
 // partition.go — the Feshbach split of a configuration space into the bound subspace
 // Q and the continuum subspace P.
 
-// Partition assigns every row of a Space to Q or P. The two are disjoint and together
-// cover every row, so they are the index-space realization of Feshbach projectors
-// satisfying Q + P = 1 and QP = 0 exactly — no overlap correction anywhere downstream.
+// Partition assigns every row of a Space to Q or P, or — when the selector has x:
+// clauses — to neither. Q and P are always disjoint, so QP = 0 holds exactly and the
+// coupling's -E_Phi delta term vanishes with no overlap correction downstream.
+//
+// Without exclusions the two cover every row: the index-space realization of Feshbach
+// projectors with Q + P = 1. With exclusions Q + P + X = 1, and the Fano problem is the
+// one of the Hamiltonian restricted to Q (+) P: excluded configurations neither dress the
+// discrete state nor serve as decay channels. That is the standard practice of the
+// Fano-CI and Fano-ADC literature (the reference's select_atom_is / select_atom_fs are
+// not complementary either) and is how configurations that are neither part of the
+// decaying state nor an open channel — the one-site shake-up satellites of an ICD
+// problem — are kept out of both. It is a model choice, and the run log and document
+// carry the excluded count so it is never invisible.
 //
 // Q and P hold parent row indices in ascending order, which is what Space.Restrict
 // consumes and what keeps a restricted space's class bands contiguous.
@@ -30,8 +40,11 @@ type Partition struct {
 
 	sel Selector
 
-	// census[c] counts (Q, P) configurations of hole count c, for the run log.
-	census map[int][2]int
+	// X is the number of configurations excluded from both subspaces.
+	X int
+
+	// census[c] counts (Q, P, excluded) configurations of hole count c, for the run log.
+	census map[int][3]int
 }
 
 // NewPartition classifies every row of sp with sel.
@@ -49,6 +62,8 @@ func NewPartition(sp Space, sel Selector) *Partition {
 	n := sp.Size()
 	main := sp.MainBlockSize()
 	cs, byConfig := sel.(ConfigSelector)
+	ex, _ := sel.(Excluder)
+	cex, _ := sel.(ConfigExcluder)
 	var psp ParticleSpace
 	if byConfig {
 		var ok bool
@@ -60,24 +75,32 @@ func NewPartition(sp Space, sel Selector) *Partition {
 	W := parallel.ChunkWorkers(n)
 	qs := make([][]int32, W)
 	ps := make([][]int32, W)
-	cens := make([]map[int][2]int, W)
+	cens := make([]map[int][3]int, W)
 	parallel.Chunks(n, W, func(w, lo, hi int) {
 		holes := make([]int, 0, 8)
 		parts := make([]int, 0, 2)
 		q := make([]int32, 0, (hi-lo)/8+1)
 		p := make([]int32, 0, hi-lo)
-		cen := map[int][2]int{}
+		cen := map[int][3]int{}
 		for r := lo; r < hi; r++ {
 			holes = sp.Holes(r, holes[:0])
-			var bound bool
+			var bound, excluded bool
 			if byConfig {
 				parts = psp.Particles(r, parts[:0])
-				bound = cs.BoundConfig(holes, parts)
+				if cex != nil {
+					excluded = cex.ExcludedConfig(holes, parts)
+				}
+				bound = !excluded && cs.BoundConfig(holes, parts)
 			} else {
-				bound = sel.Bound(holes)
+				if ex != nil {
+					excluded = ex.Excluded(holes)
+				}
+				bound = !excluded && sel.Bound(holes)
 			}
 			c := cen[len(holes)]
-			if bound {
+			if excluded {
+				c[2]++
+			} else if bound {
 				q = append(q, int32(r))
 				c[0]++
 			} else {
@@ -90,11 +113,12 @@ func NewPartition(sp Space, sel Selector) *Partition {
 		cens[w] = cen
 	})
 
-	pt := &Partition{sel: sel, census: map[int][2]int{}}
+	pt := &Partition{sel: sel, census: map[int][3]int{}}
 	for _, cen := range cens {
 		for c, v := range cen {
 			t := pt.census[c]
-			pt.census[c] = [2]int{t[0] + v[0], t[1] + v[1]}
+			pt.census[c] = [3]int{t[0] + v[0], t[1] + v[1], t[2] + v[2]}
+			pt.X += v[2]
 		}
 	}
 	nq, np := 0, 0
@@ -136,8 +160,11 @@ func NewPartition(sp Space, sel Selector) *Partition {
 func (p *Partition) QSize() int { return len(p.Q) }
 func (p *Partition) PSize() int { return len(p.P) }
 
+// XSize is the number of configurations excluded from both subspaces.
+func (p *Partition) XSize() int { return p.X }
+
 // QIndex and PIndex map a parent row to its position in Q resp. P, or -1 when the row
-// is in the other subspace.
+// is in the other subspace (or excluded).
 func (p *Partition) QIndex(row int) int { return p.qOf[row] }
 func (p *Partition) PIndex(row int) int { return p.pOf[row] }
 
@@ -221,11 +248,23 @@ func (p *Partition) GatherQ(full []float64, out []float64) []float64 {
 	return out
 }
 
-// Census returns the (Q, P) configuration counts per hole count.
+// Census returns the (Q, P) configuration counts per hole count; excluded rows are in
+// CensusExcluded.
 func (p *Partition) Census() map[int][2]int {
 	out := make(map[int][2]int, len(p.census))
 	for k, v := range p.census {
-		out[k] = v
+		out[k] = [2]int{v[0], v[1]}
+	}
+	return out
+}
+
+// CensusExcluded returns the excluded configuration count per hole count.
+func (p *Partition) CensusExcluded() map[int]int {
+	out := make(map[int]int, len(p.census))
+	for k, v := range p.census {
+		if v[2] > 0 {
+			out[k] = v[2]
+		}
 	}
 	return out
 }
@@ -240,6 +279,9 @@ func (p *Partition) CensusString() string {
 	parts := make([]string, len(keys))
 	for i, k := range keys {
 		parts[i] = fmt.Sprintf("%dh: Q=%d P=%d", k, p.census[k][0], p.census[k][1])
+		if x := p.census[k][2]; x > 0 {
+			parts[i] += fmt.Sprintf(" excluded=%d", x)
+		}
 	}
 	return strings.Join(parts, ", ")
 }
@@ -249,6 +291,10 @@ func (p *Partition) Selector() Selector { return p.sel }
 
 // String summarizes the partition for the run log.
 func (p *Partition) String() string {
-	return fmt.Sprintf("Q=%d (main %d, satellite %d) P=%d of %d configurations; %s",
-		len(p.Q), p.QMain, p.QSat, len(p.P), len(p.qOf), p.sel)
+	x := ""
+	if p.X > 0 {
+		x = fmt.Sprintf(", %d EXCLUDED from both", p.X)
+	}
+	return fmt.Sprintf("Q=%d (main %d, satellite %d) P=%d%s of %d configurations; %s",
+		len(p.Q), p.QMain, p.QSat, len(p.P), x, len(p.qOf), p.sel)
 }

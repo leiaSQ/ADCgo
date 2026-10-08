@@ -131,13 +131,13 @@ func main() {
 	adc22 := flag.String("adc22", "f", "-order 22 variant (Kolorenc & Averbukh, JCP 152, 214107 (2020), Table I): f = full, the paper's recommendation and the only variant that gets double Auger right; x = drops the second-order 1h/2h1p coupling; m = also drops the first-order 3h2p/3h2p block, leaving it diagonal. m and x are documented to overshoot decay widths by ~14% and ~24%, so they are diagnostics rather than production settings")
 	isrSel := flag.String("isr", "", "solve a GENERATED ISR secular matrix (internal/adc/isrgen) as VARIANT:SCHEME, e.g. dip:adc2x or ip:adc22f, applied matrix-free as tensor contractions on a k-hole space of one Ms sector: one sector per multiplicity (-spin both|singlet,triplet,...), each a block Lanczos from its pure-spin main-class vectors. -khci-maxclass/-khci-twoms shape the space; -solver lanczos|dense; -backend gonum|cuda. Detail: adcgo -h isr")
 	doFano := flag.Bool("fano", false, "compute an electronic decay width (Auger, ICD, ETMD and their double counterparts) by the Fano/Feshbach method with Stieltjes imaging, instead of a spectrum. Needs -fano-init and one of: -sip with an -order of 2 (Fano-ADC(2)x), 3, or 22 (Fano-ADC(2,2)), where the vacancy fixes the target irrep; -dip (DIP-ADC(2), one -spin and one -sym sector); or -khci K (k-hole CI; one -sym sector)")
-	fanoInit := flag.Int("fano-init", -1, "-fano: the initially ionized orbital, a 0-based occupied index. It defines both the discrete state |Phi> (selected from the QMQ spectrum by its weight on this orbital's 1h configuration) and, by default, the Q subspace")
+	fanoInit := flag.String("fano-init", "", "-fano: the initially ionized orbital, a 0-based occupied index or @SITE.k (the k-th lowest occupied orbital whose largest population is on -group site or sidecar atom SITE; needs -mo). It defines both the discrete state |Phi> (selected from the QMQ spectrum by its weight on this orbital's 1h configuration) and, by default, the Q subspace. Every -fano orbital list (-fano-q, -fano-qp, -fano-phi-holes) also takes @SITE (all of a site's occupied orbitals), @SITE.k, and the energy windows e<X / e>X (hartree)")
 	fanoQ := flag.String("fano-q", "", "-fano: the Q (bound) orbital set as comma-separated 0-based occupied indices. Empty = just -fano-init, which with the default -fano-rule any is the Auger criterion: Q is every configuration still carrying the initial hole, P every one that has filled it. For interatomic decay name the whole donor subunit's orbitals and use -fano-rule all")
 	fanoRule := flag.String("fano-rule", "any", "-fano: which reading of the scheme A predicate puts a configuration in Q. any = at least one hole in the Q set (retains the initial vacancy), right for local decay such as atomic Auger. all = every hole in the set (all holes localized on subunit A), right for ICD/ETMD between subunits, where it is a hole OUTSIDE the donor that marks a decay channel. The two are not interchangeable")
 	fanoNth := flag.Int("fano-nth", 0, "-fano: which qualifying QMQ root to take as |Phi>, 0-based in ascending energy (the reference's ninista-1). Only roots whose weight on the vacancy configuration reaches -fano-qmin are counted")
 	fanoPhiHoles := flag.String("fano-phi-holes", "", "-fano: select |Phi> as the INTERIOR root of QMQ with the largest weight on the main-class configuration with these holes (comma-separated 0-based occupied orbitals, a doubly emptied orbital twice, e.g. 0,0,4,4 for He2+ on atoms 0 and 4), found by Jacobi-Davidson and polished by shifted inverse iteration, instead of the nth qualifying root from the bottom. Needed for multiply ionized initial states, which sit above charge-transfer states of Q")
 	fanoPhiTol := flag.Float64("fano-phi-tol", 1e-10, "-fano-phi-holes: residual goal ||(QHQ - E) Phi|| in hartree; a polish that stops above it (the float64 floor) is reported in the document, not hidden")
-	fanoQP := flag.String("fano-qp", "", "-fano: a Q/P partition stated PER EXCITATION CLASS, which -fano-q cannot express. Grammar: clauses separated by ';', each prefixed q: or p:, each a conjunction of terms joined by '&', each term [class/]orbitals:min[:max] with orbitals a comma-separated list of 0-based occupied indices and a-b ranges, class an excitation class as a hole count (omitted = every class), and max omitted = unbounded. A configuration is bound if some q clause matches, or if p clauses were given and none matches. Two of the four atoms in the paper's Table V need this: Mg(2s^-1) is 'q:0:1;p:2/4:1;p:3/4:2' — 2s vacancies bound, continuum is 2h1p with a 3s hole and 3h2p with TWO of them, which is what keeps the CLOSED 2p^-2 channel out of P — and Kr(3d^-1) is 'q:0-4:1;q:3/5:2:2&3/6-8:1', a 3d any-hole rule plus the 4s^-2 4p^-1 shake-up family in Q. Supersedes -fano-q and -fano-rule")
+	fanoQP := flag.String("fano-qp", "", "-fano: a Q/P partition stated PER EXCITATION CLASS, which -fano-q cannot express. Grammar: clauses separated by ';', each prefixed q:, p: or x:, each a conjunction of terms joined by '&', each term [class/]orbitals:min[:max] with orbitals a comma-separated list of 0-based occupied indices and a-b ranges, class an excitation class as a hole count (omitted = every class), and max omitted = unbounded. A configuration is bound if some q clause matches, or if p clauses were given and none matches. Two of the four atoms in the paper's Table V need this: Mg(2s^-1) is 'q:0:1;p:2/4:1;p:3/4:2' — 2s vacancies bound, continuum is 2h1p with a 3s hole and 3h2p with TWO of them, which is what keeps the CLOSED 2p^-2 channel out of P — and Kr(3d^-1) is 'q:0-4:1;q:3/5:2:2&3/6-8:1', a 3d any-hole rule plus the 4s^-2 4p^-1 shake-up family in Q. An x: clause EXCLUDES what it matches from both Q and P (tested first): the width is then that of the Hamiltonian restricted to Q (+) P, the usual practice for configurations that are neither part of the decaying state nor an open channel, e.g. ICD's one-site outer-valence configurations 'x:2/@W1:2&2/e<-1.0:0:0' (adcgo -h fano). Supersedes -fano-q and -fano-rule")
 	fanoQMin := flag.Float64("fano-qmin", 0.1, "-fano: minimum weight of |Phi> on the vacancy's 1h configuration (the reference's mspacewi). A root below this is not the state that was ionized")
 	fanoQSolver := flag.String("fano-qsolver", "", "-fano: eigensolver for the QMQ (bound) half, which wants a different one from the PMP half that -solver governs. Empty = davidson, or dense when -solver is dense. Only a few of QMQ's LOWEST roots are wanted — |Phi> is the bottom of that spectrum, since every Q configuration past the 1h class carries an extra hole — and under this partition Q's main block is often a single configuration, so a block-Lanczos seeded from it would be one column wide")
 	fanoQRoots := flag.Int("fano-qroots", 8, "-fano -solver davidson: QMQ roots to converge. The lowest are the right ones: every Q configuration carries the initial vacancy and every one past the 1h class carries an extra hole, so |Phi> is the bottom of the QMQ spectrum even for a deep core hole")
@@ -180,7 +180,14 @@ func main() {
 
 	applyCgroupMemLimit() // bound RSS under the SLURM --mem cap (see memlimit.go)
 
-	flag.Parse()
+	flag.CommandLine.Parse(joinGroupArgs(os.Args[1:]))
+	if flag.NArg() > 0 {
+		// adcgo takes no positional arguments, and the flag package stops at the first
+		// one: everything after it would otherwise be dropped without a word.
+		fmt.Fprintf(os.Stderr, "adcgo: unexpected argument %q: every flag after it would be ignored "+
+			"(a flag value with spaces needs quoting)\n", flag.Arg(0))
+		os.Exit(2)
+	}
 
 	println("\n ADCgo: a modern implementation of ADC \n Authors: Leia Wertebach, Alexander Kuleff \n\n Derived from: \n TheADCcode: A collection of ADC/ISR source codes.\n Contributors: Nikolay Golubev,\n Yasen Velkov (developer of the original version),\n Alexander Kuleff,\n Anthony Dutoi, Nicolas Sisourat, Tsveta Miteva,\n Joerg Breidbach, Imke Mueller, Nayana Vaval,\n Francesco Tarantelli, Soeren Kopelke,\n Sajeev Yesodharan, Kirill Gokhberg, Robin Santra\n\n")
 
@@ -307,8 +314,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "adcgo: -fano is exclusive with -spectrum/-bare and -tdm")
 			os.Exit(2)
 		}
-		if *fanoInit < 0 {
-			fmt.Fprintln(os.Stderr, "adcgo: -fano needs -fano-init <0-based occupied orbital>")
+		if strings.TrimSpace(*fanoInit) == "" {
+			fmt.Fprintln(os.Stderr, "adcgo: -fano needs -fano-init <0-based occupied orbital or @SITE.k>")
 			os.Exit(2)
 		}
 	}
@@ -319,13 +326,25 @@ func main() {
 		if err != nil {
 			return fanoConfig{}, err
 		}
-		qOrbs, err := parseOrbitalList("-fano-q", *fanoQ)
-		if err != nil {
-			return fanoConfig{}, err
+		// Symbolic lists (@SITE, e<X) wait for the FCIDUMP and sidecar: resolveOrbitals.
+		vacancy := -1
+		if !symbolicOrbitals(*fanoInit) {
+			v, err := strconv.Atoi(strings.TrimSpace(*fanoInit))
+			if err != nil || v < 0 {
+				return fanoConfig{}, fmt.Errorf("bad -fano-init %q (want a 0-based occupied index or @SITE.k)", *fanoInit)
+			}
+			vacancy = v
 		}
-		phiHoles, err := parseOrbitalList("-fano-phi-holes", *fanoPhiHoles)
-		if err != nil {
-			return fanoConfig{}, err
+		var qOrbs, phiHoles []int
+		if !symbolicOrbitals(*fanoQ) {
+			if qOrbs, err = parseOrbitalList("-fano-q", *fanoQ); err != nil {
+				return fanoConfig{}, err
+			}
+		}
+		if !symbolicOrbitals(*fanoPhiHoles) {
+			if phiHoles, err = parseOrbitalList("-fano-phi-holes", *fanoPhiHoles); err != nil {
+				return fanoConfig{}, err
+			}
 		}
 		lo, hi, err := parseStieltjesOrders(*stOrders)
 		if err != nil {
@@ -336,7 +355,8 @@ func main() {
 			return fanoConfig{}, err
 		}
 		return fanoConfig{
-			sip: base, variant: variant, vacancy: *fanoInit, qOrbs: qOrbs, rule: rule,
+			sip: base, variant: variant, vacancy: vacancy, qOrbs: qOrbs, rule: rule,
+			vacancySpec: *fanoInit, qSpec: *fanoQ, phiSpec: *fanoPhiHoles,
 			nth: *fanoNth, qMin: *fanoQMin, qRoots: *fanoQRoots, qSolver: *fanoQSolver,
 			qpSpec: *fanoQP, phiHoles: phiHoles, phiTol: *fanoPhiTol,
 			engine: *fanoEngine, order: *fanoOrder, siShift: *fanoSIShift, gminRel: *fanoGMinRel,

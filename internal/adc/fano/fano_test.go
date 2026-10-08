@@ -231,3 +231,52 @@ func TestSelectDiscreteErrors(t *testing.T) {
 		t.Error("a solve without full Ritz vectors was accepted")
 	}
 }
+
+// TestCouplingIdentityWithExclusion: with x: clauses the coupling is still one parent
+// mat-vec gathered on P, and it equals the explicit P x Q cross block of the parent —
+// the excluded rows play no part, which is exactly the Fano problem of the Hamiltonian
+// restricted to Q (+) P.
+func TestCouplingIdentityWithExclusion(t *testing.T) {
+	parent, pmx, build := h2o22(t, 8, sip.VariantF)
+	const vacancy = 0
+	// 1s in Q; every 2h1p with both holes in the outer valence (2-4) excluded; the rest P.
+	sel, err := ParseClassRule("q:0:1;x:2/2-4:2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := NewPartition(parent, sel)
+	if err := part.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if part.XSize() == 0 {
+		t.Fatal("the rule excluded nothing; the test would not exercise exclusion")
+	}
+	if part.QSize()+part.PSize()+part.XSize() != parent.Size() {
+		t.Fatalf("Q+P+X = %d, parent %d", part.QSize()+part.PSize()+part.XSize(), parent.Size())
+	}
+	qsp := parent.Restrict(part.Q)
+	qres := lanczos.SolveDense(build(qsp), backend.Gonum{})
+	phi, err := SelectDiscrete(qsp, qres, vacancy, 0, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Coupling(pmx, part, phi, backend.Gonum{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	M := pmx.BuildMatrix()
+	var maxDiff, maxAbs float64
+	for a, j := range part.P {
+		var want float64
+		for b, i := range part.Q {
+			want += M.At(j, i) * phi.Vec[b]
+		}
+		maxAbs = math.Max(maxAbs, math.Abs(want))
+		maxDiff = math.Max(maxDiff, math.Abs(got[a]-want))
+	}
+	t.Logf("Q=%d P=%d X=%d; coupling max |g| %.4g, deviation %.3g",
+		part.QSize(), part.PSize(), part.XSize(), maxAbs, maxDiff)
+	if maxDiff > 1e-12*math.Max(1, maxAbs) {
+		t.Errorf("coupling deviates from the explicit cross block by %.3g", maxDiff)
+	}
+}

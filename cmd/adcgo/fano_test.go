@@ -9,9 +9,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/leiaSQ/ADCgo/backend"
 	"github.com/leiaSQ/ADCgo/internal/adc/dip"
 	"github.com/leiaSQ/ADCgo/internal/adc/fano"
 	"github.com/leiaSQ/ADCgo/internal/adc/fcidump"
+	"github.com/leiaSQ/ADCgo/internal/adc/mo"
+	"github.com/leiaSQ/ADCgo/internal/adc/mp"
+	"github.com/leiaSQ/ADCgo/internal/adc/spectrum"
 	"github.com/leiaSQ/ADCgo/internal/adc/stieltjes"
 )
 
@@ -470,5 +474,122 @@ func TestFanoLockInPlumbing(t *testing.T) {
 	}
 	if classes != 3 || pairs != 3 {
 		t.Errorf("decomposition has %d classes and %d pairs, want 3 and 3", classes, pairs)
+	}
+}
+
+// toyResolverMO is a four-AO, four-orbital sidecar with S = 1 and one AO per atom, so
+// each orbital's Mulliken population is the square of its column: orbital 0 sits on O2,
+// 1 on O1, 2 is 0.8 O1 / 0.2 O2, and 3 is 0.6 H1 / 0.4 H2.
+func toyResolverMO() *mo.Data {
+	c := backend.NewMat(4, 4)
+	s := backend.NewMat(4, 4)
+	for p := range 4 {
+		s.Set(p, p, 1)
+	}
+	c.Set(2, 0, 1)
+	c.Set(0, 1, 1)
+	c.Set(0, 2, math.Sqrt(0.8))
+	c.Set(2, 2, math.Sqrt(0.2))
+	c.Set(1, 3, math.Sqrt(0.6))
+	c.Set(3, 3, math.Sqrt(0.4))
+	return &mo.Data{NAO: 4, NMO: 4, C: c, S: s, AOAtom: []int{0, 1, 2, 3},
+		AtomNames: []string{"O1", "H1", "O2", "H2"}}
+}
+
+// TestOrbitalResolver: the symbolic orbital forms, on a sidecar whose populations are
+// known by construction.
+func TestOrbitalResolver(t *testing.T) {
+	eps := []float64{-1.40, -1.35, -0.70, -0.50}
+	sites := []spectrum.Site{{Name: "W1", Members: []string{"O1", "H1"}},
+		{Name: "W2", Members: []string{"O2", "H2"}}}
+	r, err := newOrbitalResolver(eps, toyResolverMO(), sites)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		in   string
+		want []int
+		bad  bool
+	}{
+		{"@W1", []int{1, 2, 3}, false},
+		{"@W1.0", []int{1}, false},
+		{"@W1.2", []int{3}, false},
+		{"@W2", []int{0}, false},
+		{"@W2.1", nil, true}, // W2 owns one orbital
+		{"@W3", nil, true},   // no such site
+		{"@W1.x", nil, true}, // bad rank
+		{"e<-1.0", []int{0, 1}, false},
+		{"e>-0.6", []int{3}, false},
+		{"e<-2", nil, true},                      // empty window
+		{"@W2.0,@W1.0,1", []int{0, 1, 1}, false}, // order and repeats kept
+		{"4", nil, true},                         // not occupied
+	} {
+		got, err := r.list(c.in)
+		if c.bad {
+			if err == nil {
+				t.Errorf("%q: accepted, got %v", c.in, got)
+			}
+			continue
+		}
+		if err != nil || !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%q = %v, %v; want %v", c.in, got, err, c.want)
+		}
+	}
+	if got := r.pop[2][0]; math.Abs(got-0.8) > 1e-12 {
+		t.Errorf("orbital 2 population on W1 = %g, want 0.8", got)
+	}
+
+	for _, c := range []struct{ in, want string }{
+		{"q:1/0-3:1;q:e<-1.0:1", "q:1/0-3:1;q:0,1:1"},
+		{"p:2/@W1.0:1&2/@W2:1", "p:2/1:1&2/0:1"},
+		{"q:0:1;p:2/4:1;p:3/4:2", "q:0:1;p:2/4:1;p:3/4:2"},                     // nothing symbolic: unchanged
+		{"q:1/e<0:1;x:2/@W1:2;x:2/@W2:2", "q:1/0,1,2,3:1;x:2/1,2,3:2;x:2/0:2"}, // exclusions expand too
+	} {
+		got, err := r.expandQP(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("expandQP(%q) = %q, %v; want %q", c.in, got, err, c.want)
+		}
+	}
+
+	// Without a sidecar the energy windows still resolve and @SITE says what it needs.
+	bare, err := newOrbitalResolver(eps, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := bare.list("e<-1.0"); err != nil || !reflect.DeepEqual(got, []int{0, 1}) {
+		t.Errorf("bare e<-1.0 = %v, %v", got, err)
+	}
+	if _, err := bare.list("@W1.0"); err == nil || !strings.Contains(err.Error(), "-mo") {
+		t.Errorf("bare @W1.0: err = %v, want a pointer to -mo", err)
+	}
+
+	// A site naming a column the sidecar does not have is refused, as is a column in two sites.
+	if _, err := newOrbitalResolver(eps, toyResolverMO(),
+		[]spectrum.Site{{Name: "W1", Members: []string{"O9"}}}); err == nil {
+		t.Error("unknown column accepted")
+	}
+	if _, err := newOrbitalResolver(eps, toyResolverMO(), []spectrum.Site{
+		{Name: "A", Members: []string{"O1"}}, {Name: "B", Members: []string{"O1"}}}); err == nil {
+		t.Error("column in two sites accepted")
+	}
+}
+
+// TestResolveOrbitalsWater: -fano-init @O.0 on water, without -group, is the O 1s, and
+// the document fields record where it sits.
+func TestResolveOrbitalsWater(t *testing.T) {
+	d := testFCIDUMP(t)
+	nocc := mp.NOcc(d)
+	cfg := fanoConfig{vacancy: -1, vacancySpec: "@O.0", qpSpec: "q:e<-1.0:1",
+		sip: sipConfig{moPath: "../../testdata/h2o.mo.json"}}
+	if err := cfg.resolveOrbitals(mp.OrbitalEnergies(d, nocc)[:nocc]); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.vacancy != 0 || cfg.vacancySite != "O" || cfg.vacancyPop < 0.99 {
+		t.Errorf("vacancy %d on %s (%.4f), want orbital 0 on O above 0.99",
+			cfg.vacancy, cfg.vacancySite, cfg.vacancyPop)
+	}
+	// water: 1a1 at -20.5 Eh and 2a1 at -1.3 Eh are the only orbitals below -1 Eh
+	if cfg.qpSpec != "q:0,1:1" {
+		t.Errorf("qpSpec = %q, want q:0,1:1", cfg.qpSpec)
 	}
 }

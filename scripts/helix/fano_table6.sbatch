@@ -100,6 +100,11 @@ go build -o "$OUT/adcgo" ./cmd/adcgo
 # 3840 gave 768 meV, with the sum-rule residual barely moving (63% -> 58%) because that
 # residual is dominated by the deliberate energy cut rather than by Krylov incompleteness.
 KRYLOV="${FANO_KRYLOV:-120}"
+# FANO_BLOCK is the PMP Krylov block width. The product block x count is what decides
+# whether the pseudo-continuum spans all of P; the width only trades the number of
+# matrix-free applies (one element recompute serves every column) against panel and
+# band-reduction cost. Non-default widths get a _b<width> label suffix.
+BLOCK="${FANO_BLOCK:-64}"
 
 GEN="$ROOT/scripts/fixtures/gen_fano_atoms.py"
 PYBIN="${FANO_PYTHON:-$HOME/miniconda3/envs/adcgo/bin/python}"
@@ -124,7 +129,7 @@ SYSTEMS="${FANO_SYSTEMS:-\
 ne:0:ne_augccpcv5z_unc_et10s10p8d_v460:2,22:q:0:1|\
 mg:0:mg_ccpcv5z_unc_kbj10s10p8d_v80_fc1:2,22:q:0:1;p:2/4:1;p:3/4:2|\
 ar:1:ar_augccpwcv5z_unc_et4s3p_v30_fc1:2,22:q:0-3:1|\
-kr:0:kr_ccpwcv5zpp_kbj5s5p5d2f_v11_fc4:2:q:0-4:1;q:3/5:2:2&3/6-8:1}"
+kr:0:kr_ccpwcv5zpp_kbj5s5p5d2f_v11_fc4:2,22:q:0-4:1;q:3/5:2:2&3/6-8:1}"
 
 # FANO_ONLY restricts the sweep to named atoms, e.g. FANO_ONLY="ne mg kr". Use THIS and
 # not FANO_SYSTEMS to split the sweep across allocations: sbatch --export splits its value
@@ -163,7 +168,7 @@ EOFSYS
   if [ -z "${FANO_SCHEMES:-}" ]; then
     case ",$orders," in *,22,*) schemes="2:f 22:m 22:x 22:f";; esac
   else
-    # Drop any order the system is not configured for (Kr is order 2 only).
+    # Drop any order the system is not configured for (every atom is configured for 2 and 22).
     keep=""
     for scheme in $schemes; do
       case ",$orders," in *,"${scheme%%:*}",*) keep="$keep $scheme";; esac
@@ -174,6 +179,7 @@ EOFSYS
     order="${scheme%%:*}"; variant="${scheme##*:}"
    for nblk in $KRYLOV; do
     label="${atom}_o${order}${variant}_k${nblk}"
+    [ "$BLOCK" = 64 ] || label="${label}_b${BLOCK}"
     echo "=== $label ==="
     # -matfree on: the ADC(2,2) 3h2p/3h2p block is n3^2 and cannot be stored.
     # -solver lanczos drives the PMP pseudo-continuum; the QMQ half uses Davidson by
@@ -181,7 +187,7 @@ EOFSYS
     "$OUT/adcgo" -fcidump "$dump" -sip -order "$order" -adc22 "$variant" \
         -fano -fano-init "$vac" -fano-qp "$qp" -sym all \
         -solver lanczos -matfree on -maxmem 8 \
-        -fano-qroots 4 -fano-block 64 -fano-blocks "$nblk" \
+        -fano-qroots 4 -fano-block "$BLOCK" -fano-blocks "$nblk" \
         -fano-wmin -1 \
         -sigma off -out "$OUT/$label.json" 2>&1 | tee "$OUT/$label.log" || true
 
@@ -192,7 +198,7 @@ EOFSYS
       "$OUT/adcgo" -fcidump "$dump" -sip -order "$order" -adc22 "$variant" \
           -fano -fano-init "$vac" -fano-qp "$qp" -sym all \
           -solver lanczos -matfree on -maxmem 8 \
-          -fano-qroots 4 -fano-block 64 -fano-blocks "$nblk" \
+          -fano-qroots 4 -fano-block "$BLOCK" -fano-blocks "$nblk" \
           -fano-wmin -1 -fano-at "$base_ephi" \
           -sigma off -out "$OUT/${label}_atbase.json" 2>&1 \
           | tee "$OUT/${label}_atbase.log" || true

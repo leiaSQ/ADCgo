@@ -72,6 +72,18 @@ type ParticleSpace interface {
 	Particles(row int, dst []int) []int
 }
 
+// Excluder is a Selector that can also leave a configuration out of BOTH subspaces: the
+// x: clauses of a -fano-qp rule. NewPartition asks Excluded first, and an excluded row is
+// in neither Q nor P. See Partition for what that does and does not change.
+type Excluder interface {
+	Excluded(holes []int) bool
+}
+
+// ConfigExcluder is Excluder for a criterion that needs the particles too.
+type ConfigExcluder interface {
+	ExcludedConfig(holes, parts []int) bool
+}
+
 // ConfigSelector is a Selector whose criterion also needs the particles. NewPartition
 // calls BoundConfig for it; its Bound, which cannot be answered from holes alone,
 // is never called.

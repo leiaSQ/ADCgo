@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"math/rand"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -190,4 +191,23 @@ func maxRelDiff(want, got []float64) float64 {
 		maxDiff = math.Max(maxDiff, math.Abs(want[i]-got[i]))
 	}
 	return maxDiff / math.Max(scale, 1e-300)
+}
+
+// TestJoinGroupArgs: the spaced -group form reaches the flag as one value, and nothing
+// else is touched.
+func TestJoinGroupArgs(t *testing.T) {
+	for _, c := range []struct{ in, want []string }{
+		{[]string{"-group", "W1=O1,H1", "-out", "x.json"}, []string{"-group=W1=O1,H1", "-out", "x.json"}},
+		{[]string{"--group", "wat=O,~H1,~H2"}, []string{"--group=wat=O,~H1,~H2"}},
+		{[]string{"-group", "-dip"}, []string{"-group", "-dip"}},           // bare: interactive
+		{[]string{"-group"}, []string{"-group"}},                           // bare at the end
+		{[]string{"-group=A=O", "-sip"}, []string{"-group=A=O", "-sip"}},   // already joined
+		{[]string{"-group", "noequals"}, []string{"-group", "noequals"}},   // not a site spec
+		{[]string{"--", "-group", "A=O"}, []string{"--", "-group", "A=O"}}, // after --
+		{[]string{"-fano-qp", "q:1/e<0:1"}, []string{"-fano-qp", "q:1/e<0:1"}},
+	} {
+		if got := joinGroupArgs(c.in); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("joinGroupArgs(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
 }

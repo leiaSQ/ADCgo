@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -63,10 +64,20 @@ type FanoDocument struct {
 	Irrep     int    `json:"irrep"`     // 1-based target irrep (SIP: fixed by the vacancy; DIP: -sym)
 	Criterion string `json:"criterion"` // the Q/P predicate, as applied
 
+	// VacancySpec is -fano-init as written when it named the orbital symbolically
+	// (@SITE.k); VacancySite and VacancySitePop are where that orbital's largest
+	// population sits and how large it is. Below ~0.8 the "site vacancy" is delocalized.
+	VacancySpec    string  `json:"vacancy_spec,omitempty"`
+	VacancySite    string  `json:"vacancy_site,omitempty"`
+	VacancySitePop float64 `json:"vacancy_site_population,omitempty"`
+
 	// The partition and the two sub-problems.
-	Size   int `json:"size"`    // configurations in the parent space
-	QSize  int `json:"q_size"`  // bound subspace
-	PSize  int `json:"p_size"`  // continuum subspace
+	Size  int `json:"size"`   // configurations in the parent space
+	QSize int `json:"q_size"` // bound subspace
+	PSize int `json:"p_size"` // continuum subspace
+	// XSize counts configurations excluded from BOTH subspaces by x: clauses. Nonzero
+	// means the width is that of the Hamiltonian restricted to Q (+) P (see -h fano).
+	XSize  int `json:"x_size,omitempty"`
 	QMain  int `json:"q_main"`  // main-class configurations in Q
 	PMain  int `json:"p_main"`  // main-class configurations in P
 	PDecay int `json:"p_decay"` // decay-continuum configurations in P (all satellite classes)
@@ -201,6 +212,16 @@ type fanoConfig struct {
 	rule    fano.HoleRule
 	qpSpec  string // -fano-qp: a per-excitation-class Q/P rule, overriding -fano-q/-fano-rule
 	nth     int    // -fano-nth: which qualifying QMQ root
+	// The -fano-init, -fano-q and -fano-phi-holes flags as written, when they name orbitals
+	// symbolically (@SITE, @SITE.k, e<X, e>X): resolved against the sidecar and the orbital
+	// energies once the FCIDUMP is read (resolveOrbitals), which fills vacancy, qOrbs and
+	// phiHoles and rewrites qpSpec.
+	vacancySpec, qSpec, phiSpec string
+	// vacancySite and vacancyPop record where a symbolically named vacancy sits: the site
+	// holding its largest population, and that population. A delocalized orbital is not
+	// the localized vacancy the name promises, and this is the only place that shows it.
+	vacancySite string
+	vacancyPop  float64
 	// phiHoles (-fano-phi-holes) selects |Phi> as the interior QMQ root heaviest on the
 	// main-class configuration with these holes; phiTol is its residual goal.
 	phiHoles []int
@@ -259,6 +280,277 @@ func parseOrbitalList(flagName, s string) ([]int, error) {
 	return out, nil
 }
 
+// symbolicOrbitals reports whether an orbital list (or -fano-qp rule) names orbitals by
+// site or by energy rather than by index, and so has to wait for the FCIDUMP and sidecar.
+func symbolicOrbitals(s string) bool { return strings.ContainsAny(s, "@<>") }
+
+// orbitalResolver expands symbolic occupied-orbital references, so that a rule can be
+// written once for a whole family of systems — every water of an ice cluster, say —
+// instead of being re-derived per geometry from that geometry's orbital ordering:
+//
+//	@SITE     every occupied orbital whose largest population is on SITE
+//	@SITE.k   the k-th lowest-energy of those (0-based): @W1.0 is W1's 2a1 when the
+//	          oxygen 1s are frozen
+//	e<X, e>X  every occupied orbital with energy below / above X hartree (inner valence
+//	          is one window, whatever the cluster size)
+//
+// SITE is a -group site, or an atom column of the sidecar no site claims (the same
+// fallback spectrum.Regroup uses). Populations are fano.OrbitalPopulations folded onto
+// sites. Energies are the Fock diagonal rebuilt from the FCIDUMP, which for a rotated
+// (localized) basis orders by diagonal energy rather than eigenvalue.
+type orbitalResolver struct {
+	eps   []float64   // occupied orbital energies, Eh
+	names []string    // sites: -group sites in declaration order, then unclaimed columns
+	pop   [][]float64 // pop[i][s]: occupied orbital i's population on site s
+	owner []int       // the site holding orbital i's largest population
+}
+
+func newOrbitalResolver(eps []float64, md *mo.Data, sites []spectrum.Site) (*orbitalResolver, error) {
+	r := &orbitalResolver{eps: eps}
+	if md == nil {
+		return r, nil // energy windows still resolve; @SITE says it needs -mo
+	}
+	atomPop, err := fano.OrbitalPopulations(md, len(eps))
+	if err != nil {
+		return nil, err
+	}
+	col := make(map[string]int, len(md.AtomNames))
+	for a, n := range md.AtomNames {
+		col[n] = a
+	}
+	siteOf := make([]int, len(md.AtomNames))
+	for a := range siteOf {
+		siteOf[a] = -1
+	}
+	for s, st := range sites {
+		r.names = append(r.names, st.Name)
+		for _, m := range st.Members {
+			a, ok := col[m]
+			if !ok {
+				return nil, fmt.Errorf("site %q names %q, which is not a column of the sidecar %v",
+					st.Name, m, md.AtomNames)
+			}
+			if siteOf[a] >= 0 && siteOf[a] != s {
+				return nil, fmt.Errorf("column %q is in two sites, %q and %q", m, r.names[siteOf[a]], st.Name)
+			}
+			siteOf[a] = s
+		}
+	}
+	for a, n := range md.AtomNames {
+		if siteOf[a] < 0 {
+			siteOf[a] = len(r.names)
+			r.names = append(r.names, n)
+		}
+	}
+	r.pop = make([][]float64, len(atomPop))
+	r.owner = make([]int, len(atomPop))
+	for i, row := range atomPop {
+		p := make([]float64, len(r.names))
+		for a, w := range row {
+			p[siteOf[a]] += w
+		}
+		best := 0
+		for s := range p {
+			if p[s] > p[best] {
+				best = s
+			}
+		}
+		r.pop[i], r.owner[i] = p, best
+	}
+	return r, nil
+}
+
+// token resolves one list item: an index, or one of the symbolic forms.
+func (r *orbitalResolver) token(tok string) ([]int, error) {
+	tok = strings.TrimSpace(tok)
+	switch {
+	case strings.HasPrefix(tok, "@"):
+		if r.pop == nil {
+			return nil, fmt.Errorf("%q names a site: symbolic site orbitals need -mo", tok)
+		}
+		name, kStr, hasK := strings.Cut(tok[1:], ".")
+		s := slices.Index(r.names, name)
+		if s < 0 {
+			return nil, fmt.Errorf("%q: no site %q (sites: %v)", tok, name, r.names)
+		}
+		var on []int
+		for i, o := range r.owner {
+			if o == s {
+				on = append(on, i)
+			}
+		}
+		sort.SliceStable(on, func(a, b int) bool { return r.eps[on[a]] < r.eps[on[b]] })
+		if len(on) == 0 {
+			return nil, fmt.Errorf("%q: no occupied orbital has its largest population on %s", tok, name)
+		}
+		if !hasK {
+			return on, nil
+		}
+		k, err := strconv.Atoi(kStr)
+		if err != nil || k < 0 {
+			return nil, fmt.Errorf("%q: bad orbital rank %q (want @SITE.k, k a 0-based rank)", tok, kStr)
+		}
+		if k >= len(on) {
+			return nil, fmt.Errorf("%q: site %s holds %d occupied orbitals, so rank %d does not exist",
+				tok, name, len(on), k)
+		}
+		return on[k : k+1], nil
+	case strings.HasPrefix(tok, "e<"), strings.HasPrefix(tok, "e>"):
+		x, err := strconv.ParseFloat(tok[2:], 64)
+		if err != nil {
+			return nil, fmt.Errorf("%q: bad energy bound (want e<X or e>X, X in hartree)", tok)
+		}
+		var out []int
+		for i, e := range r.eps {
+			if (tok[1] == '<' && e < x) || (tok[1] == '>' && e > x) {
+				out = append(out, i)
+			}
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("%q selects no occupied orbital (energies %.4f .. %.4f Eh)",
+				tok, slices.Min(r.eps), slices.Max(r.eps))
+		}
+		return out, nil
+	}
+	v, err := strconv.Atoi(tok)
+	if err != nil || v < 0 || v >= len(r.eps) {
+		return nil, fmt.Errorf("%q is neither a 0-based occupied index below %d nor @SITE[.k], e<X, e>X",
+			tok, len(r.eps))
+	}
+	return []int{v}, nil
+}
+
+// list resolves a comma-separated list, keeping order and repeats (-fano-phi-holes names
+// a doubly emptied orbital twice).
+func (r *orbitalResolver) list(s string) ([]int, error) {
+	var out []int
+	for f := range strings.SplitSeq(s, ",") {
+		if strings.TrimSpace(f) == "" {
+			continue
+		}
+		idx, err := r.token(f)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, idx...)
+	}
+	return out, nil
+}
+
+// expandQP rewrites the orbital lists of a -fano-qp rule as explicit indices, leaving the
+// rest of the grammar (classes, counts, the net-charge terms) to fano's own parsers.
+func (r *orbitalResolver) expandQP(spec string) (string, error) {
+	clauses := strings.Split(spec, ";")
+	for c, clause := range clauses {
+		head, body, ok := strings.Cut(strings.TrimSpace(clause), ":")
+		if !ok || (head != "q" && head != "p" && head != "x") {
+			continue // fano's parser reports the malformed clause with its own context
+		}
+		terms := strings.Split(body, "&")
+		for t, term := range terms {
+			if !symbolicOrbitals(term) {
+				continue
+			}
+			class, rest, hasClass := strings.Cut(term, "/")
+			if !hasClass {
+				class, rest = "", term
+			}
+			orbs, counts, ok := strings.Cut(rest, ":")
+			if !ok {
+				return "", fmt.Errorf("-fano-qp term %q has no ':count'", term)
+			}
+			idx, err := r.list(orbs)
+			if err != nil {
+				return "", fmt.Errorf("-fano-qp term %q: %w", term, err)
+			}
+			strs := make([]string, len(idx))
+			for i, v := range idx {
+				strs[i] = strconv.Itoa(v)
+			}
+			out := strings.Join(strs, ",") + ":" + counts
+			if hasClass {
+				out = class + "/" + out
+			}
+			terms[t] = out
+		}
+		clauses[c] = head + ":" + strings.Join(terms, "&")
+	}
+	return strings.Join(clauses, ";"), nil
+}
+
+// describe is one orbital's line in the run log.
+func (r *orbitalResolver) describe(i int) string {
+	if r.pop == nil {
+		return fmt.Sprintf("orbital %d (%.4f Eh)", i, r.eps[i])
+	}
+	s := r.owner[i]
+	return fmt.Sprintf("orbital %d (%.4f Eh, %.3f on %s)", i, r.eps[i], r.pop[i][s], r.names[s])
+}
+
+// resolveOrbitals fills vacancy, qOrbs, phiHoles and qpSpec from their symbolic forms.
+// It is a no-op unless one of them is symbolic.
+func (cfg *fanoConfig) resolveOrbitals(eps []float64) error {
+	if !symbolicOrbitals(cfg.vacancySpec) && !symbolicOrbitals(cfg.qSpec) &&
+		!symbolicOrbitals(cfg.phiSpec) && !symbolicOrbitals(cfg.qpSpec) {
+		return nil
+	}
+	var md *mo.Data
+	if cfg.sip.moPath != "" {
+		var err error
+		if md, err = mo.ReadFile(cfg.sip.moPath); err != nil {
+			return err
+		}
+	}
+	r, err := newOrbitalResolver(eps, md, cfg.sites)
+	if err != nil {
+		return err
+	}
+	logf := func(flag, spec string, idx []int) {
+		parts := make([]string, len(idx))
+		for i, v := range idx {
+			parts[i] = r.describe(v)
+		}
+		fmt.Fprintf(os.Stderr, "adcgo: fano: %s %s -> %s\n", flag, spec, strings.Join(parts, "; "))
+	}
+	if symbolicOrbitals(cfg.vacancySpec) {
+		idx, err := r.list(cfg.vacancySpec)
+		if err != nil {
+			return fmt.Errorf("-fano-init: %w", err)
+		}
+		if len(idx) != 1 {
+			return fmt.Errorf("-fano-init %s names %d orbitals; the vacancy is one (use @SITE.k)",
+				cfg.vacancySpec, len(idx))
+		}
+		logf("-fano-init", cfg.vacancySpec, idx)
+		cfg.vacancy = idx[0]
+		if r.pop != nil {
+			s := r.owner[cfg.vacancy]
+			cfg.vacancySite, cfg.vacancyPop = r.names[s], r.pop[cfg.vacancy][s]
+		}
+	}
+	if symbolicOrbitals(cfg.qSpec) {
+		if cfg.qOrbs, err = r.list(cfg.qSpec); err != nil {
+			return fmt.Errorf("-fano-q: %w", err)
+		}
+		logf("-fano-q", cfg.qSpec, cfg.qOrbs)
+	}
+	if symbolicOrbitals(cfg.phiSpec) {
+		if cfg.phiHoles, err = r.list(cfg.phiSpec); err != nil {
+			return fmt.Errorf("-fano-phi-holes: %w", err)
+		}
+		logf("-fano-phi-holes", cfg.phiSpec, cfg.phiHoles)
+	}
+	if symbolicOrbitals(cfg.qpSpec) {
+		spec, err := r.expandQP(cfg.qpSpec)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "adcgo: fano: -fano-qp %s -> %s\n", cfg.qpSpec, spec)
+		cfg.qpSpec = spec
+	}
+	return nil
+}
+
 // parseHoleRule maps the -fano-rule flag onto the two readings of the scheme A predicate.
 func parseHoleRule(s string) (fano.HoleRule, error) {
 	switch s {
@@ -312,6 +604,10 @@ func runFano(d *fcidump.Data, cfg fanoConfig) error {
 			sip.Order22, cfg.sip.order)
 	}
 	nocc := mp.NOcc(d)
+	eps := mp.OrbitalEnergies(d, nocc)
+	if err := cfg.resolveOrbitals(eps[:nocc]); err != nil {
+		return err
+	}
 	if cfg.vacancy < 0 || cfg.vacancy >= nocc {
 		return fmt.Errorf("-fano-init %d is not an occupied orbital (this system has %d)",
 			cfg.vacancy, nocc)
@@ -338,7 +634,6 @@ func runFano(d *fcidump.Data, cfg fanoConfig) error {
 		return err
 	}
 
-	eps := mp.OrbitalEnergies(d, nocc)
 	ch, err := newChooser(cfg.sip.backend, cfg.sip.profile, cfg.sip.gpus)
 	if err != nil {
 		return err
@@ -504,8 +799,9 @@ func runFano(d *fcidump.Data, cfg fanoConfig) error {
 
 	doc := FanoDocument{
 		NORB: d.NORB, NELEC: d.NELEC, Family: "sip", Order: cfg.sip.order, Scheme: "a",
-		Vacancy: cfg.vacancy, Irrep: targetSym + 1, Criterion: sel.String(),
-		Size: parent.Size(), QSize: part.QSize(), PSize: part.PSize(),
+		Vacancy: cfg.vacancy, VacancySpec: cfg.vacancySpec, VacancySite: cfg.vacancySite,
+		VacancySitePop: cfg.vacancyPop, Irrep: targetSym + 1, Criterion: sel.String(),
+		Size: parent.Size(), QSize: part.QSize(), PSize: part.PSize(), XSize: part.XSize(),
 		QMain: part.QMain, PMain: psp.MainBlockSize(), Class3: class3,
 	}
 	doc.Census = part.CensusString()
@@ -608,8 +904,29 @@ func runFano(d *fcidump.Data, cfg fanoConfig) error {
 					return err
 				}
 				defer qmx.Release()
-				phi, err = fano.SelectDiscrete(qsp, res, cfg.vacancy, cfg.nth, cfg.qMin)
-				return err
+				if phi, err = fano.SelectDiscrete(qsp, res, cfg.vacancy, cfg.nth, cfg.qMin); err != nil {
+					return err
+				}
+				// The same audit the interior path keeps: the converged roots within 0.5 eV
+				// of E_Phi and their vacancy weight. A split line (the 2a1 of a water among
+				// its shake-up satellites at ADC(2)x) shows up here as several roots sharing
+				// the weight, and the width then belongs to one fragment of it.
+				vec := make([]float64, qsp.Size())
+				for j, e := range res.Values {
+					if math.Abs(e-phi.Energy)*hartreeToEV > 0.5 {
+						continue
+					}
+					var w float64
+					for _, r := range phi.Rows {
+						w += res.FullVecs.At(r, j) * res.FullVecs.At(r, j)
+					}
+					for i := range vec {
+						vec[i] = res.FullVecs.At(i, j)
+					}
+					doc.C4Audit = append(doc.C4Audit, FanoAudit{EnergyEV: e * hartreeToEV, TargetWeight: w,
+						Classes: fano.ClassWeights(qsp, vec), Selected: j == phi.Root})
+				}
+				return nil
 			})
 		}
 		if err != nil {

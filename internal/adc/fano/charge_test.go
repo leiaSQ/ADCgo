@@ -2,6 +2,7 @@ package fano
 
 import (
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -285,4 +286,40 @@ func TestChannelsFoldGhosts(t *testing.T) {
 	if _, err := NewChannels(md, 3, nil, "GOFF", spectrum.Options{}); err == nil {
 		t.Error("a ghost centre was accepted as the initial site")
 	}
+}
+
+// TestNetChargeExclusion: an x: clause in the net-charge grammar removes what it matches
+// from both subspaces, before the q/p logic, and the partition still accounts for every row.
+func TestNetChargeExclusion(t *testing.T) {
+	sp := toySpace(t)
+	am := toyAtomMap()
+	base, err := ParseConfigRule(oneEachRule, "", am)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 6h2p configurations with A1 doubly charged: never the open channel, which has every
+	// atom at +1, so under the base rule these sit in Q. Excluding them must leave P
+	// exactly as it was and shrink Q by the excluded count.
+	rule, err := ParseConfigRule(oneEachRule+"; x: 6/charge A1=2", "", am)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p0, p1 := NewPartition(sp, base), NewPartition(sp, rule)
+	if err := p1.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if p1.XSize() == 0 {
+		t.Fatal("the x clause excluded nothing")
+	}
+	if !slices.Equal(p1.P, p0.P) {
+		t.Errorf("P changed under an exclusion of configurations that were all in Q: %d -> %d rows",
+			p0.PSize(), p1.PSize())
+	}
+	if p1.QSize() != p0.QSize()-p1.XSize() {
+		t.Errorf("Q %d -> %d with %d excluded", p0.QSize(), p1.QSize(), p1.XSize())
+	}
+	if !strings.Contains(rule.String(), "EXCLUDED") {
+		t.Errorf("rule string hides the exclusion: %s", rule)
+	}
+	t.Logf("%s", p1)
 }

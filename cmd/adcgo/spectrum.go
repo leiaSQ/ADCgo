@@ -60,6 +60,34 @@ func (g *groupFlag) String() string {
 // calls Set("true"), which we interpret as "prompt interactively".
 func (g *groupFlag) IsBoolFlag() bool { return true }
 
+// joinGroupArgs rewrites "-group NAME=cols" (two arguments) as "-group=NAME=cols".
+//
+// A bool-style flag never consumes the next argument, so the flag package reads the
+// spaced form as a bare -group (the interactive prompt) followed by a positional argument
+// at which it stops parsing — dropping every flag after it. The spaced form is what every
+// other flag accepts and what the documentation shows, so it is joined here rather than
+// refused. Only a next argument that cannot be a flag and has a NAME= prefix is joined; a
+// bare -group followed by another flag stays the interactive prompt.
+func joinGroupArgs(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if (a == "-group" || a == "--group") && i+1 < len(args) {
+			next := args[i+1]
+			if name, _, ok := strings.Cut(next, "="); ok && name != "" && !strings.HasPrefix(next, "-") {
+				out = append(out, a+"="+next)
+				i++
+				continue
+			}
+		}
+		if a == "--" {
+			return append(out, args[i:]...)
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 func (g *groupFlag) Set(v string) error {
 	if v == "true" { // bare -group
 		g.interactive = true

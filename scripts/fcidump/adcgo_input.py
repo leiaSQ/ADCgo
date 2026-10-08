@@ -34,12 +34,20 @@ Grammar (``#`` starts a comment; blank lines ignored):
       unit   angstrom            # optional, default angstrom
       GT     0.0 0.0 0.0  kbj:2:1-8           # label x y z basis-spec [basis-spec...]
       GCOM   0.0 1.5 0.0  kbj:1:6-10 aug-cc-pvdz@He
+    &charges                     # optional: point-charge embedding (pyscf qmmm)
+      unit   angstrom            # optional, default angstrom
+      file   env.charges         # optional: lines "q x y z" ('#' comments)
+      -0.834  1.20 0.00 3.10     # inline: q x y z
     &orbitals                    # optional: rotated MO basis (orbitals.py)
       scheme        localized    # canonical (default) | localized
       compact_basis cc-pvdz      # parent basis whose shells count as compact
       compact_thresh 0.02        # projected-overlap eigenvalue kept as compact
       one_per_atom  on           # every real atom owns exactly one occupied orbital
       lindep        1e-6         # canonical orthogonalization threshold
+
+Point charges enter the one-electron Hamiltonian and the core energy (their interaction with
+the nuclei); their mutual interaction is a constant and is left out. A field of charges
+breaks the molecular point group, so &charges forces `symmetry off` and refuses a named group.
 
 Ghost-site basis specs are "kbj:<lmax>:<n1>-<n2>" (Kaufmann-Baumeister-Jungen
 continuum exponents, kbj.py) or "<basis>@<element>". The localized scheme
@@ -102,6 +110,9 @@ class Config:
     # ghost sites: list of {"label", "xyz" (Angstrom), "basis": [specs]}
     ghost_sites: list = field(default_factory=list)
     ghost_unit: str = "angstrom"
+    # point charges: [(q, x, y, z)], coordinates in charges_unit
+    charges: list = field(default_factory=list)
+    charges_unit: str = "angstrom"
     # orbital scheme
     orbitals: str = "canonical"
     compact_basis: str = None
@@ -249,6 +260,15 @@ def _apply(cfg, section, key, val):
         if any(g["label"] == key for g in cfg.ghost_sites):
             raise ValueError(f"&ghost_sites label {key!r} given twice")
         cfg.ghost_sites.append({"label": key, "xyz": xyz, "basis": fields[3:]})
+    elif section == "charges":
+        if key == "unit":
+            if val.lower() not in ("angstrom", "bohr"):
+                raise ValueError(f"&charges unit {val!r}: want angstrom or bohr")
+            cfg.charges_unit = val.lower()
+        elif key == "file":
+            cfg.charges.extend(read_charges(cfg.resolve(val)))
+        else:
+            cfg.charges.append(_charge_line(f"{key} {val}", "&charges"))
     elif section == "orbitals":
         if key == "scheme":
             if val not in ("canonical", "localized"):
@@ -275,6 +295,29 @@ def _apply(cfg, section, key, val):
         raise ValueError(f"unknown section &{section}")
 
 
+def _charge_line(line, where):
+    fields = line.split()
+    if len(fields) != 4:
+        raise ValueError(f"{where}: want 'q x y z', got {line!r}")
+    try:
+        return tuple(float(x) for x in fields)
+    except ValueError:
+        raise ValueError(f"{where}: not numbers: {line!r}")
+
+
+def read_charges(path):
+    """Point charges from a file of 'q x y z' lines ('#' comments, blank lines ignored)."""
+    out = []
+    with open(path) as fh:
+        for n, raw in enumerate(fh, start=1):
+            line = raw.split("#", 1)[0].strip()
+            if line:
+                out.append(_charge_line(line, f"{path}:{n}"))
+    if not out:
+        raise ValueError(f"{path}: no point charges")
+    return out
+
+
 def _validate(cfg):
     if not cfg.geom_file:
         raise ValueError("&geometry file is required")
@@ -284,6 +327,11 @@ def _validate(cfg):
         raise ValueError("&basis: give `file` or `name`, not both")
     if not cfg.fcidump:
         raise ValueError("&output fcidump is required")
+    if cfg.charges:
+        if isinstance(cfg.symmetry, str):
+            raise ValueError(f"&scf symmetry {cfg.symmetry}: point charges break the point "
+                             "group; use symmetry off (or auto, which &charges turns off)")
+        cfg.symmetry = False
     if cfg.orbitals == "localized" and (cfg.active or cfg.frozen_core or cfg.frozen_list):
         raise ValueError("&orbitals localized cannot be combined with &active: the "
                          "localized basis rotates the full occupied and virtual spaces")

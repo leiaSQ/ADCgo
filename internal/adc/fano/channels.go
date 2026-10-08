@@ -90,7 +90,6 @@ func NewChannels(md *mo.Data, nocc int, sites []spectrum.Site, initial string, o
 		}
 	}
 
-	natom := len(md.AtomNames)
 	if md.HasLabels {
 		// A labelled sidecar (scripts/fcidump/orbitals.py) assigns every occupied
 		// orbital to one real atom, from IAO populations gated at >= 0.999 on that atom
@@ -110,17 +109,44 @@ func NewChannels(md *mo.Data, nocc int, sites []spectrum.Site, initial string, o
 		if a := atomIndex(md.AtomNames, initial); a >= 0 && md.GhostAtom[a] {
 			return nil, fmt.Errorf("fano: the initial site %q is a ghost centre", initial)
 		}
+	}
+	pop, err := OrbitalPopulations(md, nocc)
+	if err != nil {
+		return nil, err
+	}
+	return &Channels{pop: pop, cols: md.AtomNames, sites: sites, initial: initial, opts: opts}, nil
+}
+
+// OrbitalPopulations returns, per occupied orbital, its population on each atom column of
+// the sidecar (md.AtomNames order). A row sums to 1 for a normalized orbital.
+//
+// A labelled sidecar (scripts/fcidump/orbitals.py) already assigns every occupied orbital
+// to one real atom, gated on IAO populations, and that assignment is the row (one-hot):
+// Mulliken shares of diffuse ghost functions are unstable, and ghosts carry no electrons.
+// Otherwise the row is the Mulliken gross population,
+//
+//	q_A(i) = sum_{p in A} sum_q C_pi C_qi S_pq,
+//
+// which can be slightly negative on an atom the orbital barely touches.
+func OrbitalPopulations(md *mo.Data, nocc int) ([][]float64, error) {
+	if md == nil {
+		return nil, fmt.Errorf("fano: orbital populations need an MO sidecar")
+	}
+	if nocc <= 0 || nocc > md.NMO {
+		return nil, fmt.Errorf("fano: %d occupied orbitals is outside the sidecar's %d MOs", nocc, md.NMO)
+	}
+	natom := len(md.AtomNames)
+	pop := make([][]float64, nocc)
+	if md.HasLabels {
 		if n := md.NOccLabelled(); n != nocc {
 			return nil, fmt.Errorf("fano: the sidecar labels %d occupied orbitals, the space has %d", n, nocc)
 		}
-		pop := make([][]float64, nocc)
 		for i := range nocc {
 			pop[i] = make([]float64, natom)
 			pop[i][md.OrbAtom[i]] = 1
 		}
-		return &Channels{pop: pop, cols: md.AtomNames, sites: sites, initial: initial, opts: opts}, nil
+		return pop, nil
 	}
-	pop := make([][]float64, nocc)
 	for i := range nocc {
 		q := make([]float64, natom)
 		for p := range md.NAO {
@@ -140,7 +166,7 @@ func NewChannels(md *mo.Data, nocc int, sites []spectrum.Site, initial string, o
 		}
 		pop[i] = q
 	}
-	return &Channels{pop: pop, cols: md.AtomNames, sites: sites, initial: initial, opts: opts}, nil
+	return pop, nil
 }
 
 func atomIndex(names []string, name string) int {

@@ -546,4 +546,5 @@ def mo_integrals(mol, mf, C):
     from pyscf import ao2mo
     h1 = C.T @ mf.get_hcore() @ C
     eri = ao2mo.kernel(mol, C, compact=True)
-    return h1, eri, mol.energy_nuc()
+    # mf.energy_nuc, not mol's: an embedded SCF (pyscf qmmm) adds the nuclei-charge term
+    return h1, eri, mf.energy_nuc()
