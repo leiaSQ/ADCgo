@@ -286,56 +286,78 @@ func has(s []int, x int) bool {
 // determinants belong to the same excitation class — it silently mispairs a
 // 2h1p against a 3h2p, which is precisely the 2h1p/3h2p coupling block.
 func diffExc(nocc int, a, b exc) (from, to []int, sign float64, ok bool) {
-	add := func(dst *[]int, x int) bool {
-		if len(*dst) == 2 {
-			return false
-		}
-		*dst = append(*dst, x)
-		return true
+	d, ok := diffExcFixed(nocc, a, b)
+	if !ok {
+		return nil, nil, 0, false
 	}
+	return d.from[:d.n:d.n], d.to[:d.n:d.n], d.sign, true
+}
+
+// excDiff is diffExc's result in fixed storage: n differing pairs, from[i] -> to[i].
+type excDiff struct {
+	from, to [2]int
+	n        int
+	sign     float64
+}
+
+// diffExcFixed is diffExc without the heap: the lists hold at most two orbitals, so
+// they live in arrays. It is the form hamNO calls, once per determinant pair of every
+// matrix-free ADC(2,2) element, where two slice allocations per call were most of
+// the cost.
+func diffExcFixed(nocc int, a, b exc) (d excDiff, ok bool) {
+	var nf, nt int
 	parity := 0
 	for _, p := range a.P {
 		if !has(b.P, p) {
-			if !add(&from, p) {
-				return nil, nil, 0, false
+			if nf == 2 {
+				return excDiff{}, false
 			}
+			d.from[nf] = p
+			nf++
 			parity += a.pos(nocc, p)
 		}
 	}
 	for _, h := range b.H {
 		if !has(a.H, h) {
-			if !add(&from, h) {
-				return nil, nil, 0, false
+			if nf == 2 {
+				return excDiff{}, false
 			}
+			d.from[nf] = h
+			nf++
 			parity += a.pos(nocc, h)
 		}
 	}
 	for _, p := range b.P {
 		if !has(a.P, p) {
-			if !add(&to, p) {
-				return nil, nil, 0, false
+			if nt == 2 {
+				return excDiff{}, false
 			}
+			d.to[nt] = p
+			nt++
 			parity += b.pos(nocc, p)
 		}
 	}
 	for _, h := range a.H {
 		if !has(b.H, h) {
-			if !add(&to, h) {
-				return nil, nil, 0, false
+			if nt == 2 {
+				return excDiff{}, false
 			}
+			d.to[nt] = h
+			nt++
 			parity += b.pos(nocc, h)
 		}
 	}
-	if len(from) != len(to) {
-		return nil, nil, 0, false
+	if nf != nt {
+		return excDiff{}, false
 	}
-	sortSmall(from)
-	sortSmall(to)
-	sign = 1
+	d.n = nf
+	sortSmall(d.from[:nf])
+	sortSmall(d.to[:nt])
+	d.sign = 1
 	if parity%2 == 1 {
-		sign = -1
+		d.sign = -1
 	}
-	return from, to, sign, true
+	return d, true
 }
 
 // hamNO is <D_a|H - E_0|D_b> for determinants given as excitations from |Φ0>, in
@@ -352,11 +374,12 @@ func diffExc(nocc int, a, b exc) (from, to []int, sign float64, ok bool) {
 //
 // each times the alignment sign from diffExc.
 func (e *elements) hamNO(a, b exc) float64 {
-	from, to, sign, ok := diffExc(e.nocc, a, b)
+	d, ok := diffExcFixed(e.nocc, a, b)
 	if !ok {
 		return 0
 	}
-	switch len(from) {
+	from, to, sign := d.from, d.to, d.sign
+	switch d.n {
 	case 0:
 		var v float64
 		for _, p := range a.P {

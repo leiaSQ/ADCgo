@@ -34,6 +34,10 @@ type Matrix struct {
 	// rebuilding it is 2.0e9 Eri() calls / 16.2 GB at the production system's norb=212. Mirrors dip's
 	// Matrix.flatERI.
 	flatERI []float64
+
+	// sat3dets is the ADC(2,2) 3h2p determinant table both matrix-free appliers share
+	// (matfree22.go), built on first use.
+	sat3dets *sat3Dets
 }
 
 // SetMainBlockCache installs load/save hooks for the assembled 1h/1h main block.
@@ -417,6 +421,7 @@ func (mx *Matrix) Release() {
 		}
 	}
 	mx.op = nil
+	mx.sat3dets = nil
 }
 
 // Size is the matrix dimension.

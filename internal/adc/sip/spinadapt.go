@@ -259,42 +259,53 @@ func holeShells3(k, l, m int) (open []int, doubled int) {
 // behind openShells3/nSpin3, so the spin index runs 1..nSpin3 as Config3.Spin
 // promises.
 func (e *elements) expandDet3(cfg Config3) []detTerm {
-	k, l, m := cfg.Core, cfg.L, cfg.M
-	ai, aj := e.nocc+cfg.I, e.nocc+cfg.J
-	openHoles, doubled := holeShells3(k, l, m)
-
-	var openOrbs []int
-	openOrbs = append(openOrbs, openHoles...)
-	if cfg.I != cfg.J {
-		openOrbs = append(openOrbs, ai, aj)
-	}
-
-	b := doubletCSF(len(openOrbs))
+	b := e.csf3(cfg)
 	row := b.Coef[cfg.Spin-1]
 	out := make([]detTerm, 0, len(b.Dets))
-	for d, det := range b.Dets {
+	for d := range b.Dets {
 		if row[d] == 0 {
 			continue
 		}
-		holes := make([]sorb, 0, 3)
-		if doubled >= 0 {
-			holes = append(holes, sorb{Orb: doubled}, sorb{Orb: doubled, Dn: true})
-		}
-		for i, o := range openHoles {
-			holes = append(holes, flip(sorb{Orb: o, Dn: det[i] == spinDown}))
-		}
-		parts := make([]sorb, 0, 2)
-		if cfg.I == cfg.J {
-			parts = append(parts, sorb{Orb: ai}, sorb{Orb: ai, Dn: true})
-		} else {
-			off := len(openHoles)
-			parts = append(parts,
-				sorb{Orb: ai, Dn: det[off] == spinDown},
-				sorb{Orb: aj, Dn: det[off+1] == spinDown})
-		}
-		out = append(out, detTerm{E: mkExc(holes, parts), C: row[d]})
+		out = append(out, detTerm{E: e.det3(cfg, b, d), C: row[d]})
 	}
 	return out
+}
+
+// csf3 is the spin basis of a 3h2p configuration: the doublet CSFs of its open shells.
+// It depends only on the spatial orbitals, so every spin function of one spatial
+// configuration shares it.
+func (e *elements) csf3(cfg Config3) *csfBasis {
+	open, _ := holeShells3(cfg.Core, cfg.L, cfg.M)
+	n := len(open)
+	if cfg.I != cfg.J {
+		n += 2
+	}
+	return doubletCSF(n)
+}
+
+// det3 is determinant d of csf3(cfg) as an excitation from |Φ0>. Like csf3 it does
+// not depend on cfg.Spin.
+func (e *elements) det3(cfg Config3, b *csfBasis, d int) exc {
+	ai, aj := e.nocc+cfg.I, e.nocc+cfg.J
+	openHoles, doubled := holeShells3(cfg.Core, cfg.L, cfg.M)
+	det := b.Dets[d]
+	holes := make([]sorb, 0, 3)
+	if doubled >= 0 {
+		holes = append(holes, sorb{Orb: doubled}, sorb{Orb: doubled, Dn: true})
+	}
+	for i, o := range openHoles {
+		holes = append(holes, flip(sorb{Orb: o, Dn: det[i] == spinDown}))
+	}
+	parts := make([]sorb, 0, 2)
+	if cfg.I == cfg.J {
+		parts = append(parts, sorb{Orb: ai}, sorb{Orb: ai, Dn: true})
+	} else {
+		off := len(openHoles)
+		parts = append(parts,
+			sorb{Orb: ai, Dn: det[off] == spinDown},
+			sorb{Orb: aj, Dn: det[off+1] == spinDown})
+	}
+	return mkExc(holes, parts)
 }
 
 // DetTerm is one canonical spin-orbital determinant of a spin-adapted row and its

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/leiaSQ/ADCgo/backend"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 )
 
 // applyDense multiplies the densely materialized matrix by v, as the reference for
@@ -155,6 +156,102 @@ func TestADC22MatFreeDeterministic(t *testing.T) {
 		}
 	}
 	t.Logf("4 applies of the matrix-free ADC(2,2)f operator agree bit for bit over n=%d", n)
+}
+
+// TestADC22MatFreeBitIdenticalToElementwise pins the determinant-table appliers to the
+// per-element ones they replaced, BIT FOR BIT: the table only memoizes hamNO over the
+// determinant pairs a spatial group shares, so every element must be the same sum of
+// the same terms in the same order, and every output cell the same accumulation. The
+// reference is a literal replica of the old appliers, c23_1 / c33_01 per candidate.
+func TestADC22MatFreeBitIdenticalToElementwise(t *testing.T) {
+	const b = 3
+	for _, norb := range []int{8, 12} {
+		mx := build22(t, norb, VariantF)
+		sp := mx.sp
+		n := sp.Size()
+		flat := make([]float64, n*b)
+		for i := range flat {
+			flat[i] = math.Cos(float64(i)*0.37) - 0.1
+		}
+		run := func(part matFreePart) []float64 {
+			be := mx.be
+			in := backend.BlockView{V: be.Upload(flat), Rows: n, Cols: b, Ld: n}
+			out := backend.BlockView{V: be.Upload(make([]float64, n*b)), Rows: n, Cols: b, Ld: n}
+			part.apply(in, out)
+			return be.Download(out.V)
+		}
+		same := func(what string, got, want []float64) {
+			t.Helper()
+			nz := 0
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("norb %d %s: row %d differs: %.17g vs %.17g", norb, what, i, got[i], want[i])
+				}
+				if got[i] != 0 {
+					nz++
+				}
+			}
+			if nz == 0 {
+				t.Fatalf("norb %d %s: the apply is identically zero, so the comparison is vacuous", norb, what)
+			}
+		}
+
+		// 3h2p/3h2p: the old row sweep.
+		cfgs := sp.Sat3
+		off3 := sp.Begin3h2p
+		ix3 := buildSat3Index(cfgs, sp.Nocc, sp.Nvir)
+		want3 := make([]float64, n*b)
+		var mrg ascMerge
+		for r, row := range cfgs {
+			for _, c32 := range ix3.candidates(&mrg, row) {
+				g := mx.el.c33_01(row, cfgs[c32])
+				if g == 0 {
+					continue
+				}
+				for j := range b {
+					want3[off3+r+j*n] += g * flat[off3+int(c32)+j*n]
+				}
+			}
+		}
+		same("3h2p/3h2p", run(mx.newSat3MatFree()), want3)
+
+		// 2h1p/3h2p: the old column sweep, same worker chunks, same partial reduction.
+		main := sp.BeginSat
+		rows := sp.Configs[main:off3]
+		n2 := len(rows)
+		ix2 := buildC23Index(rows, sp.Nocc)
+		W := parallel.ChunkWorkers(len(cfgs))
+		partials := make([]float64, W*n2*b)
+		want2 := make([]float64, n*b)
+		parallel.Chunks(len(cfgs), W, func(w, c0, c1 int) {
+			y2 := partials[w*n2*b : (w+1)*n2*b]
+			var m ascMerge
+			for c := c0; c < c1; c++ {
+				for _, r32 := range ix2.candidates(&m, cfgs[c]) {
+					r := int(r32)
+					g := mx.el.c23_1(rows[r], cfgs[c])
+					if g == 0 {
+						continue
+					}
+					for j := range b {
+						y2[r+j*n2] += g * flat[off3+c+j*n]
+						want2[off3+c+j*n] += g * flat[main+r+j*n]
+					}
+				}
+			}
+		})
+		for w := range W {
+			y2 := partials[w*n2*b : (w+1)*n2*b]
+			for j := range b {
+				for r := range n2 {
+					want2[main+j*n+r] += y2[j*n2+r]
+				}
+			}
+		}
+		same("2h1p/3h2p", run(mx.newC23MatFree()), want2)
+		t.Logf("norb %d: n3 = %d in %d spatial groups; both appliers bit-identical to the "+
+			"per-element sweep", norb, len(cfgs), len(mx.sat3DetTable().dStart)-1)
+	}
 }
 
 // TestC23SelectionRuleComplete is the gate on the 2h1p/3h2p prune. The applier only

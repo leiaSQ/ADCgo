@@ -1,6 +1,7 @@
 package sip
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/leiaSQ/ADCgo/backend"
@@ -256,6 +257,13 @@ func (mx *Matrix) newC23MatFree() matFreePart {
 	el := mx.el
 	hd := mx.be.(backend.HostData)
 	ix := buildC23Index(rows, sp.Nocc)
+	d3 := mx.sat3DetTable()
+	r2 := make([][]detTerm, n2)
+	parallel.Chunks(n2, parallel.ChunkWorkers(n2), func(_, lo, hi int) {
+		for r := lo; r < hi; r++ {
+			r2[r] = el.expandDet2(rows[r])
+		}
+	})
 
 	// W and the per-worker forward accumulators are latched HERE, not derived per
 	// apply, for the reasons newWert2MatFree spells out: Go re-reads GOMAXPROCS from
@@ -286,15 +294,49 @@ func (mx *Matrix) newC23MatFree() matFreePart {
 			clear(partials)
 		}
 
+		// The columns of one spatial 3h2p group share their candidate rows and their
+		// determinants, so the candidates and every <row det|H|col det> are formed
+		// once per group (and once more by a worker whose chunk starts inside one).
+		// The element is then the same sum over the same terms in the same order as
+		// c23_1, so the result is bit-identical to evaluating c23_1 per element.
 		parallel.Chunks(n3, W, func(w, c0, c1 int) {
 			y2 := partials[w*n2*b : (w+1)*n2*b]
 			var mrg ascMerge
+			var cand []int32
+			var hbuf []float64
+			var hoff []int
+			group := int32(-1)
 			for c := c0; c < c1; c++ {
-				col := cols[c]
 				colBase := off3 + c
-				for _, r32 := range ix.candidates(&mrg, col) {
+				if g := d3.gOf[c]; g != group {
+					group = g
+					cand = ix.candidates(&mrg, cols[c])
+					cd := d3.groupDets(g)
+					hbuf, hoff = hbuf[:0], hoff[:0]
+					for _, r32 := range cand {
+						hoff = append(hoff, len(hbuf))
+						for _, t := range r2[r32] {
+							for _, e := range cd {
+								hbuf = append(hbuf, el.hamNO(t.E, e))
+							}
+						}
+					}
+				}
+				cc := d3.coef[c]
+				nd := len(cc)
+				for i, r32 := range cand {
 					r := int(r32)
-					g := el.c23_1(rows[r], col)
+					h := hbuf[hoff[i]:]
+					var g float64
+					for k, t := range r2[r] {
+						hk := h[k*nd : (k+1)*nd]
+						for d, cv := range cc {
+							if cv == 0 {
+								continue
+							}
+							g += t.C * cv * hk[d]
+						}
+					}
 					if g == 0 {
 						continue
 					}
@@ -320,6 +362,109 @@ func (mx *Matrix) newC23MatFree() matFreePart {
 		}
 	}
 	return matFreePart{apply: apply, release: func() {}}
+}
+
+// sat3Dets is the determinant expansion of every 3h2p configuration, formed once for
+// both matrix-free appliers. Before it, c23_1 and c33_01 rebuilt both expansions on
+// every call and re-evaluated the same determinant pairs for every spin function of
+// the same orbitals: ~6 µs per element, i.e. hours per mat-vec once n3 reaches 10^6
+// (the water dimer in cc-pVDZ + KBJ, n3 = 1.6M, never finished one Davidson
+// iteration in 6 h).
+//
+// The spin functions of one spatial configuration are adjacent in Sat3 (spin is the
+// innermost loop of fill3h2pBlock) and share csf3's basis, so they form one group
+// with one determinant list; each configuration keeps its own coefficient row over
+// that list, zeros included, which is exactly what expandDet3 filters.
+type sat3Dets struct {
+	gOf    []int32     // configuration -> spatial group
+	dStart []int32     // group g's determinants are dets[dStart[g]:dStart[g+1]]
+	dets   []exc       // H and P slices point into one flat backing array
+	coef   [][]float64 // configuration -> csf3 coefficient row (shared csfBasis rows)
+}
+
+func (t *sat3Dets) groupDets(g int32) []exc { return t.dets[t.dStart[g]:t.dStart[g+1]] }
+
+// sat3DetTable builds the table once per Matrix; both appliers share it. Both passes
+// over the configurations run on the worker pool; only the prefix sum that turns the
+// group heads into offsets is serial, and it is O(n3) integer adds.
+func (mx *Matrix) sat3DetTable() *sat3Dets {
+	if mx.sat3dets != nil {
+		return mx.sat3dets
+	}
+	el := mx.el
+	cfgs := mx.sp.Sat3
+	n := len(cfgs)
+	t := &sat3Dets{gOf: make([]int32, n), coef: make([][]float64, n)}
+	W := parallel.ChunkWorkers(n)
+
+	// Pass 1: each configuration's CSF row, and for the first configuration of a
+	// spatial group its determinant count (-1 marks the group's other members).
+	head := make([]int32, n)
+	parallel.Chunks(n, W, func(_, lo, hi int) {
+		for c := lo; c < hi; c++ {
+			cfg := cfgs[c]
+			b := el.csf3(cfg)
+			t.coef[c] = b.Coef[cfg.Spin-1]
+			head[c] = -1
+			if c == 0 || !sameSpatial3(cfg, cfgs[c-1]) {
+				head[c] = int32(len(b.Dets))
+			}
+		}
+	})
+
+	ng := 0
+	for _, h := range head {
+		if h >= 0 {
+			ng++
+		}
+	}
+	t.dStart = make([]int32, ng+1)
+	g, nd := int32(-1), int32(0)
+	for c, h := range head {
+		if h >= 0 {
+			g++
+			t.dStart[g] = nd
+			nd += h
+		}
+		t.gOf[c] = g
+	}
+	t.dStart[ng] = nd
+
+	// Pass 2: every group head writes its determinants into its own range. A 3h2p
+	// determinant has exactly three hole and two particle spin orbitals, so determinant
+	// i owns backing[5i:5i+5] and H and P need no per-determinant allocation (millions
+	// of small slices would otherwise be millions of heap objects for the GC to trace).
+	t.dets = make([]exc, nd)
+	backing := make([]int, 5*int(nd))
+	parallel.Chunks(n, W, func(_, lo, hi int) {
+		for c := lo; c < hi; c++ {
+			if head[c] < 0 {
+				continue
+			}
+			cfg := cfgs[c]
+			b := el.csf3(cfg)
+			base := int(t.dStart[t.gOf[c]])
+			for d := range b.Dets {
+				x := el.det3(cfg, b, d)
+				if len(x.H) != 3 || len(x.P) != 2 {
+					panic(fmt.Sprintf("sip: 3h2p determinant of %+v has %d holes and %d particles",
+						cfg, len(x.H), len(x.P)))
+				}
+				o := 5 * (base + d)
+				copy(backing[o:o+3], x.H)
+				copy(backing[o+3:o+5], x.P)
+				t.dets[base+d] = exc{H: backing[o : o+3 : o+3], P: backing[o+3 : o+5 : o+5]}
+			}
+		}
+	})
+	mx.sat3dets = t
+	return t
+}
+
+// sameSpatial3 reports whether two 3h2p configurations differ at most in their spin
+// function.
+func sameSpatial3(a, b Config3) bool {
+	return a.Core == b.Core && a.L == b.L && a.M == b.M && a.I == b.I && a.J == b.J
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +615,7 @@ func (mx *Matrix) newSat3MatFree() matFreePart {
 	el := mx.el
 	hd := mx.be.(backend.HostData)
 	ix := buildSat3Index(cfgs, sp.Nocc, sp.Nvir)
+	d3 := mx.sat3DetTable()
 
 	apply := func(in, out backend.BlockView) {
 		if n3 == 0 {
@@ -483,11 +629,58 @@ func (mx *Matrix) newSat3MatFree() matFreePart {
 		// below 2*GOMAXPROCS rows, and a small sector's n3 lands in exactly that band.
 		parallel.Chunks(n3, parallel.ChunkWorkers(n3), func(_, lo, hi int) {
 			var mrg ascMerge
+			var cand []int32
+			var hbuf []float64
+			var hoff []int
+			group := int32(-1)
 			for r := lo; r < hi; r++ {
-				row := cfgs[r]
+				// The rows of one spatial group share their candidates (the index keys
+				// are spatial) and their determinants, so the candidate list and the
+				// <row det|H|col det> block of every candidate group are formed once per
+				// row group. Candidates ascend and groups are contiguous, so one
+				// candidate group is one run of the list.
+				if g := d3.gOf[r]; g != group {
+					group = g
+					cand = ix.candidates(&mrg, cfgs[r])
+					rd := d3.groupDets(g)
+					hbuf, hoff = hbuf[:0], hoff[:0]
+					last := int32(-1)
+					var at int
+					for _, c32 := range cand {
+						if cg := d3.gOf[c32]; cg != last {
+							last = cg
+							at = len(hbuf)
+							cd := d3.groupDets(cg)
+							for _, x := range rd {
+								for _, y := range cd {
+									hbuf = append(hbuf, el.hamNO(x, y))
+								}
+							}
+						}
+						hoff = append(hoff, at)
+					}
+				}
+				// The element is c33_01's sum — the same nonzero terms in the same
+				// order — over cached hamNO values, so it is bit-identical to it.
+				rc := d3.coef[r]
 				rowBase := off3 + r
-				for _, c32 := range ix.candidates(&mrg, row) {
-					g := el.c33_01(row, cfgs[c32])
+				for i, c32 := range cand {
+					cc := d3.coef[c32]
+					nd := len(cc)
+					h := hbuf[hoff[i]:]
+					var g float64
+					for dr, a := range rc {
+						if a == 0 {
+							continue
+						}
+						hr := h[dr*nd : (dr+1)*nd]
+						for dc, bc := range cc {
+							if bc == 0 {
+								continue
+							}
+							g += a * bc * hr[dc]
+						}
+					}
 					if g == 0 {
 						continue
 					}
