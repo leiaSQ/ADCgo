@@ -201,12 +201,25 @@ wat2b)
     # free: P = two-site adapted states with a FREE particle (the L2 analogue; bound D+A*
     # states excluded). any: every two-site state (the paper's rule; the L1 analogue).
     for part in ${ICD_B_PARTICLE:-free any}; do
-      for v in D A; do
+      # ICD_B_SITES / ICD_B_ENGINES pick a subset, so the ADC(2,2)f runs (each ~10-20 h)
+      # can go as separate jobs instead of sharing one walltime.
+      for v in ${ICD_B_SITES:-D A}; do
         lab="wat2_${meth}_b${part}_$v"
-        width "$lab" "$QP_X" "${B[@]}" "${M[@]}" -fano-b-particle "$part" -fano-init "@$v.0" -init-atom "$v"
-        width "${lab}_gauss" "$QP_X" "${B[@]}" "${M[@]}" -fano-b-particle "$part" -fano-init "@$v.0" \
-            -init-atom "$v" -fano-engine gauss
-        out+=("$lab.json" "${lab}_gauss.json")
+        for eng in ${ICD_B_ENGINES:-eigen gauss}; do
+          case $eng in
+          eigen) width "$lab" "$QP_X" "${B[@]}" "${M[@]}" -fano-b-particle "$part" -fano-init "@$v.0" \
+                     -init-atom "$v"
+                 out+=("$lab.json");;
+          gauss) width "${lab}_gauss" "$QP_X" "${B[@]}" "${M[@]}" -fano-b-particle "$part" -fano-init "@$v.0" \
+                     -init-atom "$v" -fano-engine gauss
+                 out+=("${lab}_gauss.json");;
+          # kpm: ICD_KPM_ORDER Chebyshev moments, two per PMP apply; the log carries the
+          # width at 1/8, 1/4, 1/2 and all of them
+          kpm)   width "${lab}_kpm" "$QP_X" "${B[@]}" "${M[@]}" -fano-b-particle "$part" -fano-init "@$v.0" \
+                     -init-atom "$v" -fano-engine kpm -fano-order "${ICD_KPM_ORDER:-2000}"
+                 out+=("${lab}_kpm.json");;
+          esac
+        done
       done
     done
   done

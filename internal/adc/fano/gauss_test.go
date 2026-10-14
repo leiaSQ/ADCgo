@@ -63,6 +63,21 @@ func TestWidthEnginesRecoverLorentzian(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// the prefix series from one moment run equals a separate run at each count
+		counts := []int{125, 250, 501, 1000}
+		series, err := KPMWidths(m.apply, m.g, m.e0, counts, lo, hi)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, c := range counts {
+			one, err := KPMWidth(m.apply, m.g, m.e0, c, lo, hi)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if series[i] != one {
+				t.Errorf("Gamma0 %.0e: KPM series at %d moments %.17g, separate run %.17g", g0, c, series[i], one)
+			}
+		}
 		rel := func(x float64) float64 { return math.Abs(x-g0) / g0 }
 		t.Logf("Gamma0 %.0e: W-B %.6e (+/- %.1e, rel err %.1e), W-B2 %.6e (rel err %.1e), KPM %.6e (rel err %.1e)",
 			g0, wb.Gamma, wb.Sigma, rel(wb.Gamma), wb2.Gamma, rel(wb2.Gamma), wc, rel(wc))

@@ -100,37 +100,45 @@ func main() {
 
 func run() error {
 	var (
-		mode        = flag.String("mode", "spectrum", "plot mode: \"spectrum\" (single DIP/SIP JSON via -in), \"tdm\" (transition-dipole spectrum from an adcgo -tdm JSON via -in), \"ees\" (electron-emission spectrum from -sip + -dip), \"panel\", or \"stack\" (energy-offset waterfall of several conformers' spectra)")
-		sipPath     = flag.String("sip", "", "ees mode: single-ionization spectrum JSON (S_in)")
-		dipPath     = flag.String("dip", "", "ees mode: double-ionization spectrum JSON (S_fin)")
-		fwhmSIP     = flag.Float64("fwhm-sip", 0, "ees mode: Gaussian FWHM (eV) for the SIP envelope; 0 = use -fwhm")
-		fwhmDIP     = flag.Float64("fwhm-dip", 0, "ees mode: Gaussian FWHM (eV) for the DIP envelope; 0 = use -fwhm")
-		fwhmEES     = flag.Float64("fwhm-ees", 0, "ees/panel mode: Gaussian FWHM (eV) for both envelopes inside the EES convolution, decoupling it from the panel (a)/(b) overlays; 0 = use -fwhm-sip/-fwhm-dip")
-		finChans    = flag.String("fin-channels", "", "ees mode: restrict the final (numerator) DIP channels, comma-separated names or prefixes (e.g. \"ICD\"); empty = all. N(E) always uses all channels")
-		inPath      = flag.String("in", "spec.json", "input spectrum JSON (from ADCanalysis)")
-		expPath     = flag.String("exp", "", "optional experimental/reference spectrum JSON (same schema); overlaid as dotted lines")
-		expScale    = flag.Float64("exp-scale", 0, "scale factor for the experimental overlay; 0 = auto (match its tallest peak to the theory's)")
-		expLabel    = flag.String("exp-label", "exp", "legend tag for the -exp overlay, appended in brackets to each channel name (e.g. \"theADCcode\" when the overlay is a reference calculation rather than a measurement)")
-		total       = flag.String("total", "", "collapse every channel of -in into a single series with this name (the total spectrum, decay-channel decomposition dropped)")
-		expTotal    = flag.String("exp-total", "", "collapse every channel of -exp into a single series with this name; the name is then used verbatim in the legend, without the -exp-label tag")
-		outPath     = flag.String("out", "spectrum.png", "output image (.png/.svg/.pdf by extension)")
-		fwhm        = flag.Float64("fwhm", 1, "Gaussian FWHM for broadening, in eV")
-		points      = flag.Int("points", 1000, "number of points on the energy grid")
-		pad         = flag.Float64("pad", 5.0, "energy padding (eV) added on each side of the data range")
-		xRange      = flag.String("xrange", "", "override X-axis range, e.g. \"30-100\" (eV); default is data range ± pad")
-		absolute    = flag.Bool("absolute", false, "plot absolute broadened intensity instead of relative (tallest peak = 1)")
-		spinWeight  = flag.Bool("spin-weight", false, "weight singlet sticks by meta.singlet_triplet_ratio (triplet = 1); theory only, never applied to -exp")
-		width       = flag.Float64("width", 8, "figure width in inches")
-		height      = flag.Float64("height", 5, "figure height in inches")
-		dpi         = flag.Int("dpi", 192, "resolution for raster output (PNG); ignored for SVG/PDF")
-		stick       = flag.Bool("stick", false, "plot sticks instead of curve (default is false)")
-		colorblind  = flag.Bool("colorblind", false, "use the Okabe–Ito colour-blind-safe palette")
-		xRangeAB    = flag.String("xrange-ab", "0-40", "panel mode: shared X window (eV) for panels (a) SIP and (b) DIP")
-		xRangeC     = flag.String("xrange-c", "0-14", "panel mode: X window (eV) for panel (c) electron-emission spectrum")
-		sipGroups   = multiFlag{}
-		sipGroupI   bool
-		overlay     = flag.Bool("overlay-broadened", false, "overlay the Gaussian-broadened curves on the -stick spectrum (spectrum/tdm mode: one curve per channel; panel mode: one total envelope on the (a)/(b) sticks)")
-		stickHeight = flag.Float64("stick-height", 1, "scale factor for the normalised stick heights (the broadened curves stay at 1); use <1 so the sticks sit below the -overlay-broadened curve")
+		mode         = flag.String("mode", "spectrum", "plot mode: \"spectrum\" (single DIP/SIP JSON via -in), \"tdm\" (transition-dipole spectrum from an adcgo -tdm JSON via -in), \"ees\" (electron-emission spectrum from -sip + -dip), \"panel\", \"stack\" (energy-offset waterfall of several conformers' spectra), or \"ees-diff\" (one electron-emission spectrum minus a scaled reference one, e.g. dimer - 2x monomer)")
+		sipPath      = flag.String("sip", "", "ees mode: single-ionization spectrum JSON (S_in)")
+		refSIP       = flag.String("ref-sip", "", "ees-diff mode: the REFERENCE system's single-ionization spectrum JSON (e.g. the counterpoise monomer)")
+		refDIP       = flag.String("ref-dip", "", "ees-diff mode: the REFERENCE system's double-ionization spectrum JSON")
+		refScale     = flag.Float64("ref-scale", 2, "ees-diff mode: multiplier on the reference electron spectrum before subtraction; 2 for a homodimer against one monomer")
+		refLabel     = flag.String("ref-label", "", "ees-diff mode: legend label for the scaled reference; default \"<scale>x reference\"")
+		dataPath     = flag.String("data", "", "ees-diff mode: also write the three curves (eps, system, scaled reference, difference) as TSV to this path")
+		refTwoSite   = flag.Bool("ref-twosite", false, "ees-diff mode: complete the non-interacting reference with the TWO-SITE final states (one hole per monomer), built by self-convolving -ref-sip. Without it the reference has only one-site channels and the residual conflates the missing two-site family with real interaction effects")
+		twoSiteW     = flag.Float64("twosite-weight", 0.5, "ees-diff mode: weight of the two-site term relative to ONE monomer's DIP; 0.5 is the non-interacting state count, and keeps -ref-scale 2 correct (see runEESDiff)")
+		twoSiteShift = flag.Float64("twosite-shift", 0, "ees-diff mode: energy added to each two-site final state (eV), the hole-hole Coulomb repulsion e^2/R. 0 is the strict R->inf limit; ~14.4/R(Angstrom) eV is the point-charge estimate, i.e. ~4.2 eV at naphthalene-dimer contact")
+		dipPath      = flag.String("dip", "", "ees mode: double-ionization spectrum JSON (S_fin)")
+		fwhmSIP      = flag.Float64("fwhm-sip", 0, "ees mode: Gaussian FWHM (eV) for the SIP envelope; 0 = use -fwhm")
+		fwhmDIP      = flag.Float64("fwhm-dip", 0, "ees mode: Gaussian FWHM (eV) for the DIP envelope; 0 = use -fwhm")
+		fwhmEES      = flag.Float64("fwhm-ees", 0, "ees/panel mode: Gaussian FWHM (eV) for both envelopes inside the EES convolution, decoupling it from the panel (a)/(b) overlays; 0 = use -fwhm-sip/-fwhm-dip")
+		finChans     = flag.String("fin-channels", "", "ees mode: restrict the final (numerator) DIP channels, comma-separated names or prefixes (e.g. \"ICD\"); empty = all. N(E) always uses all channels")
+		inPath       = flag.String("in", "spec.json", "input spectrum JSON (from ADCanalysis)")
+		expPath      = flag.String("exp", "", "optional experimental/reference spectrum JSON (same schema); overlaid as dotted lines")
+		expScale     = flag.Float64("exp-scale", 0, "scale factor for the experimental overlay; 0 = auto (match its tallest peak to the theory's)")
+		expLabel     = flag.String("exp-label", "exp", "legend tag for the -exp overlay, appended in brackets to each channel name (e.g. \"theADCcode\" when the overlay is a reference calculation rather than a measurement)")
+		total        = flag.String("total", "", "collapse every channel of -in into a single series with this name (the total spectrum, decay-channel decomposition dropped)")
+		expTotal     = flag.String("exp-total", "", "collapse every channel of -exp into a single series with this name; the name is then used verbatim in the legend, without the -exp-label tag")
+		outPath      = flag.String("out", "spectrum.png", "output image (.png/.svg/.pdf by extension)")
+		fwhm         = flag.Float64("fwhm", 1, "Gaussian FWHM for broadening, in eV")
+		points       = flag.Int("points", 1000, "number of points on the energy grid")
+		pad          = flag.Float64("pad", 5.0, "energy padding (eV) added on each side of the data range")
+		xRange       = flag.String("xrange", "", "override X-axis range, e.g. \"30-100\" (eV); default is data range ± pad")
+		absolute     = flag.Bool("absolute", false, "plot absolute broadened intensity instead of relative (tallest peak = 1)")
+		spinWeight   = flag.Bool("spin-weight", false, "weight singlet sticks by meta.singlet_triplet_ratio (triplet = 1); theory only, never applied to -exp")
+		width        = flag.Float64("width", 8, "figure width in inches")
+		height       = flag.Float64("height", 5, "figure height in inches")
+		dpi          = flag.Int("dpi", 192, "resolution for raster output (PNG); ignored for SVG/PDF")
+		stick        = flag.Bool("stick", false, "plot sticks instead of curve (default is false)")
+		colorblind   = flag.Bool("colorblind", false, "use the Okabe–Ito colour-blind-safe palette")
+		xRangeAB     = flag.String("xrange-ab", "0-40", "panel mode: shared X window (eV) for panels (a) SIP and (b) DIP")
+		xRangeC      = flag.String("xrange-c", "0-14", "panel mode: X window (eV) for panel (c) electron-emission spectrum")
+		sipGroups    = multiFlag{}
+		sipGroupI    bool
+		overlay      = flag.Bool("overlay-broadened", false, "overlay the Gaussian-broadened curves on the -stick spectrum (spectrum/tdm mode: one curve per channel; panel mode: one total envelope on the (a)/(b) sticks)")
+		stickHeight  = flag.Float64("stick-height", 1, "scale factor for the normalised stick heights (the broadened curves stay at 1); use <1 so the sticks sit below the -overlay-broadened curve")
 
 		// stack mode: the energy-offset waterfall (see stack.go).
 		stackEntries   = multiFlag{}
@@ -162,6 +170,19 @@ func run() error {
 	}
 
 	switch *mode {
+	case "ees-diff":
+		return runEESDiff(eesDiffParams{
+			base: eesParams{
+				sip: *sipPath, dip: *dipPath, out: *outPath,
+				fwhm: *fwhm, fwhmSIP: *fwhmSIP, fwhmDIP: *fwhmDIP, fwhmEES: *fwhmEES,
+				finChannels: *finChans, points: *points, pad: *pad, xRange: *xRange,
+				absolute: *absolute, spinWeight: *spinWeight,
+				width: *width, height: *height, dpi: *dpi, stick: *stick,
+			},
+			refSIP: *refSIP, refDIP: *refDIP, scale: *refScale,
+			refLabel: *refLabel, dataOut: *dataPath,
+			twoSite: *refTwoSite, twoSiteWeight: *twoSiteW, twoSiteShift: *twoSiteShift,
+		})
 	case "ees":
 		return runEES(eesParams{
 			sip: *sipPath, dip: *dipPath, out: *outPath,
@@ -200,7 +221,7 @@ func run() error {
 		// fall through: the transition-dipole document is flattened into the same
 		// (energy, intensity, channel) spectrum below, then rendered identically.
 	default:
-		return fmt.Errorf("-mode must be \"spectrum\", \"tdm\", \"ees\", \"panel\" or \"stack\", got %q", *mode)
+		return fmt.Errorf("-mode must be \"spectrum\", \"tdm\", \"ees\", \"ees-diff\", \"panel\" or \"stack\", got %q", *mode)
 	}
 
 	var spec *spectrum
@@ -775,6 +796,257 @@ func runEES(p eesParams) error {
 	}
 	fmt.Fprintf(os.Stderr, "plotspec: wrote %s (electron-emission spectrum, %d channels; SIP fwhm %.2g, DIP fwhm %.2g)\n",
 		p.out, len(res.order), fwhmSIP, fwhmDIP)
+	return nil
+}
+
+// eesDiffParams drives -mode ees-diff: one system's electron-emission spectrum minus a scaled
+// reference one.
+type eesDiffParams struct {
+	base           eesParams // the system under study (-sip/-dip) and all the shared knobs
+	refSIP, refDIP string
+	scale          float64
+	refLabel       string
+	dataOut        string
+	twoSite        bool
+	twoSiteWeight  float64
+	twoSiteShift   float64
+}
+
+// twoSiteLines builds the TWO-SITE double-ionization final states of a homodimer from one monomer's
+// single-ionization spectrum: one hole on each monomer.
+//
+// This is the family a monomer DIP calculation cannot contain, and therefore the reason a plain
+// dimer - 2*monomer residual is large whether or not the monomers interact. In the non-interacting
+// limit a two-site state is just the two independent ionizations, so its energy is E_i + E_j and, in
+// the independent-hole approximation, its weight is the product of the two pole strengths.
+//
+// ORDERED pairs, each once: "hole in orbital i on A, hole in orbital j on B" and the i<->j swap are
+// DIFFERENT physical states, because the sites are distinguishable. Summing over all N^2 ordered
+// pairs therefore gives total weight (sum_i s_i)^2, and no 1/2 for double counting.
+//
+// shift is the hole-hole Coulomb repulsion e^2/R, which the R->inf limit omits but a dimer at
+// contact does not: ~14.4/R(Angstrom) eV for two point charges, ~4.2 eV at naphthalene-dimer
+// separation. It is a knob and defaults to 0 (the strict non-interacting reference) because the
+// point-charge value is an estimate, not a computed quantity.
+//
+// WHAT THIS IS NOT: an ab-initio two-site DIP spectrum. It is the independent-hole construction, and
+// in particular it applies no spin multiplicity -- each spatial two-site configuration supports a
+// singlet and a triplet, and which convention matches the dimer's own -spin both counting is a
+// modelling choice, left to -twosite-weight rather than guessed at here.
+func twoSiteLines(sip []specLine, weight, shift float64) []specLine {
+	out := make([]specLine, 0, len(sip)*len(sip))
+	for _, a := range sip {
+		if a.Intensity <= 0 {
+			continue
+		}
+		for _, b := range sip {
+			if b.Intensity <= 0 {
+				continue
+			}
+			out = append(out, specLine{
+				Energy:    a.Energy + b.Energy + shift,
+				Intensity: weight * a.Intensity * b.Intensity,
+				Channel:   "two-site",
+			})
+		}
+	}
+	return out
+}
+
+// runEESDiff plots sigma_sys(eps) - scale * sigma_ref(eps), the Auger-Meitner difference spectrum.
+//
+// The intended use is a homodimer against its counterpoise monomer at scale = 2: what survives is
+// what the dimer does that two isolated monomers cannot.
+//
+// WHAT THE RESIDUAL ACTUALLY CONTAINS, because it is easy to over-read. For a dimer AB the
+// non-interacting double-ionization manifold has THREE families: both holes on A, both holes on B,
+// and ONE HOLE ON EACH. A monomer DIP calculation contains only the first kind, so 2*sigma_mono
+// reproduces the two one-site families and nothing else. The difference therefore keeps
+//
+//	(i)  the two-site (one-hole-per-monomer) channels, which are absent from the monomer by
+//	     construction -- this is normally the dominant residual and is where intermonomer
+//	     Auger-Meitner / ICD-type decay lives, and
+//	(ii) genuine interaction effects on the one-site channels: level shifts, splittings, and the
+//	     redistribution of intensity.
+//
+// So a large residual is EXPECTED and is not evidence of interaction on its own. Separating (i)
+// from (ii) needs the two-site reference as well, i.e. the self-convolution of the monomer's
+// single-ionization spectrum; that is deliberately not done here.
+//
+// TWO THINGS THIS ENFORCES, both of which would otherwise fail silently:
+//
+//   - ABSOLUTE intensities. The default relative normalisation rescales each spectrum so its own
+//     tallest peak is 1, which makes a factor of 2 meaningless and the subtraction arbitrary. The
+//     curves are therefore always computed with absolute = true, whatever -absolute says.
+//   - A COMMON eps GRID, via a required -xrange. The electron grid is otherwise derived from each
+//     system's own data range, so the two would be sampled at different abscissae and subtracting
+//     them element-wise would silently compare unlike points. Pinning the window makes both grids
+//     linspace(lo, hi, -points) and the subtraction exact, with no interpolation.
+//
+// Channels are summed to a total before subtracting. The monomer and dimer do not share an irrep or
+// decay-channel decomposition -- ghosting one monomer breaks the C2 that relates the two halves, so
+// the fragment has fewer irreps than the dimer -- and matching them up by name would be wrong.
+func runEESDiff(p eesDiffParams) error {
+	if p.base.sip == "" || p.base.dip == "" {
+		return fmt.Errorf("-mode ees-diff requires -sip and -dip (the system under study)")
+	}
+	if p.refSIP == "" || p.refDIP == "" {
+		return fmt.Errorf("-mode ees-diff requires -ref-sip and -ref-dip (the reference system)")
+	}
+	if p.base.xRange == "" {
+		return fmt.Errorf("-mode ees-diff requires -xrange: the two systems would otherwise be " +
+			"sampled on different electron-energy grids and the subtraction would compare unlike points")
+	}
+	if p.scale == 0 {
+		return fmt.Errorf("-ref-scale must be non-zero")
+	}
+	if p.twoSite && p.twoSiteWeight <= 0 {
+		return fmt.Errorf("-twosite-weight must be > 0 when -ref-twosite is set (got %g); "+
+			"drop -ref-twosite to omit the two-site family entirely", p.twoSiteWeight)
+	}
+
+	total := func(sipPath, dipPath, what string, augment bool) ([]float64, []float64, error) {
+		sipSpec, err := readSpectrum(sipPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", what, err)
+		}
+		dipSpec, err := readSpectrum(dipPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", what, err)
+		}
+		if augment {
+			// Complete the non-interacting final-state manifold: one-site (the monomer's own DIP)
+			// plus two-site (one hole per monomer, from the monomer SIP self-convolution).
+			//
+			// WHY THE WEIGHT IS 0.5 AND WHY -ref-scale 2 STILL HOLDS. The exact non-interacting
+			// manifold is  S_fin = 2*d_mono + (s (*) s)  -- both holes on A, both on B, one on each.
+			// But sigma = integral S_in(E) S_fin_num(E-eps)/N(E) dE has S_fin in the numerator and
+			// N(E), the cumulative TOTAL of S_fin, in the denominator, so an overall factor on S_fin
+			// CANCELS. Only two things matter: the one-site : two-site RATIO inside S_fin, and the
+			// overall scale of S_in. Halving gives  d_mono + 0.5*(s (*) s), which carries the same
+			// 2:1 ratio, and leaves S_in as one monomer's -- so the existing -ref-scale 2, which
+			// scales sigma linearly through S_in, remains exactly the right factor. The flag
+			// semantics are therefore unchanged by -ref-twosite.
+			n := len(dipSpec.Lines)
+			dipSpec.Lines = append(dipSpec.Lines,
+				twoSiteLines(sipSpec.Lines, p.twoSiteWeight, p.twoSiteShift)...)
+			fmt.Fprintf(os.Stderr, "plotspec: reference completed with %d two-site final states "+
+				"(weight %.3g, shift %.3g eV) alongside %d one-site\n",
+				len(dipSpec.Lines)-n, p.twoSiteWeight, p.twoSiteShift, n)
+		}
+		cp := eesCurveParams{
+			fwhm: p.base.fwhm, fwhmSIP: p.base.fwhmSIP, fwhmDIP: p.base.fwhmDIP,
+			fwhmEES: p.base.fwhmEES, finChannels: p.base.finChannels,
+			points: p.base.points, pad: p.base.pad, xRange: p.base.xRange,
+			absolute: true, spinWeight: p.base.spinWeight,
+		}
+		res, err := eesElectronCurve(sipSpec, dipSpec, cp)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", what, err)
+		}
+		sum := make([]float64, len(res.eGrid))
+		for _, ch := range res.order {
+			for i, v := range res.sigmas[ch] {
+				sum[i] += v
+			}
+		}
+		return res.eGrid, sum, nil
+	}
+
+	eGrid, sys, err := total(p.base.sip, p.base.dip, "system", false)
+	if err != nil {
+		return err
+	}
+	refGrid, ref, err := total(p.refSIP, p.refDIP, "reference", p.twoSite)
+	if err != nil {
+		return err
+	}
+	// Belt and braces: -xrange should already have made these identical.
+	if len(refGrid) != len(eGrid) {
+		return fmt.Errorf("reference grid has %d points, system grid %d", len(refGrid), len(eGrid))
+	}
+	for i := range eGrid {
+		if math.Abs(eGrid[i]-refGrid[i]) > 1e-9 {
+			return fmt.Errorf("grids diverge at point %d (%.9g vs %.9g)", i, eGrid[i], refGrid[i])
+		}
+	}
+
+	scaled := make([]float64, len(ref))
+	diff := make([]float64, len(sys))
+	for i := range sys {
+		scaled[i] = p.scale * ref[i]
+		diff[i] = sys[i] - scaled[i]
+	}
+
+	label := p.refLabel
+	if label == "" {
+		label = fmt.Sprintf("%.3gx reference", p.scale)
+		if p.twoSite {
+			label = fmt.Sprintf("%.3gx reference (1- and 2-site)", p.scale)
+		}
+	}
+
+	plt := plot.New()
+	plt.Title.Text = "Auger-Meitner difference spectrum"
+	plt.X.Label.Text = "Emitted electron kinetic energy (eV)"
+	plt.Y.Label.Text = "Intensity (envelope convolution)"
+	plt.X.Min, plt.X.Max = eGrid[0], eGrid[len(eGrid)-1]
+	plt.Legend.Top = true
+	for i, c := range []struct {
+		name string
+		y    []float64
+	}{{"system", sys}, {label, scaled}, {"difference", diff}} {
+		line, err := plotter.NewLine(asXYs(eGrid, c.y))
+		if err != nil {
+			return err
+		}
+		line.Color = palette(i)
+		line.Width = vg.Points(1.5)
+		plt.Add(line)
+		plt.Legend.Add(c.name, line)
+	}
+	if err := savePlot(plt, p.base.out, p.base.width, p.base.height, p.base.dpi); err != nil {
+		return err
+	}
+
+	if p.dataOut != "" {
+		// %.17g, not a display format: this file exists to be re-analysed, and a float64 printed to
+		// fewer digits does not round-trip. An 8-decimal column reintroduced ~1e-8 relative error that
+		// the in-memory subtraction did not have, which is exactly the kind of difference this mode is
+		// used to look for.
+		var b strings.Builder
+		fmt.Fprintf(&b, "# eps_eV\tsystem\t%s\tdifference\n", strings.ReplaceAll(label, "\t", " "))
+		for i := range eGrid {
+			fmt.Fprintf(&b, "%.17g\t%.17g\t%.17g\t%.17g\n", eGrid[i], sys[i], scaled[i], diff[i])
+		}
+		if err := os.WriteFile(p.dataOut, []byte(b.String()), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", p.dataOut, err)
+		}
+	}
+
+	// Report the size of the residual relative to the system, so "is this a real difference or
+	// roundoff" is answered without opening the plot.
+	sumAbs := func(x []float64) float64 {
+		t := 0.0
+		for _, v := range x {
+			t += math.Abs(v)
+		}
+		return t
+	}
+	frac := 0.0
+	if s := sumAbs(sys); s > 0 {
+		frac = sumAbs(diff) / s
+	}
+	kind := "one-site reference only"
+	if p.twoSite {
+		kind = "one- and two-site reference"
+	}
+	fmt.Fprintf(os.Stderr, "plotspec: wrote %s (AM difference, %s, scale %.3g, %d points on "+
+		"%.3g-%.3g eV; residual integral |diff|/|system| = %.3f)\n",
+		p.base.out, kind, p.scale, len(eGrid), eGrid[0], eGrid[len(eGrid)-1], frac)
+	if p.dataOut != "" {
+		fmt.Fprintf(os.Stderr, "plotspec: curves written to %s\n", p.dataOut)
+	}
 	return nil
 }
 

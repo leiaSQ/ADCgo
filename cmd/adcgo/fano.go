@@ -1172,9 +1172,30 @@ func runFanoEngine(doc *FanoDocument, cfg fanoConfig, fam fanoFamily, ch *choose
 				if e != nil {
 					return e
 				}
-				var gam float64
-				gam, err = fano.KPMWidth(apply, g, at, m, lo, hi)
-				w = fano.NewWidth(gam, 0)
+				// the series at m/8, m/4, m/2, m comes from the same moments; the last
+				// doubling's change is the width's uncertainty
+				var counts []int
+				for _, c := range []int{m / 8, m / 4, m / 2, m} {
+					if c >= 2 && (len(counts) == 0 || c > counts[len(counts)-1]) {
+						counts = append(counts, c)
+					}
+				}
+				var gams []float64
+				gams, err = fano.KPMWidths(apply, g, at, counts, lo, hi)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "adcgo: fano: KPM spectrum mapped from [%.6g, %.6g] Eh\n", lo, hi)
+				for i, c := range counts {
+					fmt.Fprintf(os.Stderr, "adcgo: fano: KPM %5d moments: Gamma = %.6g meV\n",
+						c, gams[i]*fano.HartreeToMeV)
+				}
+				last := len(gams) - 1
+				var sig float64
+				if last > 0 {
+					sig = math.Abs(gams[last] - gams[last-1])
+				}
+				w = fano.NewWidth(gams[last], sig)
 			default:
 				return fmt.Errorf("unknown -fano-engine %q (want eigen, gauss, shiftinvert or kpm)", cfg.engine)
 			}

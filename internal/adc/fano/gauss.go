@@ -183,12 +183,31 @@ func SpectralBounds(apply func(dst, src []float64), g []float64, steps int, marg
 
 // KPMWidth is W-C: Gamma(at) = 2 pi rho(at) with rho the Jackson-damped Chebyshev
 // expansion of mu to nMoments moments, the operator mapped into [-1, 1] from [lo, hi]
-// (which must enclose its spectrum). Two moments per application (the doubling
-// identities mu_2n = 2 <v_n|v_n> - mu_0, mu_2n+1 = 2 <v_n+1|v_n> - mu_1).
+// (which must enclose its spectrum).
 func KPMWidth(apply func(dst, src []float64), g []float64, at float64, nMoments int, lo, hi float64) (float64, error) {
-	if nMoments < 2 || hi <= lo || at <= lo || at >= hi {
-		return 0, fmt.Errorf("fano: KPM needs >= 2 moments and lo < at < hi (got %d, [%g, %g], %g)",
-			nMoments, lo, hi, at)
+	w, err := KPMWidths(apply, g, at, []int{nMoments}, lo, hi)
+	if err != nil {
+		return 0, err
+	}
+	return w[0], nil
+}
+
+// KPMWidths is KPMWidth at every moment count in counts from one moment run to the
+// largest: the moments of a shorter expansion are a prefix of the longer one's, only the
+// Jackson kernel changes, so the convergence series costs no extra application. Two
+// moments per application (the doubling identities mu_2n = 2 <v_n|v_n> - mu_0,
+// mu_2n+1 = 2 <v_n+1|v_n> - mu_1).
+func KPMWidths(apply func(dst, src []float64), g []float64, at float64, counts []int, lo, hi float64) ([]float64, error) {
+	nMoments := 0
+	for _, c := range counts {
+		if c < 2 {
+			return nil, fmt.Errorf("fano: KPM needs >= 2 moments (got %d)", c)
+		}
+		nMoments = max(nMoments, c)
+	}
+	if len(counts) == 0 || hi <= lo || at <= lo || at >= hi {
+		return nil, fmt.Errorf("fano: KPM needs moment counts and lo < at < hi (got %v, [%g, %g], %g)",
+			counts, lo, hi, at)
 	}
 	n := len(g)
 	a, b := (hi-lo)/2, (hi+lo)/2
@@ -203,30 +222,36 @@ func KPMWidth(apply func(dst, src []float64), g []float64, at float64, nMoments 
 	v1 := make([]float64, n)
 	scaled(v1, v0)
 	mom[0] = dotF(g, v0)
-	if nMoments > 1 {
-		mom[1] = dotF(g, v1)
-	}
+	mom[1] = dotF(g, v1)
 	vPrev, vCur := v0, v1
 	next := make([]float64, n)
 	// v_k known for k = 0, 1; each step makes v_{k+1} and fills mu_2k, mu_2k+1
 	for k := 1; 2*k < nMoments; k++ {
-		if 2*k < nMoments {
-			mom[2*k] = 2*dotF(vCur, vCur) - mom[0]
+		mom[2*k] = 2*dotF(vCur, vCur) - mom[0]
+		if 2*k+1 >= nMoments {
+			break
 		}
 		scaled(next, vCur)
 		for i := range next {
 			next[i] = 2*next[i] - vPrev[i]
 		}
-		if 2*k+1 < nMoments {
-			mom[2*k+1] = 2*dotF(next, vCur) - mom[1]
-		}
+		mom[2*k+1] = 2*dotF(next, vCur) - mom[1]
 		vPrev, vCur, next = vCur, next, vPrev
 	}
-	N := float64(nMoments)
 	x := (at - b) / a
+	out := make([]float64, len(counts))
+	for i, c := range counts {
+		out[i] = 2 * math.Pi * kpmDensity(mom[:c], x) / a
+	}
+	return out, nil
+}
+
+// kpmDensity is the Jackson-damped Chebyshev series of the moments mom at x in (-1, 1).
+func kpmDensity(mom []float64, x float64) float64 {
+	N := float64(len(mom))
 	var s float64
 	tPrev, tCur := 1.0, x // T_0(x), T_1(x)
-	for k := range nMoments {
+	for k := range mom {
 		kf := float64(k)
 		jackson := ((N-kf+1)*math.Cos(math.Pi*kf/(N+1)) + math.Sin(math.Pi*kf/(N+1))/math.Tan(math.Pi/(N+1))) / (N + 1)
 		var tk float64
@@ -245,8 +270,7 @@ func KPMWidth(apply func(dst, src []float64), g []float64, at float64, nMoments 
 		}
 		s += c * jackson * mom[k] * tk
 	}
-	rho := s / (math.Pi * math.Sqrt(1-x*x)) / a
-	return 2 * math.Pi * rho, nil
+	return s / (math.Pi * math.Sqrt(1-x*x))
 }
 
 func dotF(a, b []float64) float64 {

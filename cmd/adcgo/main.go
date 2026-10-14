@@ -605,6 +605,43 @@ type Document struct {
 	Sectors []analyze.Sector `json:"sectors"`
 }
 
+// writeSectorJSON persists one finished sector beside the final -out document.
+//
+// WHY THIS EXISTS. -out is written only after EVERY sector finishes, and a sector's checkpoints are
+// deleted the moment it completes (removeLowMemCheckpoint, removeBandEigCheckpoint — both on the
+// normal completion path, by design, so a rerun does not resume a finished computation). The
+// combination means a failure in a LATER sector discards every earlier sector's result and leaves no
+// restart point for it. melanin job 15195647 lost a finished whole-band eigensolve (15h58m at
+// dim 307998) plus ~43 h of apply exactly that way, to a GPU OOM in the next sector.
+//
+// The sidecar is a plain one-sector Document carrying the same .s<spin>.i<irrep> suffix the
+// checkpoints use, written atomically. It is a safety net, so a failure to write it is reported but
+// never fatal: losing the net must not also lose the run.
+func writeSectorJSON(cfg dipConfig, norb, nelec int, sec analyze.Sector, spin dip.Spin, irrep int) {
+	if cfg.out == "" {
+		return // stdout: there is nothing to put a sidecar beside
+	}
+	path := fmt.Sprintf("%s.s%d.i%d.json", strings.TrimSuffix(cfg.out, ".json"), int(spin), irrep)
+	b, err := json.MarshalIndent(Document{
+		NORB: norb, NELEC: nelec, Solver: cfg.solver, Sectors: []analyze.Sector{sec},
+	}, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "adcgo: cannot encode sector result for %s: %v\n", path, err)
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "adcgo: cannot write %s: %v\n", tmp, err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		fmt.Fprintf(os.Stderr, "adcgo: cannot rename %s -> %s: %v\n", tmp, path, err)
+		os.Remove(tmp)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "sector result saved: %s (%d states)\n", path, len(sec.States))
+}
+
 type dipConfig struct {
 	solver, spinSel, moPath, out, sym, backend string
 	gpus                                       int // -gpus: cap on concurrent per-sector GPUs (0 = all)
@@ -870,7 +907,13 @@ func solveDIPSectorMGPU(subs []backend.Backend, cfg dipConfig, sp *dip.Space, in
 	// sums the real block sizes (and collapses to ~0 when the satellite region is matrix-free);
 	// the operator is replicated across the partitions it touches, so /npart charges each GPU
 	// its share of the panels and an approximate share of the operator.
-	panels := 4 * uint64(n) * uint64(main) * 8 // float64 panels
+	// FIVE panels, not four. Mode B keeps [prev|cur] plus a work panel, but blockOrth allocates one
+	// MORE n x main panel per partition while orthogonalizing, and that allocation is the peak. It is
+	// what melanin job 15195647 died on: the guard below passed on a four-panel estimate of 77.5 GB
+	// against ~86 GB free, then blockOrth asked for 20259985680 bytes — exactly one partition's
+	// n*main*8 — and cudaMalloc returned NULL. Counting it makes the guard refuse cleanly, which is
+	// the entire point of having a guard rather than discovering the limit mid-assembly.
+	panels := 5 * uint64(n) * uint64(main) * 8 // float64 panels
 	perGPU := (panels + mx.OperatorResidentBytes()) / uint64(npart)
 	if cfg.profile {
 		fmt.Fprintf(os.Stderr, "dispatch %-18s mgpu n=%d main=%d over %d partition(s), ~%.1f GB/GPU\n",
@@ -1011,6 +1054,8 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 				return err
 			}
 			results[i] = sec
+			// Persist before starting the next sector: this one's checkpoints are already gone.
+			writeSectorJSON(cfg, d.NORB, d.NELEC, sec, it.spin, it.targetSym+1)
 		}
 	} else {
 		solve := func(w *chooser, i int) error {
@@ -1020,6 +1065,8 @@ func runDIP(d *fcidump.Data, cfg dipConfig) error {
 				return err
 			}
 			results[i] = sec
+			// Distinct path per sector, so this is safe from the concurrent dispatch too.
+			writeSectorJSON(cfg, d.NORB, d.NELEC, sec, it.spin, it.targetSym+1)
 			return nil
 		}
 		if len(ch.pool) >= 2 {
