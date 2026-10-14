@@ -40,6 +40,12 @@ var errInterrupted = errors.New("solve interrupted; checkpoint written")
 
 const exitResumeNeeded = 64
 
+// signOff closes the log of a solve that ran to completion. It goes to stderr, never
+// stdout, because stdout carries the JSON/ref document when -out is not given.
+func signOff() {
+	fmt.Fprintln(os.Stderr, "adcgo: Without calculations you are lost! - Lorenz Cederbaum")
+}
+
 // installStopSignal arranges for SIGUSR1 to flip the returned flag, which a checkpointing
 // lanczos loop polls at each block boundary to checkpoint-and-exit cleanly (exit 64). It is
 // installed unconditionally at the very start of main — before any file I/O — so a SIGUSR1
@@ -452,6 +458,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
 			os.Exit(1)
 		}
+		signOff()
 		return
 	}
 
@@ -503,6 +510,7 @@ func main() {
 				fmt.Fprintln(os.Stderr, "adcgo:", err)
 				os.Exit(1)
 			}
+			signOff()
 			return
 		}
 		if err := runDIP(d, cfg); err != nil {
@@ -513,6 +521,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
 			os.Exit(1)
 		}
+		signOff()
 		return
 	}
 
@@ -565,6 +574,7 @@ func main() {
 				fmt.Fprintln(os.Stderr, "adcgo:", err)
 				os.Exit(1)
 			}
+			signOff()
 			return
 		}
 
@@ -576,6 +586,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "adcgo:", err)
 			os.Exit(1)
 		}
+		signOff()
 		return
 	}
 
