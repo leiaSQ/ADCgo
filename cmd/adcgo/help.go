@@ -233,7 +233,7 @@ var helpTopics = []helpTopic{
 			"        -fano-qp 'q:1/e<0:1;q:e<-1.0:1;x:2/@W1:2&2/e<-1.0:0:0;...' -init-atom W1",
 			"    # (&2/e<-1.0:0:0 keeps W1's own 2a1-hole configurations out of the exclusion)",
 		},
-		flags: []string{"fano", "fano-init", "fano-q", "fano-rule", "fano-qp", "fano-scheme", "fano-b-inner", "fano-b-cut", "fano-b-onesite", "fano-b-particle", "fano-b-compact", "fano-nth", "fano-qmin", "fano-phi-holes", "fano-phi-tol"},
+		flags: []string{"fano", "fano-init", "fano-q", "fano-rule", "fano-qp", "fano-scheme", "fano-b-inner", "fano-b-cut", "fano-b-onesite", "fano-b-particle", "fano-b-compact", "fano-nth", "fano-qmin", "fano-phi-holes", "fano-phi-tol", "fano-phi-branch", "fano-phi-guess", "fano-phi-save"},
 		see:   []string{"fanotuning", "stieltjes", "order22", "khci"},
 	},
 	{

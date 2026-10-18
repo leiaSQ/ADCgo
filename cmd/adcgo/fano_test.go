@@ -356,6 +356,44 @@ func TestFanoKhciNullSystemInterior(t *testing.T) {
 	t.Logf("null system, interior He2+(He1): %v", err)
 }
 
+// TestFanoPhiSaveGuessRoundTrip: -fano-phi-save writes the interior |Phi>, and a second run
+// started from it with -fano-phi-guess lands on the same state (imaging then refuses at the
+// same E(He2+) = 2.8445 Eh, as in TestFanoKhciNullSystemInterior). A file over a different
+// Q space is refused.
+func TestFanoPhiSaveGuessRoundTrip(t *testing.T) {
+	d, err := fcidump.ReadFile("../../testdata/khci/he3_ghost.fcidump")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	phiPath := filepath.Join(dir, "phi.bin")
+	cfg := fanoConfig{
+		sip: sipConfig{solver: "dense", sym: "none", backend: "gonum", blocks: 50,
+			moPath: "../../testdata/khci/he3_ghost.mo.json", out: filepath.Join(dir, "a.json")},
+		khci: 2, khciTwoMs: 0, khciMaxFree: 1, khciCSR: 1 << 30,
+		vacancy: 0, qpSpec: "p: charge He1=1,He2=1,He3=1 & free=1",
+		phiHoles: []int{0, 0}, phiTol: 1e-10, phiSave: phiPath,
+		emax: -1, wmin: -1, gmin: -1,
+	}
+	if err := runFano(d, cfg); err == nil || !strings.Contains(err.Error(), "requested energy 2.8445") {
+		t.Fatalf("first run: %v", err)
+	}
+	saved, err := os.ReadFile(phiPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.phiSave, cfg.phiGuess = "", phiPath
+	cfg.sip.out = filepath.Join(dir, "b.json")
+	if err := runFano(d, cfg); err == nil || !strings.Contains(err.Error(), "requested energy 2.8445") {
+		t.Fatalf("guess run: %v", err)
+	}
+	n := (len(saved) - len(phiMagic) - 8) / 8
+	if _, err := loadPhi(phiPath, n+1); err == nil {
+		t.Error("a |Phi> file over the wrong Q size was accepted")
+	}
+	t.Logf("|Phi> over %d Q rows round-trips through %s", n, phiPath)
+}
+
 // TestFanoEnginesRun runs -dip -fano on water (the TestFanoDIPEndToEnd case) through the
 // three eigenvector-free width engines. Agreement between engines is gated in
 // internal/adc/fano, where the continuum is well sampled (TestWidthEnginesRecoverLorentzian,

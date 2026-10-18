@@ -2,6 +2,7 @@ package fano
 
 import (
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -138,5 +139,39 @@ func TestSelectInteriorHe2Plus(t *testing.T) {
 	}
 	if tight < 0 || screened == 0 {
 		t.Errorf("trace has %d screened candidates and tightening at line %d", screened, tight)
+	}
+
+	// a guess (the converged state, perturbed) is followed back to the same state
+	guess := slices.Clone(res.Discrete.Vec)
+	for i := range guess {
+		guess[i] += 1e-3 * math.Sin(float64(7*i+1))
+	}
+	gres, err := SelectInterior(qsp, qop, qop.DiagonalHost(), backend.Gonum{}, InteriorOptions{
+		Targets: targets, Tol: 1e-10, Guess: guess})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("from a perturbed guess: %.10f Eh, residual %.1e, overlap with the guess %.6f",
+		gres.Discrete.Energy, gres.Residual, gres.GuessOverlap)
+	if math.Abs(gres.Discrete.Energy-w[best]) > 1e-10 || gres.GuessOverlap < 0.99 {
+		t.Errorf("guess run: %.12f (overlap %.6f), want %.12f", gres.Discrete.Energy, gres.GuessOverlap, w[best])
+	}
+	// branches: rank 0 is the default; past the distinct candidates is an error
+	nb := 1 + len(res.Alternatives)
+	if _, err := SelectInterior(qsp, qop, qop.DiagonalHost(), backend.Gonum{}, InteriorOptions{
+		Targets: targets, Tol: 1e-10, Branch: nb}); err == nil {
+		t.Errorf("branch %d of %d accepted", nb, nb)
+	}
+	if nb > 1 {
+		b1, err := SelectInterior(qsp, qop, qop.DiagonalHost(), backend.Gonum{}, InteriorOptions{
+			Targets: targets, Tol: 1e-10, Branch: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("branch 1: %.10f Eh, target weight %.4f (branch 0 %.4f)", b1.Discrete.Energy, b1.Discrete.Weight, res.Discrete.Weight)
+		if b1.Discrete.Weight > res.Discrete.Weight || math.Abs(b1.Discrete.Energy-res.Alternatives[0].Energy) > 1e-6 {
+			t.Errorf("branch 1 at %.10f (weight %.4f) is not the first alternative %.10f", b1.Discrete.Energy,
+				b1.Discrete.Weight, res.Alternatives[0].Energy)
+		}
 	}
 }

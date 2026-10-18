@@ -57,8 +57,10 @@
 # behaviour of ne2x is the diagnostic.
 # KBJ exponents are kbj.py's continuum-like set (zeta = 1; Coccia et al. Table I), which is
 # what both references call "continuum-like KBJ Gaussian functions". Atom-centred sets are
-# ghost sites at the atom positions. Richter does not say which KBJ set; ICD_KBJ=kbjr puts
-# the Rydberg set (zeta = 1/n, kbj.py) on the wat2 ghosts instead, in $WS/wat2_kbjr.
+# ghost sites at the atom positions. Richter does not say which KBJ set. The wat2 cases default
+# to the Rydberg set (ICD_KBJ=kbjr, zeta = 1/n, kbj.py; $WS/wat2_kbjr): with it Fano-CI L2
+# gives D 7.1 / A 4.6 meV against Richter's 9.1 / 5.0, the continuum set 3.7 / 4.1 (job
+# 15399660). ICD_KBJ=kbj keeps the continuum set in $WS/wat2.
 #
 # ICD_FRAG_LEVELS (wat2frag, default "L1 L2") also takes R1 / R2: Richter's own model, the
 # P space cut to ONE singlet and ONE triplet final state (SI Note 3): two-site 2h1p with
@@ -86,7 +88,7 @@ if [ -z "$BIN" ]; then
 fi
 QP_IV='q:1/e<0:1;q:e<-1.0:1'
 BLOCKS="${ICD_BLOCKS:-120}"
-KBJ="${ICD_KBJ:-kbj}"
+KBJ="${ICD_KBJ:-kbjr}"
 case $KBJ in kbj) W2DIR="$WS/wat2";; kbjr) W2DIR="$WS/wat2_kbjr";; *) echo "ICD_KBJ=kbj|kbjr" >&2; exit 2;; esac
 W2="wat2_vdz_${KBJ}5"
 

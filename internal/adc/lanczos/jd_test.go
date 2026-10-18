@@ -269,3 +269,59 @@ func TestJacobiDavidsonRefinedKeepsTarget(t *testing.T) {
 		t.Errorf("JD converged to theta %.12f (overlap %.6f with the target), want %.12f", jd.Theta, ov, w[jt])
 	}
 }
+
+// TestJacobiDavidsonFollowsShape: with Follow set to a noisy copy of a neighbour of the
+// target-heaviest eigenpair, JD started on the target row must converge to that NEIGHBOUR
+// (the state is tracked by shape, as a charge-resonance branch is across transfer scalings),
+// and without Follow to the target-heaviest one.
+func TestJacobiDavidsonFollowsShape(t *testing.T) {
+	m := newInteriorModel(300, 2, 0.08, 0.5)
+	var eig mat.EigenSym
+	if !eig.Factorize(m.A, true) {
+		t.Fatal("eig")
+	}
+	w := eig.Values(nil)
+	var V mat.Dense
+	eig.VectorsTo(&V)
+	jt, bw := 0, -1.0
+	for j := range m.n {
+		c := V.At(m.targets[0], j)
+		if c*c > bw {
+			jt, bw = j, c*c
+		}
+	}
+	jn, nw := -1, -1.0 // the next heaviest on the target: a state the start vector also overlaps
+	for j := range m.n {
+		c := V.At(m.targets[0], j)
+		if j != jt && c*c > nw {
+			jn, nw = j, c*c
+		}
+	}
+	rng := rand.New(rand.NewPCG(11, 11))
+	follow := make([]float64, m.n)
+	for i := range follow {
+		follow[i] = V.At(i, jn) + 0.02*rng.NormFloat64()
+	}
+	x0 := make([]float64, m.n)
+	x0[m.targets[0]] = 1
+	for _, c := range []struct {
+		name   string
+		follow []float64
+		want   int
+	}{{"by weight", nil, jt}, {"by shape", follow, jn}} {
+		jd, err := JacobiDavidson(m.apply, m.n, [][]float64{x0}, JDOptions{
+			Targets: m.targets, Diag: m.diag, Tol: 1e-9, MaxIter: 400, Follow: c.follow})
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		var ov float64
+		for i := range jd.X {
+			ov += jd.X[i] * V.At(i, c.want)
+		}
+		t.Logf("%s: %d iterations, theta %.10f, want eigenpair %d at %.10f (target weights %.3f / %.3f), |overlap| %.10f",
+			c.name, jd.Iter, jd.Theta, c.want, w[c.want], bw, nw, math.Abs(ov))
+		if math.Abs(jd.Theta-w[c.want]) > 1e-10 || 1-math.Abs(ov) > 1e-8 {
+			t.Errorf("%s: converged to theta %.12f (overlap %.6f), want %.12f", c.name, jd.Theta, ov, w[c.want])
+		}
+	}
+}

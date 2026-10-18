@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -104,6 +105,10 @@ type FanoDocument struct {
 	// i.e. charge resonance splits the target character and the selection can switch.
 	PhiAlternatives []FanoAudit `json:"phi_alternatives,omitempty"`
 	PhiAmbiguous    bool        `json:"phi_ambiguous,omitempty"`
+	// PhiBranch is the -fano-phi-branch rank of |Phi>; PhiGuessOverlap |<Phi|guess>| when
+	// -fano-phi-guess started the solve.
+	PhiBranch       int     `json:"phi_branch,omitempty"`
+	PhiGuessOverlap float64 `json:"phi_guess_overlap,omitempty"`
 	// PhiClassWeights is |Phi>'s squared weight per excitation class ("4h", "5h1p", ...):
 	// how much of the decaying state lives beyond its main class.
 	PhiClassWeights map[string]float64 `json:"phi_class_weights,omitempty"`
@@ -241,6 +246,11 @@ type fanoConfig struct {
 	// main-class configuration with these holes; phiTol is its residual goal.
 	phiHoles []int
 	phiTol   float64
+	// phiBranch ranks the interior candidates by target weight (0 = heaviest); phiGuess
+	// starts and follows the interior solve from a saved |Phi>; phiSave writes it.
+	phiBranch int
+	phiGuess  string
+	phiSave   string
 	// engine (-fano-engine) is eigen (the PMP eigenvector path, default), gauss,
 	// shiftinvert or kpm; order is the Lanczos length / KPM moment count of the latter
 	// three, siShift the shift-invert offset from E_Phi (hartree).
@@ -929,14 +939,26 @@ func runFano(d *fcidump.Data, cfg fanoConfig) error {
 					return fmt.Errorf("-fano-phi-holes %v: no main-class configuration of Q has these holes "+
 						"(is it in P under the partition?)", cfg.phiHoles)
 				}
+				var guess []float64
+				if cfg.phiGuess != "" {
+					if guess, err = loadPhi(cfg.phiGuess, qsp.Size()); err != nil {
+						return err
+					}
+				}
 				ir, err := fano.SelectInterior(qsp, qmx, diag, be, fano.InteriorOptions{
-					Targets: targets, Tol: cfg.phiTol,
+					Targets: targets, Tol: cfg.phiTol, Branch: cfg.phiBranch, Guess: guess,
 					Log: func(s string) { fmt.Fprintf(os.Stderr, "adcgo: fano: %s\n", s) },
 				})
 				if err != nil {
 					return err
 				}
 				phi = ir.Discrete
+				doc.PhiBranch, doc.PhiGuessOverlap = ir.Branch, ir.GuessOverlap
+				if cfg.phiSave != "" {
+					if err := savePhi(cfg.phiSave, phi.Vec); err != nil {
+						return err
+					}
+				}
 				doc.PhiResidual, doc.PhiLadder, doc.PhiConverged = ir.Residual, ir.Ladder, ir.Converged
 				doc.PhiAmbiguous = ir.Ambiguous
 				for _, a := range ir.Alternatives {
@@ -1469,6 +1491,39 @@ func solveFanoSpace(ch *chooser, label string, fam fanoFamily, sp fano.Space, cf
 		reportTiming(label, sp.Size(), sp.MainBlockSize(), res.Timing)
 	}
 	return res, mx, nil
+}
+
+// phiMagic heads a -fano-phi-save file: the magic, the row count (uint64), then the
+// vector as little-endian float64.
+const phiMagic = "ADCGOPHI"
+
+func savePhi(path string, v []float64) error {
+	b := make([]byte, 0, len(phiMagic)+8+8*len(v))
+	b = append(b, phiMagic...)
+	b = binary.LittleEndian.AppendUint64(b, uint64(len(v)))
+	for _, x := range v {
+		b = binary.LittleEndian.AppendUint64(b, math.Float64bits(x))
+	}
+	return os.WriteFile(path, b, 0o644)
+}
+
+func loadPhi(path string, n int) ([]float64, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	h := len(phiMagic) + 8
+	if len(b) < h || string(b[:len(phiMagic)]) != phiMagic {
+		return nil, fmt.Errorf("%s is not a -fano-phi-save file", path)
+	}
+	if m := binary.LittleEndian.Uint64(b[len(phiMagic):h]); m != uint64(n) || len(b) != h+8*n {
+		return nil, fmt.Errorf("%s holds a |Phi> over %d Q rows (%d bytes), this partition has %d", path, m, len(b), n)
+	}
+	v := make([]float64, n)
+	for i := range v {
+		v[i] = math.Float64frombits(binary.LittleEndian.Uint64(b[h+8*i:]))
+	}
+	return v, nil
 }
 
 // couplingFile is the -fano-save-g / -fano-image-g format.

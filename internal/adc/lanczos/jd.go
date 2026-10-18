@@ -155,7 +155,13 @@ type JDOptions struct {
 	Keep     int       // vectors kept at a restart, previous iterate included (default 12)
 	// Deflate holds orthonormal vectors the search stays orthogonal to (converged roots).
 	Deflate [][]float64
-	Log     func(string)
+	// Follow, when set, selects the Ritz vector with the largest squared overlap with it
+	// instead of the largest target weight: a known state (the same eigenvector of a
+	// nearby operator, say at another transfer scaling) is tracked by its shape, which
+	// target weight cannot do when charge resonance spreads that weight over several
+	// states. It need not be normalized.
+	Follow []float64
+	Log    func(string)
 }
 
 func (o JDOptions) withDefaults() JDOptions {
@@ -201,6 +207,10 @@ type JDResult struct {
 	TargetWeight float64
 	Iter         int
 	Ritz         []RitzPair // every Ritz pair of the final search space, ascending
+	// InnerRel is the relative residual the last correction-equation solve stopped at: a
+	// value near 1 says MINRES cannot solve shifted systems of A at this budget, which is
+	// what PolishInverse would need.
+	InnerRel float64
 }
 
 // ErrNotConverged is returned (wrapped) when the iteration budget runs out; the result
@@ -291,7 +301,16 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 		inner         = o.Inner
 		innerInfo     MinresInfo
 		hist          []float64
+		followNorm2   = 1.0
 	)
+	if o.Follow != nil {
+		if len(o.Follow) != n {
+			return JDResult{}, fmt.Errorf("lanczos: JacobiDavidson Follow has %d rows, the operator %d", len(o.Follow), n)
+		}
+		if followNorm2 = pdot(o.Follow, o.Follow); followNorm2 == 0 {
+			return JDResult{}, fmt.Errorf("lanczos: JacobiDavidson Follow is the zero vector")
+		}
+	}
 	for it := 0; it < o.MaxIter; it++ {
 		m := len(V)
 		H := mat.NewSymDense(m, nil)
@@ -318,9 +337,22 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 				ov[j] += c * c
 			}
 		}
+		score := ov
+		if o.Follow != nil {
+			fv := make([]float64, m)
+			dotsInto(fv, V, o.Follow)
+			score = make([]float64, m)
+			for j := range m {
+				var c float64
+				for a := range m {
+					c += fv[a] * U.At(a, j)
+				}
+				score[j] = c * c / followNorm2
+			}
+		}
 		k := 0
 		for j := range m {
-			if ov[j] > ov[k] {
+			if score[j] > score[k] {
 				k = j
 			}
 		}
@@ -362,8 +394,15 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 			return s
 		}
 		uw := targetWeight(u)
+		selOf := func(x []float64) float64 {
+			if o.Follow == nil {
+				return targetWeight(x)
+			}
+			c := pdot(x, o.Follow)
+			return c * c / followNorm2
+		}
 		vec := "refined"
-		if uw < 0.5*ov[k] {
+		if selOf(u) < 0.5*score[k] {
 			// the refined vector left the target for a better-converged neighbour
 			combine(u, V, k)
 			combine(au, AV, k)
@@ -378,10 +417,14 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 		project(r, o.Deflate)
 		rn := math.Sqrt(pdot(r, r))
 		res = JDResult{Theta: theta, X: append([]float64(nil), u...), Residual: rn,
-			TargetWeight: uw, Iter: it}
+			TargetWeight: uw, Iter: it, InnerRel: innerInfo.RelResid}
 		if o.Log != nil {
-			o.Log(fmt.Sprintf("jd it=%d m=%d theta=%.12f res=%.2e weight=%.3f (%s; ritz %.12f weight %.3f) inner=%d/%d rel=%.1e",
-				it, m, theta, rn, uw, vec, w[k], ov[k], innerInfo.Iter, inner, innerInfo.RelResid))
+			follow := ""
+			if o.Follow != nil {
+				follow = fmt.Sprintf(" follow=%.4f", selOf(u))
+			}
+			o.Log(fmt.Sprintf("jd it=%d m=%d theta=%.12f res=%.2e weight=%.3f%s (%s; ritz %.12f weight %.3f) inner=%d/%d rel=%.1e",
+				it, m, theta, rn, uw, follow, vec, w[k], ov[k], innerInfo.Iter, inner, innerInfo.RelResid))
 		}
 		hist = append(hist, rn)
 		if h := len(hist); h > 3 && rn > 0.7*hist[h-4] && inner < o.InnerMax {
