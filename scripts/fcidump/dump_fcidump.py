@@ -241,7 +241,7 @@ def dump(cfg):
             "lindep_threshold": cfg.lindep,
             "ghost_sites": cfg.ghost_sites,
             "kbj": [__import__("kbj").describe(b) for g in cfg.ghost_sites
-                    for b in g["basis"] if b.startswith("kbj:")],
+                    for b in g["basis"] if __import__("kbj").is_spec(b)],
         })
         print(f"{cfg.orbitals} basis: {lb.nocc} occ, {lb.ncompact} compact, {lb.nfree} free; "
               f"IAO pop min {lb.metrics['occ_iao_pop_min']:.6f}, off-atom ghost weight "

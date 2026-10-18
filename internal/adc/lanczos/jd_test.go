@@ -174,3 +174,98 @@ func TestPolishRefusesStateSwap(t *testing.T) {
 		t.Fatalf("a state swap was accepted (err %v)", err)
 	}
 }
+
+// TestPolishStopsOnFailedSolve: when MINRES cannot solve the shifted system within its cap
+// (the He5 production point: 800 steps left relative residuals of 0.2-0.6), an inverse-
+// iteration step on that solution is noise. The polish must stop at the first failed solve,
+// keep the best pair it had, and say it did not converge, instead of spending its whole
+// step budget on garbage directions.
+func TestPolishStopsOnFailedSolve(t *testing.T) {
+	m := newInteriorModel(300, 2, 0.08, 0.5)
+	_, xe := m.exact(t)
+	rng := rand.New(rand.NewPCG(5, 5))
+	x0 := make([]float64, m.n)
+	for i := range x0 {
+		x0[i] = xe[i] + 1e-3*rng.NormFloat64()
+	}
+	applies := 0
+	apply := func(dst, src []float64) { applies++; m.apply(dst, src) }
+	const inner = 2
+	var trace []string
+	pol, err := PolishInverse(apply, x0, PolishOptions{Diag: m.diag, Tol: 1e-12, Inner: inner,
+		Log: func(s string) { trace = append(trace, s) }})
+	t.Logf("polish with a %d-step MINRES cap: %d applies, ladder %.2e, err %v, trace %q",
+		inner, applies, pol.Ladder, err, trace)
+	if !errors.Is(err, ErrNotConverged) {
+		t.Fatalf("err = %v, want ErrNotConverged", err)
+	}
+	if applies > 2*(inner+2) {
+		t.Errorf("%d applies: the polish kept stepping on failed solves (one step costs %d)", applies, inner+1)
+	}
+	if pol.Residual > pol.Ladder[0] {
+		t.Errorf("returned residual %.2e is worse than the start %.2e", pol.Residual, pol.Ladder[0])
+	}
+}
+
+// TestJacobiDavidsonRefinedKeepsTarget: the refined Ritz vector minimizes ||(A - theta) V y||
+// at the selected Ritz value, which is blind to the target. With a poorly converged target
+// and an accurately converged neighbour in the space, the neighbour has the smaller residual
+// at theta and the refined vector jumps to it (the He5 production run lost its target for
+// 25 iterations this way, weight 0.29 -> 0.000). JD must keep a vector that still carries
+// the target, and from the same start converge to the targeted eigenpair.
+func TestJacobiDavidsonRefinedKeepsTarget(t *testing.T) {
+	m := newInteriorModel(300, 2, 0.08, 0.5)
+	var eig mat.EigenSym
+	if !eig.Factorize(m.A, true) {
+		t.Fatal("eig")
+	}
+	w := eig.Values(nil)
+	var V mat.Dense
+	eig.VectorsTo(&V)
+	jt, bw := 0, -1.0
+	for j := range m.n {
+		c := V.At(m.targets[0], j)
+		if c*c > bw {
+			jt, bw = j, c*c
+		}
+	}
+	jn := jt - 1
+	if jt+1 < m.n && math.Abs(w[jt+1]-w[jt]) < math.Abs(w[jt-1]-w[jt]) {
+		jn = jt + 1
+	}
+	rng := rand.New(rand.NewPCG(9, 9))
+	neigh := make([]float64, m.n)
+	rough := make([]float64, m.n)
+	for i := range rough {
+		neigh[i] = V.At(i, jn)
+		rough[i] = V.At(i, jt) + 0.05*rng.NormFloat64()
+	}
+	var rw, rn float64
+	for i := range rough {
+		rn += rough[i] * rough[i]
+	}
+	for _, r := range m.targets {
+		rw += rough[r] * rough[r] / rn
+	}
+	one, _ := JacobiDavidson(m.apply, m.n, [][]float64{neigh, rough}, JDOptions{
+		Targets: m.targets, Diag: m.diag, MaxIter: 1})
+	t.Logf("target eigenpair %d at %.6f (weight %.3f), neighbour %d at %.6f; rough start weight %.3f; "+
+		"first JD vector weight %.3f", jt, w[jt], bw, jn, w[jn], rw, one.TargetWeight)
+	if one.TargetWeight < 0.5*rw {
+		t.Errorf("the first JD vector carries target weight %.3f, the start had %.3f: the refined "+
+			"vector left the target", one.TargetWeight, rw)
+	}
+	jd, err := JacobiDavidson(m.apply, m.n, [][]float64{neigh, rough}, JDOptions{
+		Targets: m.targets, Diag: m.diag, Tol: 1e-9, MaxIter: 300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ov float64
+	for i := range jd.X {
+		ov += jd.X[i] * V.At(i, jt)
+	}
+	t.Logf("converged: %d iterations, theta %.12f (exact %.12f), |overlap| %.12f", jd.Iter, jd.Theta, w[jt], math.Abs(ov))
+	if math.Abs(jd.Theta-w[jt]) > 1e-10 || 1-math.Abs(ov) > 1e-8 {
+		t.Errorf("JD converged to theta %.12f (overlap %.6f with the target), want %.12f", jd.Theta, ov, w[jt])
+	}
+}

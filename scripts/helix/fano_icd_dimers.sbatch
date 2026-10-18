@@ -57,7 +57,12 @@
 # behaviour of ne2x is the diagnostic.
 # KBJ exponents are kbj.py's continuum-like set (zeta = 1; Coccia et al. Table I), which is
 # what both references call "continuum-like KBJ Gaussian functions". Atom-centred sets are
-# ghost sites at the atom positions.
+# ghost sites at the atom positions. Richter does not say which KBJ set; ICD_KBJ=kbjr puts
+# the Rydberg set (zeta = 1/n, kbj.py) on the wat2 ghosts instead, in $WS/wat2_kbjr.
+#
+# ICD_FRAG_LEVELS (wat2frag, default "L1 L2") also takes R1 / R2: Richter's own model, the
+# P space cut to ONE singlet and ONE triplet final state (SI Note 3): two-site 2h1p with
+# holes in the HOMO of each water only (@D.4, @A.4), any particle (R1) or free (R2).
 #
 # Submit (pre-build the binary so a job that waits in the queue runs the code that was
 # reviewed, not whatever the tree holds when it starts):
@@ -81,6 +86,45 @@ if [ -z "$BIN" ]; then
 fi
 QP_IV='q:1/e<0:1;q:e<-1.0:1'
 BLOCKS="${ICD_BLOCKS:-120}"
+KBJ="${ICD_KBJ:-kbj}"
+case $KBJ in kbj) W2DIR="$WS/wat2";; kbjr) W2DIR="$WS/wat2_kbjr";; *) echo "ICD_KBJ=kbj|kbjr" >&2; exit 2;; esac
+W2="wat2_vdz_${KBJ}5"
+
+# wat2_fixture: the canonical wat2 deck in $W2DIR (geometry, SCF, FCIDUMP + sidecar), once.
+wat2_fixture() {
+  mkdir -p "$W2DIR"; cd "$W2DIR"
+  [ -s "$W2.fcidump" ] && return 0
+  cat > wat2.xyz <<'EOF'
+6
+water dimer, S22 (CCSD(T)/cc-pVQZ), donor = atoms 1-3, acceptor = 4-6
+O  -1.551007  -0.114520   0.000000
+H  -1.934259   0.762503   0.000000
+H  -0.599677   0.040712   0.000000
+O   1.350625   0.111469   0.000000
+H   1.680398  -0.373741  -0.758561
+H   1.680398  -0.373741   0.758561
+EOF
+  cat > "$W2.in" <<EOF
+&geometry
+  file wat2.xyz
+&basis
+  name cc-pvdz
+&scf
+  charge 0
+  symmetry auto
+  max_cycle 200
+&ghost_sites
+  KO_D  -1.551007  -0.114520   0.000000  $KBJ:2:1-5
+  KO_A   1.350625   0.111469   0.000000  $KBJ:2:1-5
+&active
+  frozen-core 2
+&output
+  fcidump  $W2.fcidump
+  sidecar  $W2.mo.json
+  manifest $W2.ref.json
+EOF
+  "$PYBIN" "$DUMP" --input "$W2.in"
+}
 
 # width LABEL QP ARGS... — one -fano run, JSON + log beside each other, failures kept.
 width() {
@@ -114,42 +158,10 @@ PY
 
 case "$CASE" in
 wat2)
-  DIR="$WS/wat2"; mkdir -p "$DIR"; cd "$DIR"
-  if [ ! -s wat2_vdz_kbj5.fcidump ]; then
-    cat > wat2.xyz <<'EOF'
-6
-water dimer, S22 (CCSD(T)/cc-pVQZ), donor = atoms 1-3, acceptor = 4-6
-O  -1.551007  -0.114520   0.000000
-H  -1.934259   0.762503   0.000000
-H  -0.599677   0.040712   0.000000
-O   1.350625   0.111469   0.000000
-H   1.680398  -0.373741  -0.758561
-H   1.680398  -0.373741   0.758561
-EOF
-    cat > wat2_vdz_kbj5.in <<'EOF'
-&geometry
-  file wat2.xyz
-&basis
-  name cc-pvdz
-&scf
-  charge 0
-  symmetry auto
-  max_cycle 200
-&ghost_sites
-  KO_D  -1.551007  -0.114520   0.000000  kbj:2:1-5
-  KO_A   1.350625   0.111469   0.000000  kbj:2:1-5
-&active
-  frozen-core 2
-&output
-  fcidump  wat2_vdz_kbj5.fcidump
-  sidecar  wat2_vdz_kbj5.mo.json
-  manifest wat2_vdz_kbj5.ref.json
-EOF
-    "$PYBIN" "$DUMP" --input wat2_vdz_kbj5.in
-  fi
+  wat2_fixture
   # The canonical sidecar names the ghost centres X1, X2; each belongs to its water.
   SITES=(-group=D=O1,H1,H2,X1 -group=A=O2,H3,H4,X2)
-  COMMON=(-fcidump wat2_vdz_kbj5.fcidump -mo wat2_vdz_kbj5.mo.json "${SITES[@]}")
+  COMMON=(-fcidump "$W2.fcidump" -mo "$W2.mo.json" "${SITES[@]}")
   QP_2S="$QP_IV;q:2/@D:2;q:2/@A:2;q:3/@D:3;q:3/@A:3"
   # x: one-site outer-valence configurations excluded from both Q and P (Richter's Fano-CI
   # spaces). The e<-1.0:0:0 term keeps each water's own 2a1-hole configurations in Q.
@@ -186,11 +198,10 @@ wat2b)
   # orbitals (inner -> Q, one-site -> excluded, two-site -> P). It removes the leak of the
   # x partition on canonical orbitals that are shared between the waters (cause 1 of the
   # 25x overestimate). 3h2p keeps the x hole rule. ADC(2,2)f is the target method.
-  DIR="$WS/wat2"; cd "$DIR"
-  [ -s wat2_vdz_kbj5.fcidump ] || { echo "run ICD_CASE=wat2 once first (canonical fixture)" >&2; exit 1; }
+  wat2_fixture
   SITES=(-group=D=O1,H1,H2,X1 -group=A=O2,H3,H4,X2)
   QP_X="$QP_IV;x:2/@D:2&2/e<-1.0:0:0;x:2/@A:2&2/e<-1.0:0:0;x:3/@D:3&3/e<-1.0:0:0;x:3/@A:3&3/e<-1.0:0:0"
-  B=(-fcidump wat2_vdz_kbj5.fcidump -mo wat2_vdz_kbj5.mo.json "${SITES[@]}" -sip -sym all
+  B=(-fcidump "$W2.fcidump" -mo "$W2.mo.json" "${SITES[@]}" -sip -sym all
      -solver lanczos -fano-scheme b)
   out=()
   for meth in ${ICD_WAT2_METHODS:-o2x o22f}; do
@@ -237,10 +248,9 @@ wat2frag)
   #   L2  L1 plus two-site configurations with a COMPACT particle excluded: P = each water
   #       +1 and one free electron. Tests cause 2 (bound D+A* states in P near E_Phi).
   # Nothing is frozen in a rotated basis, so the inner set per water is its 1s and 2a1.
-  DIR="$WS/wat2"; mkdir -p "$DIR"; cd "$DIR"
-  [ -s wat2.xyz ] || { echo "run ICD_CASE=wat2 once first (it writes wat2.xyz)" >&2; exit 1; }
-  if [ ! -s wat2_vdz_kbj5_frag.fcidump ]; then
-    cat > wat2_vdz_kbj5_frag.in <<'EOF'
+  wat2_fixture
+  if [ ! -s "${W2}_frag.fcidump" ]; then
+    cat > "${W2}_frag.in" <<EOF
 &geometry
   file wat2.xyz
 &basis
@@ -250,28 +260,34 @@ wat2frag)
   symmetry off
   max_cycle 200
 &ghost_sites
-  KO_D  -1.551007  -0.114520   0.000000  kbj:2:1-5
-  KO_A   1.350625   0.111469   0.000000  kbj:2:1-5
+  KO_D  -1.551007  -0.114520   0.000000  $KBJ:2:1-5
+  KO_A   1.350625   0.111469   0.000000  $KBJ:2:1-5
 &orbitals
   scheme fragment
   fragments D:1-3 A:4-6
   compact_basis cc-pvdz
 &output
-  fcidump  wat2_vdz_kbj5_frag.fcidump
-  sidecar  wat2_vdz_kbj5_frag.mo.json
-  manifest wat2_vdz_kbj5_frag.ref.json
+  fcidump  ${W2}_frag.fcidump
+  sidecar  ${W2}_frag.mo.json
+  manifest ${W2}_frag.ref.json
 EOF
-    "$PYBIN" "$DUMP" --input wat2_vdz_kbj5_frag.in
+    "$PYBIN" "$DUMP" --input "${W2}_frag.in"
   fi
   IN='@D.0,@D.1,@A.0,@A.1'
   QP_L1="q:1/@D,@A:1;q:$IN:1;x:2/@D:2&2/$IN:0:0;x:2/@A:2&2/$IN:0:0"
   QP_L2="$QP_L1;x:2/$IN:0:0&2/free=0"
-  F=(-fcidump wat2_vdz_kbj5_frag.fcidump -mo wat2_vdz_kbj5_frag.mo.json
+  # R: Richter's 1 singlet + 1 triplet final state. Two-site 2h1p keep only the HOMO pair
+  # (@D.4, @A.4); any other outer-valence hole leaves P (one-site pairs are already out).
+  RX='x:2/@D.2,@D.3,@A.2,@A.3:1&2/'"$IN"':0:0'
+  QP_R1="$QP_L1;$RX"
+  QP_R2="$QP_L2;$RX"
+  F=(-fcidump "${W2}_frag.fcidump" -mo "${W2}_frag.mo.json"
      -group=D=O1,H1,H2 -group=A=O2,H3,H4 -khci 1 -khci-maxclass 2 -sym none)
   out=()
   for v in D A; do
-    for L in L1 L2; do
-      qp=$([ $L = L1 ] && echo "$QP_L1" || echo "$QP_L2")
+    for L in ${ICD_FRAG_LEVELS:-L1 L2}; do
+      case $L in L1) qp=$QP_L1;; L2) qp=$QP_L2;; R1) qp=$QP_R1;; R2) qp=$QP_R2;;
+      *) echo "unknown level $L" >&2; exit 2;; esac
       width "wat2_frag_${L}_$v" "$qp" "${F[@]}" -fano-init "@$v.1"
       width "wat2_frag_${L}_${v}_gauss" "$qp" "${F[@]}" -fano-init "@$v.1" -fano-engine gauss
       out+=("wat2_frag_${L}_$v.json" "wat2_frag_${L}_${v}_gauss.json")

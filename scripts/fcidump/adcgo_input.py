@@ -51,7 +51,7 @@ the nuclei); their mutual interaction is a constant and is left out. A field of 
 breaks the molecular point group, so &charges forces `symmetry off` and refuses a named group.
 
 Ghost-site basis specs are "kbj:<lmax>:<n1>-<n2>" (Kaufmann-Baumeister-Jungen
-continuum exponents, kbj.py) or "<basis>@<element>". The localized scheme
+continuum exponents, kbj.py; "kbjr:" for the Rydberg set) or "<basis>@<element>". The localized scheme
 writes a NON-canonical FCIDUMP (localized occupied, per-atom compact virtuals, free
 complement) and labels every MO in the sidecar (orb_kind, orb_atom, ghost_atoms,
 canonical=false); it cannot be combined with &active. The fragment scheme does the same per

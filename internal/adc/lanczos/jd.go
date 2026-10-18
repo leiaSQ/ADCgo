@@ -25,18 +25,122 @@ package lanczos
 //     4e6-determinant FCI it stalled at 1e-2), because a new Ritz value
 //     near theta contaminates the Ritz vector; the refined residual cannot grow as the
 //     space grows.
+//     The refined vector is blind to the target, though: with a poorly converged target
+//     and an accurately converged neighbour in V, the neighbour has the smaller residual at
+//     theta and the refined vector jumps to it (on a 1e6-row He5 Q space the target weight
+//     went 0.29 -> 0.000 for 25 iterations). When the refined vector keeps less than half
+//     the selected Ritz vector's target weight, the Ritz vector is used instead.
+//     The correction equation's MINRES budget doubles (up to InnerMax) whenever the outer
+//     residual has not fallen by 30% over three iterations.
 //  2. Shifted inverse iteration (PolishInverse): x <- (A - sigma)^-1 x with sigma a hair
 //     below theta, each solve by MINRES; exact RQI (sigma = theta) makes the system
 //     singular to working precision and stalls, the 1e-6 offset keeps it solvable. An
-//     overlap guard refuses a polish that lands on a different state.
+//     overlap guard refuses a polish that lands on a different state. A step whose MINRES
+//     solve stops above BailRel is noise, not an inverse-iteration step: the polish stops
+//     there and keeps the best pair (on the He5 point, 16 such steps of 800 applies each
+//     were most of a 53 h solve and left the residual where JD had handed it over).
+//
+// The O(m n) vector work (Gram-Schmidt, Ritz combinations, projections) is split over
+// rows with parallel.Chunks; per-worker partial dot products are reduced in worker order,
+// so results do not depend on scheduling.
 
 import (
 	"errors"
 	"fmt"
 	"math"
 
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 	"gonum.org/v1/gonum/mat"
 )
+
+// parMinRows is the row count per worker below which the vector kernels stay serial: a
+// Chunks round costs ~80 us, a 16k-row axpy ~10 us.
+const parMinRows = 1 << 14
+
+func vecWorkers(n int) int { return min(parallel.ChunkWorkers(n), max(1, n/parMinRows)) }
+
+// rowsDo runs body over [0, n) split into contiguous row ranges.
+func rowsDo(n int, body func(lo, hi int)) {
+	parallel.Chunks(n, vecWorkers(n), func(_, lo, hi int) { body(lo, hi) })
+}
+
+// dotsInto sets out[k] = <qs[k], v>.
+func dotsInto(out []float64, qs [][]float64, v []float64) {
+	m, n := len(qs), len(v)
+	if m == 0 {
+		return
+	}
+	w := vecWorkers(n)
+	part := make([]float64, w*m)
+	parallel.Chunks(n, w, func(wk, lo, hi int) {
+		acc := part[wk*m : (wk+1)*m]
+		for k, q := range qs {
+			var s float64
+			for i := lo; i < hi; i++ {
+				s += q[i] * v[i]
+			}
+			acc[k] = s
+		}
+	})
+	for k := range m {
+		var s float64
+		for wk := range w {
+			s += part[wk*m+k]
+		}
+		out[k] = s
+	}
+}
+
+func pdot(a, b []float64) float64 {
+	var out [1]float64
+	dotsInto(out[:], [][]float64{a}, b)
+	return out[0]
+}
+
+// subCombo sets v -= sum_k c[k] qs[k].
+func subCombo(v []float64, qs [][]float64, c []float64) {
+	if len(qs) == 0 {
+		return
+	}
+	rowsDo(len(v), func(lo, hi int) {
+		for k, q := range qs {
+			ck := c[k]
+			for i := lo; i < hi; i++ {
+				v[i] -= ck * q[i]
+			}
+		}
+	})
+}
+
+// combo sets dst = sum_a c(a) src[a].
+func combo(dst []float64, src [][]float64, c func(a int) float64) {
+	cs := make([]float64, len(src))
+	for a := range cs {
+		cs[a] = c(a)
+	}
+	rowsDo(len(dst), func(lo, hi int) {
+		d := dst[lo:hi]
+		clear(d)
+		for a, v := range src {
+			ca := cs[a]
+			for i := lo; i < hi; i++ {
+				dst[i] += ca * v[i]
+			}
+		}
+	})
+}
+
+// project removes from v its components along the orthonormal vectors qs (twice, CGS2).
+func project(v []float64, qs [][]float64) {
+	if len(qs) == 0 {
+		return
+	}
+	c := make([]float64, len(qs))
+	for range 2 {
+		dotsInto(c, qs, v)
+		subCombo(v, qs, c)
+	}
+}
 
 // JDOptions controls JacobiDavidson.
 type JDOptions struct {
@@ -44,7 +148,8 @@ type JDOptions struct {
 	Diag     []float64 // diag(A), for the preconditioner (required)
 	Tol      float64   // residual 2-norm at which JD stops (default 1e-3: hand over to PolishInverse)
 	MaxIter  int       // outer iterations (default 300)
-	Inner    int       // MINRES steps per correction equation (default 40)
+	Inner    int       // MINRES steps per correction equation at the start (default 40)
+	InnerMax int       // cap of the adaptive MINRES budget (default 8 Inner)
 	InnerTol float64   // MINRES relative tolerance (default 1e-3)
 	MaxSpace int       // search-space size that triggers a restart (default 40)
 	Keep     int       // vectors kept at a restart, previous iterate included (default 12)
@@ -65,6 +170,9 @@ func (o JDOptions) withDefaults() JDOptions {
 	}
 	if o.InnerTol <= 0 {
 		o.InnerTol = 1e-3
+	}
+	if o.InnerMax < o.Inner {
+		o.InnerMax = 8 * o.Inner
 	}
 	if o.MaxSpace <= 0 {
 		o.MaxSpace = 40
@@ -112,33 +220,29 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 	// ||(A - theta) V y||^2 = y^T (P - 2 theta G + theta^2) y.
 	var V, AV, G, P [][]float64
 	orth := func(v, av []float64) ([]float64, []float64, bool) {
-		for range 2 {
-			for _, q := range o.Deflate {
-				c := dot(q, v)
-				for i := range v {
-					v[i] -= c * q[i]
-				}
-			}
-			for k, q := range V {
-				c := dot(q, v)
-				for i := range v {
-					v[i] -= c * q[i]
-				}
-				for i := range av { // av == nil: nothing to update
-					av[i] -= c * AV[k][i]
-				}
+		project(v, o.Deflate)
+		c := make([]float64, len(V))
+		for range 2 { // CGS2; av follows v by the same coefficients
+			dotsInto(c, V, v)
+			subCombo(v, V, c)
+			if av != nil { // av == nil: nothing to update
+				subCombo(av, AV, c)
 			}
 		}
-		nv := math.Sqrt(dot(v, v))
+		nv := math.Sqrt(pdot(v, v))
 		if nv < 1e-10 {
 			return nil, nil, false
 		}
-		for i := range v {
-			v[i] /= nv
-		}
-		for i := range av {
-			av[i] /= nv
-		}
+		rowsDo(n, func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				v[i] /= nv
+			}
+			if av != nil {
+				for i := lo; i < hi; i++ {
+					av[i] /= nv
+				}
+			}
+		})
 		return v, av, true
 	}
 	add := func(v, av []float64) bool {
@@ -156,12 +260,15 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 		}
 		row := make([]float64, len(V)+1)
 		prow := make([]float64, len(V)+1)
+		va := make([]float64, len(V))
+		dotsInto(row[:len(V)], V, av)
+		dotsInto(va, AV, v)
+		dotsInto(prow[:len(V)], AV, av)
 		for k := range V {
-			row[k] = 0.5 * (dot(V[k], av) + dot(v, AV[k]))
-			prow[k] = dot(AV[k], av)
+			row[k] = 0.5 * (row[k] + va[k])
 		}
-		row[len(V)] = dot(v, av)
-		prow[len(V)] = dot(av, av)
+		row[len(V)] = pdot(v, av)
+		prow[len(V)] = pdot(av, av)
 		V = append(V, v)
 		AV = append(AV, av)
 		G = append(G, row)
@@ -181,6 +288,9 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 		u             = make([]float64, n)
 		au            = make([]float64, n)
 		r             = make([]float64, n)
+		inner         = o.Inner
+		innerInfo     MinresInfo
+		hist          []float64
 	)
 	for it := 0; it < o.MaxIter; it++ {
 		m := len(V)
@@ -215,13 +325,7 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 			}
 		}
 		combine := func(dst []float64, src [][]float64, j int) {
-			clear(dst)
-			for a := range m {
-				c := U.At(a, j)
-				for i := range dst {
-					dst[i] += c * src[a][i]
-				}
-			}
+			combo(dst, src, func(a int) float64 { return U.At(a, j) })
 		}
 		// refined Ritz vector at the selected Ritz value, then its own Rayleigh quotient
 		thetaK := w[k]
@@ -241,39 +345,52 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 		}
 		var Y mat.Dense
 		ceig.VectorsTo(&Y)
-		clear(u)
-		clear(au)
-		for a := range m {
-			c := Y.At(a, 0) // smallest singular direction
-			for i := range u {
-				u[i] += c * V[a][i]
-				au[i] += c * AV[a][i]
+		combo(u, V, func(a int) float64 { return Y.At(a, 0) }) // smallest singular direction
+		combo(au, AV, func(a int) float64 { return Y.At(a, 0) })
+		nu := math.Sqrt(pdot(u, u))
+		rowsDo(n, func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				u[i] /= nu
+				au[i] /= nu
 			}
-		}
-		nu := math.Sqrt(dot(u, u))
-		for i := range u {
-			u[i] /= nu
-			au[i] /= nu
-		}
-		theta := dot(u, au)
-		var uw float64
-		for _, t := range o.Targets {
-			uw += u[t] * u[t]
-		}
-		for i := range r {
-			r[i] = au[i] - theta*u[i]
-		}
-		for _, q := range o.Deflate {
-			c := dot(q, r)
-			for i := range r {
-				r[i] -= c * q[i]
+		})
+		targetWeight := func(x []float64) float64 {
+			var s float64
+			for _, t := range o.Targets {
+				s += x[t] * x[t]
 			}
+			return s
 		}
-		rn := math.Sqrt(dot(r, r))
+		uw := targetWeight(u)
+		vec := "refined"
+		if uw < 0.5*ov[k] {
+			// the refined vector left the target for a better-converged neighbour
+			combine(u, V, k)
+			combine(au, AV, k)
+			uw, vec = targetWeight(u), "ritz"
+		}
+		theta := pdot(u, au)
+		rowsDo(n, func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				r[i] = au[i] - theta*u[i]
+			}
+		})
+		project(r, o.Deflate)
+		rn := math.Sqrt(pdot(r, r))
 		res = JDResult{Theta: theta, X: append([]float64(nil), u...), Residual: rn,
 			TargetWeight: uw, Iter: it}
 		if o.Log != nil {
-			o.Log(fmt.Sprintf("jd it=%d m=%d theta=%.12f res=%.2e weight=%.3f", it, m, theta, rn, uw))
+			o.Log(fmt.Sprintf("jd it=%d m=%d theta=%.12f res=%.2e weight=%.3f (%s; ritz %.12f weight %.3f) inner=%d/%d rel=%.1e",
+				it, m, theta, rn, uw, vec, w[k], ov[k], innerInfo.Iter, inner, innerInfo.RelResid))
+		}
+		hist = append(hist, rn)
+		if h := len(hist); h > 3 && rn > 0.7*hist[h-4] && inner < o.InnerMax {
+			inner = min(2*inner, o.InnerMax)
+			if o.Log != nil {
+				o.Log(fmt.Sprintf("jd it=%d residual stagnating (%.2e three iterations ago): MINRES budget %d",
+					it, hist[h-4], inner))
+			}
+			hist = hist[:0]
 		}
 		if rn < o.Tol || it == o.MaxIter-1 {
 			res.Ritz = make([]RitzPair, m)
@@ -282,12 +399,13 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 			for j := range m {
 				combine(x, V, j)
 				combine(ax, AV, j)
-				var s float64
-				for i := range x {
-					d := ax[i] - w[j]*x[i]
-					s += d * d
-				}
-				res.Ritz[j] = RitzPair{Theta: w[j], Residual: math.Sqrt(s), TargetWeight: ov[j],
+				wj := w[j]
+				rowsDo(n, func(lo, hi int) {
+					for i := lo; i < hi; i++ {
+						ax[i] -= wj * x[i]
+					}
+				})
+				res.Ritz[j] = RitzPair{Theta: w[j], Residual: math.Sqrt(pdot(ax, ax)), TargetWeight: ov[j],
 					X: append([]float64(nil), x...)}
 			}
 			if rn < o.Tol {
@@ -316,15 +434,8 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 			x := make([]float64, n)
 			ax := make([]float64, n)
 			for _, j := range idx {
-				clear(x)
-				clear(ax)
-				for a := range m {
-					c := U.At(a, j)
-					for i := range x {
-						x[i] += c * oldV[a][i]
-						ax[i] += c * oldAV[a][i]
-					}
-				}
+				combo(x, oldV, func(a int) float64 { return U.At(a, j) })
+				combo(ax, oldAV, func(a int) float64 { return U.At(a, j) })
 				add(x, ax)
 			}
 			if uPrev != nil {
@@ -339,38 +450,36 @@ func JacobiDavidson(apply func(dst, src []float64), n int, x0 [][]float64, o JDO
 
 		// correction equation, projected against u and the deflated vectors
 		Q := append(append([][]float64(nil), o.Deflate...), append([]float64(nil), u...))
-		proj := func(v []float64) {
-			for _, q := range Q {
-				c := dot(q, v)
-				for i := range v {
-					v[i] -= c * q[i]
-				}
-			}
-		}
+		proj := func(v []float64) { project(v, Q) }
 		th := theta
 		tmp := make([]float64, n)
 		op := func(dst, src []float64) {
 			copy(tmp, src)
 			proj(tmp)
 			apply(dst, tmp)
-			for i := range dst {
-				dst[i] -= th * tmp[i]
-			}
+			rowsDo(n, func(lo, hi int) {
+				for i := lo; i < hi; i++ {
+					dst[i] -= th * tmp[i]
+				}
+			})
 			proj(dst)
 		}
 		pre := func(dst, src []float64) {
 			copy(dst, src)
 			proj(dst)
-			for i := range dst {
-				dst[i] /= math.Abs(o.Diag[i]-th) + 1e-2
-			}
+			rowsDo(n, func(lo, hi int) {
+				for i := lo; i < hi; i++ {
+					dst[i] /= math.Abs(o.Diag[i]-th) + 1e-2
+				}
+			})
 			proj(dst)
 		}
 		b := make([]float64, n)
 		for i := range b {
 			b[i] = -r[i]
 		}
-		t, _ := Minres(op, b, nil, MinresOptions{RTol: o.InnerTol, MaxIter: o.Inner, Precond: pre})
+		var t []float64
+		t, innerInfo = Minres(op, b, nil, MinresOptions{RTol: o.InnerTol, MaxIter: inner, Precond: pre})
 		proj(t)
 		if !add(t, nil) {
 			// the correction lies in the space already: fall back to the preconditioned
@@ -408,7 +517,10 @@ type PolishOptions struct {
 	InnerTol   float64   // MINRES relative tolerance per step (default 1e-10)
 	Inner      int       // MINRES iteration cap per step (default 800)
 	MinOverlap float64   // |<x|x0>| below this is a state swap, refused (default 0.9)
-	Log        func(string)
+	// BailRel stops the polish at the first step whose MINRES solve ends above this relative
+	// residual: that step's direction is not (A - sigma)^-1 x and is discarded (default 1e-2).
+	BailRel float64
+	Log     func(string)
 }
 
 // PolishResult is the polished eigenpair and the residual after every step.
@@ -449,6 +561,9 @@ func PolishInverse(apply func(dst, src []float64), x0 []float64, o PolishOptions
 	if o.MinOverlap <= 0 {
 		o.MinOverlap = 0.9
 	}
+	if o.BailRel <= 0 {
+		o.BailRel = 1e-2
+	}
 	start := append([]float64(nil), x0...)
 	ns := math.Sqrt(dot(start, start))
 	for i := range start {
@@ -483,6 +598,14 @@ func PolishInverse(apply func(dst, src []float64), x0 []float64, o PolishOptions
 			}
 		}
 		y, info := Minres(op, x, nil, MinresOptions{RTol: o.InnerTol, MaxIter: o.Inner, Precond: pre})
+		if info.RelResid > o.BailRel && !info.Breakdown {
+			if o.Log != nil {
+				o.Log(fmt.Sprintf("polish step=%d: MINRES stopped at rel %.1e after %d steps (bail-out %.0e); "+
+					"the shifted system is not solved at this budget, stopping with residual %.2e",
+					step, info.RelResid, info.Iter, o.BailRel, out.Residual))
+			}
+			break
+		}
 		ny := math.Sqrt(dot(y, y))
 		for i := range x {
 			x[i] = y[i] / ny

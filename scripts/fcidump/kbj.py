@@ -15,9 +15,19 @@ entries within the table's own rounding (<= 4e-5 relative, against the 5.2e-5 th
 6-digit rounding allows at alpha = 0.009615). Only l <= 2 is tabulated, so only l <= 2
 is offered.
 
+The same (a_l, b_l) also give KBJ's Rydberg set: a Slater exponent zeta scales the
+Gaussian exponent by zeta^2, and hydrogenic Rydberg orbitals have zeta = Z / n, so
+
+    alpha(l, n) = (Z / (2 n))^2 / (a_l n + b_l)^2      (Z = 1)
+
+which is 1/n^2 more diffuse than the continuum set from n = 2 on. Fano-CI/ADC papers
+cite "KBJ functions" without saying which set; both are offered so the choice can be
+tested.
+
 Basis spec grammar (used by dump_fcidump's &ghost_sites):
 
-    kbj:<lmax>:<n1>-<n2>     uncontracted shells l = 0..lmax, n = n1..n2
+    kbj:<lmax>:<n1>-<n2>     continuum set (zeta = 1), shells l = 0..lmax, n = n1..n2
+    kbjr:<lmax>:<n1>-<n2>    Rydberg set (zeta = 1/n), same shells
 """
 
 import math
@@ -43,42 +53,48 @@ def _fit(l):
 COEFF = {l: _fit(l) for l in PUBLISHED}
 
 
-def exponent(l, n):
+def exponent(l, n, rydberg=False):
     if l not in COEFF:
         raise ValueError(f"KBJ coefficients are tabulated for l <= 2 only, not l = {l}")
     if n < 1:
         raise ValueError(f"KBJ index n must be >= 1, got {n}")
     a, b = COEFF[l]
-    return 1.0 / (4.0 * (a * n + b) ** 2)
+    zeta = 1.0 / n if rydberg else 1.0
+    return zeta * zeta / (4.0 * (a * n + b) ** 2)
+
+
+def is_spec(spec):
+    return spec.startswith("kbj:") or spec.startswith("kbjr:")
 
 
 def parse_spec(spec):
-    """'kbj:2:3-8' -> (lmax, n1, n2)."""
+    """'kbj:2:3-8' -> (lmax, n1, n2, rydberg)."""
     parts = spec.split(":")
-    if len(parts) != 3 or parts[0] != "kbj":
-        raise ValueError(f"not a KBJ spec: {spec!r} (want kbj:<lmax>:<n1>-<n2>)")
+    if len(parts) != 3 or parts[0] not in ("kbj", "kbjr"):
+        raise ValueError(f"not a KBJ spec: {spec!r} (want kbj[r]:<lmax>:<n1>-<n2>)")
     lmax = int(parts[1])
     n1, n2 = (int(x) for x in parts[2].split("-"))
     if n2 < n1:
         raise ValueError(f"KBJ range {parts[2]} runs backwards")
-    return lmax, n1, n2
+    return lmax, n1, n2, parts[0] == "kbjr"
 
 
 def basis(spec):
     """pyscf basis list for a KBJ spec: one uncontracted shell per (l, n)."""
-    lmax, n1, n2 = parse_spec(spec)
-    return [[l, [exponent(l, n), 1.0]] for l in range(lmax + 1)
+    lmax, n1, n2, ryd = parse_spec(spec)
+    return [[l, [exponent(l, n, ryd), 1.0]] for l in range(lmax + 1)
             for n in range(n1, n2 + 1)]
 
 
 def describe(spec):
     """Sidecar record: the generator parameters and the exponents they produced."""
-    lmax, n1, n2 = parse_spec(spec)
-    return {"spec": spec, "formula": "alpha = 1/(4 (a_l n + b_l)^2)",
+    lmax, n1, n2, ryd = parse_spec(spec)
+    formula = "alpha = (1/(2n))^2/(a_l n + b_l)^2" if ryd else "alpha = 1/(4 (a_l n + b_l)^2)"
+    return {"spec": spec, "formula": formula,
             "source": "KBJ, J. Phys. B 22, 2223 (1989); coefficients fitted to "
                       "Coccia et al. arXiv:1602.07202 Table I",
             "coefficients": {str(l): list(COEFF[l]) for l in range(lmax + 1)},
-            "exponents": {str(l): [exponent(l, n) for n in range(n1, n2 + 1)]
+            "exponents": {str(l): [exponent(l, n, ryd) for n in range(n1, n2 + 1)]
                           for l in range(lmax + 1)}}
 
 

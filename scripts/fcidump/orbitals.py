@@ -182,18 +182,18 @@ def ghost_flags(mol):
 
 
 def ghost_basis_list(specs):
-    """pyscf basis list for a ghost site from its specs: "kbj:<lmax>:<n1>-<n2>" (see
+    """pyscf basis list for a ghost site from its specs: "kbj[r]:<lmax>:<n1>-<n2>" (see
     kbj.py) or "<basis>@<element>" (a named basis taken from an element)."""
     import kbj
     out = []
     for spec in specs:
-        if spec.startswith("kbj:"):
+        if kbj.is_spec(spec):
             out += kbj.basis(spec)
         elif "@" in spec:
             name, el = spec.split("@", 1)
             out += gto.load(name, el)
         else:
-            raise ValueError(f"ghost basis spec {spec!r}: want kbj:... or <basis>@<element>")
+            raise ValueError(f"ghost basis spec {spec!r}: want kbj:..., kbjr:... or <basis>@<element>")
     # Merged sites (e.g. the T and centre-of-mass sets on the symmetric chain) can name
     # the same uncontracted shell twice (kbj:2:1-8 and kbj:1:6-10 share n = 6..8),
     # which makes the overlap exactly singular. Keep each (l, exponents, coefficients)

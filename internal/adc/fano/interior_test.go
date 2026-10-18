@@ -2,6 +2,7 @@ package fano
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/leiaSQ/ADCgo/backend"
@@ -116,5 +117,26 @@ func TestSelectInteriorHe2Plus(t *testing.T) {
 	}
 	if len(res.Audit) == 0 {
 		t.Error("empty C4 audit: the selected state itself should be listed")
+	}
+	// only the winner is tightened and polished, once, after every candidate was screened
+	tight, screened := -1, 0
+	for i, l := range trace {
+		switch {
+		case strings.HasPrefix(l, "interior: tightening"):
+			if tight >= 0 {
+				t.Errorf("a second tightening at trace line %d", i)
+			}
+			tight = i
+		case strings.HasPrefix(l, "interior: candidate") && strings.Contains(l, "screened"):
+			screened++
+			if tight >= 0 {
+				t.Errorf("a candidate was screened after the tightening: %q", l)
+			}
+		case strings.HasPrefix(l, "polish") && tight < 0:
+			t.Errorf("a polish before the winner was chosen: %q", l)
+		}
+	}
+	if tight < 0 || screened == 0 {
+		t.Errorf("trace has %d screened candidates and tightening at line %d", screened, tight)
 	}
 }

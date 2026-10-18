@@ -12,10 +12,17 @@ package fano
 //
 //  1. a start vector from the dense eigenproblem of the main class (plus the target
 //     rows), taking the eigenvector heaviest on the targets;
-//  2. lanczos.JacobiDavidson, which follows that weight with refined Ritz vectors and
-//     thick restarts, down to the hand-over residual;
-//  3. lanczos.PolishInverse, shifted inverse iteration to the goal, with an overlap guard
+//  2. lanczos.JacobiDavidson from each candidate start to a SCREENING residual (1e-3):
+//     enough to tell which converged state carries the most target weight;
+//  3. Jacobi-Davidson again on the winner only, from its vector and its neighbours in the
+//     final search space, down to the hand-over residual (1e-6);
+//  4. lanczos.PolishInverse, shifted inverse iteration to the goal, with an overlap guard
 //     against landing on a neighbour.
+// Inverse iteration is handed only a vector JD has taken to 1e-6: from 1e-3 inside a dense
+// manifold (the He5 production Q, 1e6 rows, three states within 0.1 eV) MINRES could not
+// solve the shifted system in 800 steps, every step was noise, and polishing two candidates
+// that way took most of a 53 h solve without lowering the residual. The losing candidates
+// are reported at their screening residual and never polished.
 //
 // The final Jacobi-Davidson search space also yields the C4 audit: its Ritz pairs within
 // a window of E_Phi, with residual, target weight and class weights. A Ritz pair of a
@@ -45,6 +52,10 @@ type InteriorOptions struct {
 	Tol float64
 	// AuditWindow is the half-width of the C4 audit around E_Phi (default 0.5 eV).
 	AuditWindow float64
+	// ScreenTol is the JD residual at which candidates are compared (default 1e-3);
+	// HandOver the residual the winner is taken to before the polish (default 1e-6, or Tol
+	// if that is looser).
+	ScreenTol, HandOver float64
 	// Candidates is how many dense-start eigenvectors (those with at least half the
 	// largest target weight, heaviest first) are each followed to convergence; the
 	// converged state with the largest target weight wins (default 3). One is not
@@ -216,89 +227,128 @@ func SelectInterior(qsp Space, op Operator, diag []float64, be backend.Backend, 
 		starts = append(starts, j)
 	}
 
+	if o.ScreenTol <= 0 {
+		o.ScreenTol = 1e-3
+	}
+	if o.HandOver <= 0 {
+		o.HandOver = 1e-6
+	}
 	jo := o.JD
 	jo.Targets, jo.Diag = o.Targets, diag
 	if jo.Log == nil && o.Log != nil {
 		jo.Log = o.Log
-	}
-	if jo.Tol <= 0 {
-		jo.Tol = math.Max(o.Tol, 1e-3)
 	}
 	po := o.Polish
 	po.Diag, po.Tol = diag, o.Tol
 	if po.Log == nil && o.Log != nil {
 		po.Log = o.Log
 	}
-	type outcome struct {
-		res InteriorResult
-		err error
+	// 2. screening: every candidate to ScreenTol
+	type screened struct {
+		start int
+		jd    lanczos.JDResult
+		err   error
 	}
-	var outs []outcome
+	var outs []screened
+	so := jo
+	so.Tol = math.Max(o.ScreenTol, o.Tol)
 	for _, j := range starts {
 		x0 := make([]float64, n)
 		for a, r := range rows {
 			x0[r] = U.At(a, j)
 		}
 		logf("interior: dense start over %d rows: root %d at %.8f Eh, target weight %.3f", g, j, w[j], cw[j])
-		// 2. Jacobi-Davidson to the hand-over residual
-		jd, err := lanczos.JacobiDavidson(apply, n, [][]float64{x0}, jo)
-		if err != nil {
-			outs = append(outs, outcome{InteriorResult{JDIter: jd.Iter}, err})
-			continue
+		jd, err := lanczos.JacobiDavidson(apply, n, [][]float64{x0}, so)
+		if err == nil {
+			logf("interior: candidate %d screened at %.10f Eh, residual %.1e, target weight %.4f",
+				j, jd.Theta, jd.Residual, jd.TargetWeight)
 		}
-		res := InteriorResult{JDIter: jd.Iter}
-		for _, rp := range jd.Ritz {
-			if math.Abs(rp.Theta-jd.Theta) > o.AuditWindow {
-				continue
-			}
-			res.Audit = append(res.Audit, AuditEntry{Energy: rp.Theta, Residual: rp.Residual,
-				TargetWeight: rp.TargetWeight, Classes: ClassWeights(qsp, rp.X),
-				Selected: math.Abs(rp.Theta-jd.Theta) < 1e-12})
-		}
-		// 3. polish
-		pol, err := lanczos.PolishInverse(apply, jd.X, po)
-		res.Residual, res.Ladder = pol.Residual, pol.Ladder
-		switch {
-		case err == nil:
-			res.Converged = true
-		case errors.Is(err, lanczos.ErrNotConverged):
-			logf("interior: WARNING the polish stopped at residual %.2e (goal %.1e); reported, not assumed",
-				pol.Residual, o.Tol)
-		default:
-			outs = append(outs, outcome{res, err})
-			continue
-		}
-		var tw float64
-		for _, t := range o.Targets {
-			tw += pol.X[t] * pol.X[t]
-		}
-		res.Discrete = Discrete{Energy: pol.Theta, Vec: pol.X, Weight: tw, Root: -1,
-			Rows: slices.Clone(o.Targets)}
-		logf("interior: candidate %d converged at %.10f Eh, residual %.1e, target weight %.4f",
-			j, pol.Theta, pol.Residual, tw)
-		outs = append(outs, outcome{res, nil})
+		outs = append(outs, screened{j, jd, err})
 	}
 	best := -1
 	for k, oc := range outs {
-		if oc.err == nil && (best < 0 || oc.res.Discrete.Weight > outs[best].res.Discrete.Weight) {
+		if oc.err == nil && (best < 0 || oc.jd.TargetWeight > outs[best].jd.TargetWeight) {
 			best = k
 		}
 	}
 	if best < 0 {
-		return outs[0].res, outs[0].err
+		return InteriorResult{JDIter: outs[0].jd.Iter}, outs[0].err
 	}
-	res := outs[best].res
+	win := outs[best]
+
+	// 3. the winner to the hand-over residual, from its vector and its neighbours
+	to := jo
+	to.Tol = math.Max(o.HandOver, o.Tol)
+	x0s := [][]float64{win.jd.X}
+	near := slices.Clone(win.jd.Ritz)
+	slices.SortFunc(near, func(a, b lanczos.RitzPair) int {
+		return cmpFloat(math.Abs(a.Theta-win.jd.Theta), math.Abs(b.Theta-win.jd.Theta))
+	})
+	for _, rp := range near {
+		if len(x0s) == 6 {
+			break
+		}
+		if math.Abs(rp.Theta-win.jd.Theta) > 1e-12 {
+			x0s = append(x0s, rp.X)
+		}
+	}
+	logf("interior: tightening candidate %d to residual %.0e (%d start vectors)", win.start, to.Tol, len(x0s))
+	jd, err := lanczos.JacobiDavidson(apply, n, x0s, to)
+	switch {
+	case err == nil:
+	case errors.Is(err, lanczos.ErrNotConverged):
+		logf("interior: WARNING Jacobi-Davidson stopped at residual %.2e above the hand-over %.0e; "+
+			"the polish is skipped and the residual is reported", jd.Residual, to.Tol)
+	default:
+		return InteriorResult{JDIter: win.jd.Iter + jd.Iter}, err
+	}
+	res := InteriorResult{JDIter: win.jd.Iter + jd.Iter}
+	for _, rp := range jd.Ritz {
+		if math.Abs(rp.Theta-jd.Theta) > o.AuditWindow {
+			continue
+		}
+		res.Audit = append(res.Audit, AuditEntry{Energy: rp.Theta, Residual: rp.Residual,
+			TargetWeight: rp.TargetWeight, Classes: ClassWeights(qsp, rp.X),
+			Selected: math.Abs(rp.Theta-jd.Theta) < 1e-12})
+	}
+
+	// 4. polish, only from the hand-over residual
+	theta, x, rn := jd.Theta, jd.X, jd.Residual
+	res.Ladder = []float64{rn}
+	if err == nil && rn > o.Tol {
+		pol, perr := lanczos.PolishInverse(apply, jd.X, po)
+		switch {
+		case perr == nil, errors.Is(perr, lanczos.ErrNotConverged):
+			res.Ladder = pol.Ladder
+			if pol.Residual < rn {
+				theta, x, rn = pol.Theta, pol.X, pol.Residual
+			}
+		default:
+			// the polish left the state: JD's hand-over vector is the best estimate there is
+			logf("interior: WARNING %v; keeping the Jacobi-Davidson vector", perr)
+		}
+	}
+	res.Residual, res.Converged = rn, rn <= o.Tol
+	if !res.Converged {
+		logf("interior: WARNING the state stopped at residual %.2e (goal %.1e); reported, not assumed", rn, o.Tol)
+	}
+	var tw float64
+	for _, t := range o.Targets {
+		tw += x[t] * x[t]
+	}
+	res.Discrete = Discrete{Energy: theta, Vec: x, Weight: tw, Root: -1, Rows: slices.Clone(o.Targets)}
+	logf("interior: candidate %d converged at %.10f Eh, residual %.1e, target weight %.4f", win.start, theta, rn, tw)
+
 	for k, oc := range outs {
 		if k == best || oc.err != nil {
 			continue
 		}
-		d := oc.res.Discrete
-		if math.Abs(d.Energy-res.Discrete.Energy) < 1e-8 {
+		if math.Abs(oc.jd.Theta-win.jd.Theta) < 1e-8 {
 			continue // the same state reached from another start
 		}
-		res.Alternatives = append(res.Alternatives, AuditEntry{Energy: d.Energy, Residual: oc.res.Residual,
-			TargetWeight: d.Weight, Classes: ClassWeights(qsp, d.Vec)})
-		if d.Weight >= 0.8*res.Discrete.Weight {
+		res.Alternatives = append(res.Alternatives, AuditEntry{Energy: oc.jd.Theta, Residual: oc.jd.Residual,
+			TargetWeight: oc.jd.TargetWeight, Classes: ClassWeights(qsp, oc.jd.X)})
+		if oc.jd.TargetWeight >= 0.8*res.Discrete.Weight {
 			res.Ambiguous = true
 		}
 	}
@@ -307,6 +357,16 @@ func SelectInterior(qsp Space, op Operator, diag []float64, be backend.Backend, 
 			"the selected state's weight %.4f (see the alternatives)", res.Discrete.Weight)
 	}
 	return res, nil
+}
+
+func cmpFloat(a, b float64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
 }
 
 // argsortDesc returns the indices of v ordered by value, largest first (stable).
