@@ -226,11 +226,16 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 		// Mode B: local reorth against the two live blocks [prev|cur] (two-pass CGS2 removes
 		// the Q_cur·α and Q_prev·β_prevᵀ recurrence terms). Mode A: full reorth against the
 		// host-retained basis. Both then orthonormalize with rank-revealing deflation.
-		orth := func(ve backend.BlockView) (int, backend.Mat) {
+		// qs is the panel blockOrth may borrow for its nrows x rank product instead of allocating a
+		// FIFTH n x b panel on the device — the allocation that exhausted a large triplet sector
+		// (18.87 GiB per GPU, 17.75 GiB free). It must hold dead data and must not
+		// alias ve, and WHICH of the two scratch panels qualifies differs between the two call sites
+		// below, which is why it is a parameter rather than a fixed choice.
+		orth := func(ve backend.BlockView, qs backend.Vector) (int, backend.Mat) {
 			if modeB {
-				return orthBlock(be, pc.ColRange(0, rPrev+rCur), ve, pbuf, 2*b, gbuf, opts.DeflTol)
+				return orthBlock(be, pc.ColRange(0, rPrev+rCur), ve, pbuf, 2*b, gbuf, opts.DeflTol, qs)
 			}
-			return reorthFull(be, hostQ, ve, n, b, pbuf, gbuf, opts.DeflTol)
+			return reorthFull(be, hostQ, ve, n, b, pbuf, gbuf, opts.DeflTol, qs)
 		}
 
 		// Stop once the basis holds MaxBlocks blocks (matching `-blocks`) or fills the space.
@@ -238,7 +243,9 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 			t0 = time.Now()
 			be.Copy(tmpBuf, workBuf)
 			ve := backend.BlockView{V: tmpBuf, Rows: n, Cols: rCur, Ld: n}
-			_, betaExtra = orth(ve)
+			// workBuf, not tmpBuf: the panel being orthogonalized IS tmpBuf here, and workBuf's
+			// contents were just copied out of it and are dead.
+			_, betaExtra = orth(ve, workBuf)
 			tm.Orth += time.Since(t0)
 			break
 		}
@@ -246,7 +253,8 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 		// Candidate next block: orthogonalize W and orthonormalize; R is the off-diagonal β
 		// coupling cur→next.
 		t0 = time.Now()
-		rank, r := orth(w)
+		// tmpBuf, not workBuf: w views workBuf, and tmpBuf is only written again below.
+		rank, r := orth(w, tmpBuf)
 		tm.Orth += time.Since(t0)
 		if rank == 0 {
 			betaExtra = r // invariant subspace: residuals vanish
@@ -323,7 +331,7 @@ func SolveLowMem(op Operator, be backend.Backend, opts Options) Result {
 // single basis block are resident beyond hostQ's host storage. Two sweeps of block
 // Gram–Schmidt (each cgs2 is itself two passes) restore orthogonality to O(eps). Returns the
 // surviving column count and the R factor such that the incoming v equals q·R.
-func reorthFull(be backend.Backend, hostQ [][]float64, v backend.BlockView, n, b int, pbuf, gbuf backend.Vector, deflTol float64) (int, backend.Mat) {
+func reorthFull(be backend.Backend, hostQ [][]float64, v backend.BlockView, n, b int, pbuf, gbuf backend.Vector, deflTol float64, qscratch backend.Vector) (int, backend.Mat) {
 	for range 2 {
 		for _, blk := range hostQ {
 			sz := len(blk) / n
@@ -333,7 +341,7 @@ func reorthFull(be backend.Backend, hostQ [][]float64, v backend.BlockView, n, b
 			be.Free(up)
 		}
 	}
-	rank, r, _ := blockOrth(be, v, gbuf, deflTol)
+	rank, r, _ := blockOrth(be, v, gbuf, deflTol, qscratch)
 	return rank, r
 }
 

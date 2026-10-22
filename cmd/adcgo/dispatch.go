@@ -163,7 +163,15 @@ func (c *chooser) checkDeviceFit(label string, be backend.Backend, needBytes uin
 // per-partition operator split is not modeled), enough to catch a plainly-too-small GPU before
 // a mid-assembly cudaMalloc panic.
 func checkSubsFit(label string, subs []backend.Backend, needPerGPU uint64) error {
-	const margin = 256 << 20
+	// 6 GiB, not the 256 MiB the other fit checks use. MEASURED at a large triplet DIP shape
+	// (ADCGO_DEV_ALLOC_TRACE): the driver reported 23.4 GiB per GPU more in use than
+	// ADCgo had allocated. 18.1 GiB of that is the matrix-free ERI, which needPerGPU now counts via
+	// dip.Matrix.MatFreeDeviceBytes; the remaining ~5.3 GiB is CUDA context plus cuBLAS/cuSOLVER
+	// workspace that neither side accounts for. A 256 MiB margin against that is noise, and the error
+	// is asymmetric: too small and a multi-day run dies mid-assembly with no restart point, too large
+	// and it refuses up front with a message naming the shortfall. Only this guard is widened — the
+	// single-device checks have no equivalent measurement behind them.
+	const margin = 6 << 30
 	for i, be := range subs {
 		dm, isDev := be.(backend.DeviceMemory)
 		if !isDev {

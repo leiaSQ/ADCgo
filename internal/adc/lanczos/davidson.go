@@ -295,7 +295,7 @@ func SolveDavidson(op PreconOperator, be backend.Backend, opts Options) Result {
 		corBlk := backend.BlockView{V: corUp, Rows: n, Cols: nunc, Ld: n}
 
 		// Orthonormalize the correction block against the basis and within itself.
-		rank, _ := orthBlock(be, basis.Cut(dim), corBlk, pbuf, maxdim, gbuf, opts.DeflTol)
+		rank, _ := orthBlock(be, basis.Cut(dim), corBlk, pbuf, maxdim, gbuf, opts.DeflTol, nil)
 		tm.Orth += time.Since(t0)
 		if rank == 0 {
 			be.Free(corUp)

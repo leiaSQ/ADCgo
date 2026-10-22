@@ -175,7 +175,15 @@ func devMalloc(n int) unsafe.Pointer {
 			hint = "; the GPU is out of memory (operator + Lanczos panels too large) — " +
 				"use a larger-memory GPU or run with -backend gonum"
 		}
-		panic(fmt.Sprintf("backend: hipMalloc(%d bytes) returned NULL (hipError_t %d)%s", n*elemSize, int(st), hint))
+		// Report what the device actually had. This costs one query on a path that is about to
+		// abort the run anyway, and it is the difference between a diagnosable failure and a
+		// guess: if free >> the request, the device is FRAGMENTED, not exhausted, and the fix is
+		// a different allocation pattern rather than a bigger GPU. Without it, a production
+		// triplet DIP run left no way to tell those apart.
+		free, total := devMemInfo()
+		panic(fmt.Sprintf("backend: hipMalloc(%d bytes) returned NULL (hipError_t %d); device had %.2f GiB free "+
+			"of %.2f GiB%s", n*elemSize, int(st),
+			float64(free)/(1<<30), float64(total)/(1<<30), hint))
 	}
 	return p
 }

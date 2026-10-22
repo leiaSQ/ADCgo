@@ -829,3 +829,40 @@ func TestSatelliteBlockShapes(t *testing.T) {
 		}
 	}
 }
+
+// TestMatFreeDeviceBytes pins the term the -mgpu pre-flight guard was missing, which is what let
+// a large triplet DIP sector pass the check at 96.3 GiB and then die in cudaMalloc at ~126 GiB of
+// a 140 GiB card.
+//
+// Two properties matter and both are asserted. It is ZERO unless the satellite region is actually
+// matrix-free — otherwise the guard would double-count against OperatorResidentBytes, which already
+// covers assembled blocks. And when it is on, it is the dense norb^4 ERI (plus eps and osym), a
+// figure that must be computed from norb rather than len(flatERI) because flatERI is built lazily on
+// the first apply, long after the guard runs.
+//
+// The caller must NOT divide it by the partition count — the ERI is replicated on every device — but
+// that is a property of the call site in cmd/adcgo, not of this function.
+func TestMatFreeDeviceBytes(t *testing.T) {
+	for _, spin := range []Spin{Singlet, Triplet} {
+		mx := buildH2O(t, spin)
+		n := uint64(mx.sp.Norb)
+		want := n*n*n*n*8 + n*8 + n*4
+
+		mx.SetMatFree(matfree.Off, 0)
+		if got := mx.MatFreeDeviceBytes(); got != 0 {
+			t.Errorf("spin %d: matfree Off gives %d, want 0 (the blocks are already counted by "+
+				"OperatorResidentBytes)", spin, got)
+		}
+
+		mx.SetMatFree(matfree.On, 0)
+		if got := mx.MatFreeDeviceBytes(); got != want {
+			t.Errorf("spin %d: matfree On gives %d, want norb^4*8+norb*8+norb*4 = %d (norb=%d)",
+				spin, got, want, n)
+		}
+		// It must not depend on flatERI having been built, since the guard runs before any apply.
+		if mx.flatERI != nil {
+			t.Errorf("spin %d: flatERI is already populated; this test no longer proves the figure "+
+				"is independent of the lazy build", spin)
+		}
+	}
+}

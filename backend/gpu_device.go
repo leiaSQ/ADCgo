@@ -24,8 +24,10 @@ package backend
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -46,9 +48,14 @@ func init() { RegisterMulti(backendName, devCount, newGPUOn) }
 // casts it back to the concrete handle type) and the channel onto its owning thread.
 type gpuBackend struct {
 	Gonum
-	dev  int // physical device index this backend is pinned to (0 unless multi-GPU)
-	h    unsafe.Pointer
-	jobs chan func()
+	dev int // physical device index this backend is pinned to (0 unless multi-GPU)
+	// allocBytes is the running total this backend has allocated and not freed, in bytes.
+	// Compared against the driver's own total-free it says whether an out-of-memory is ADCgo's
+	// own residency or something outside its accounting. Atomic: Free can be called from any
+	// goroutine, even though the cudaMalloc itself is serialized onto the device thread.
+	allocBytes int64
+	h          unsafe.Pointer
+	jobs       chan func()
 
 	// Device arrays of device pointers for the batched GEMM, plus their host staging
 	// slices. Grown on demand and reused: a batch of 27k pointers is 216 kB, and
@@ -188,11 +195,46 @@ type devMat struct {
 
 func (m devMat) Dims() (int, int) { return m.rows, m.cols }
 
+// devAllocTrace turns on a line per device allocation and free (ADCGO_DEV_ALLOC_TRACE=1).
+//
+// WHY IT EXISTS, and what it is meant to settle. a large triplet DIP sector died in
+// cudaMalloc on its 5th n x main Krylov panel while the pre-flight estimate said ~44 GiB should still
+// have been spare. Two very different causes fit that equally well from the log alone:
+//
+//   - ADCgo really has more resident than the estimate models, or
+//   - the device is FRAGMENTED: ~19 GiB contiguous cannot be found even though the free TOTAL is far
+//     larger, because four ~19 GiB blocks are already placed.
+//
+// The discriminator is the pair (tracked, free): `tracked` is what this backend believes it has
+// allocated, `free`/`total` what the driver reports. tracked ~= total-free means the model is simply
+// wrong about the count; tracked << total-free means something else is eating the device; and a
+// failure while free is much larger than the request means fragmentation. None of that is visible
+// without logging both.
+//
+// Off by default and checked once: a cudaMemGetInfo per allocation synchronizes the device, which is
+// fine for a few hundred panel allocations but must not sit in a hot loop unasked.
+var devAllocTrace = os.Getenv("ADCGO_DEV_ALLOC_TRACE") == "1"
+
+// trackAlloc records a device allocation (n > 0) or free (n < 0), in ELEMENTS, and traces it.
+// Called from inside b.do, i.e. already on the device-owning thread, so it queries devMemInfo
+// directly — b.DeviceMem() would re-enter b.do and deadlock.
+func (b *gpuBackend) trackAlloc(what string, n int) {
+	tracked := atomic.AddInt64(&b.allocBytes, int64(n)*elemSize)
+	if !devAllocTrace {
+		return
+	}
+	free, total := devMemInfo()
+	fmt.Fprintf(os.Stderr, "devtrace dev=%d %-9s %+10.3f GiB  tracked=%8.3f GiB  free=%8.3f GiB  used=%8.3f of %.3f GiB\n",
+		b.dev, what, float64(int64(n)*elemSize)/(1<<30), float64(tracked)/(1<<30),
+		float64(free)/(1<<30), float64(total-free)/(1<<30), float64(total)/(1<<30))
+}
+
 func (b *gpuBackend) Alloc(n int) Vector {
 	var p unsafe.Pointer
 	b.do(func() {
 		p = devMalloc(n)
 		devZero(p, n)
+		b.trackAlloc("alloc", n)
 	})
 	return devVec{base: p, n: n}
 }
@@ -201,6 +243,7 @@ func (b *gpuBackend) Upload(hostv Vec) Vector {
 	var p unsafe.Pointer
 	b.do(func() {
 		p = devMalloc(len(hostv))
+		b.trackAlloc("upload", len(hostv))
 		if len(hostv) > 0 {
 			devH2D(p, hostv)
 		}
@@ -258,7 +301,10 @@ func (b *gpuBackend) Copy(dst, src Vector) {
 
 func (b *gpuBackend) Free(v Vector) {
 	if dv := v.(devVec); dv.off == 0 && dv.base != nil {
-		b.do(func() { devFree(dv.base) })
+		b.do(func() {
+			devFree(dv.base)
+			b.trackAlloc("free", -dv.n)
+		})
 	}
 }
 
@@ -266,6 +312,7 @@ func (b *gpuBackend) UploadMat(m Mat) DeviceMat {
 	var p unsafe.Pointer
 	b.do(func() {
 		p = devMalloc(m.Rows * m.Cols)
+		b.trackAlloc("uploadmat", m.Rows*m.Cols)
 		if len(m.Data) > 0 {
 			devH2D(p, m.Data)
 		}
@@ -277,7 +324,10 @@ func (b *gpuBackend) UploadMat(m Mat) DeviceMat {
 // block leaked device memory for the process lifetime.
 func (b *gpuBackend) FreeMat(m DeviceMat) {
 	if dm, ok := m.(devMat); ok && dm.p != nil {
-		b.do(func() { devFree(dm.p) })
+		b.do(func() {
+			devFree(dm.p)
+			b.trackAlloc("freemat", -(dm.rows * dm.cols))
+		})
 	}
 }
 

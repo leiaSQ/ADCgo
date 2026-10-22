@@ -748,7 +748,7 @@ func orthHarness(t *testing.T, n, d int, vcols [][]float64) (rank int, orthErr, 
 
 	pbuf := be.Alloc(d * nc)
 	gbuf := be.Alloc(nc * nc)
-	rank, _ = orthBlock(be, basis, v, pbuf, d, gbuf, 1e-8)
+	rank, _ = orthBlock(be, basis, v, pbuf, d, gbuf, 1e-8, nil)
 	if rank == 0 {
 		return 0, 0, 0
 	}
@@ -878,7 +878,7 @@ func TestSinglePassLosesOrthogonality(t *testing.T) {
 	v := backend.BlockView{V: be.Upload(vdata), Rows: n, Cols: b, Ld: n}
 	gbuf := be.Alloc(b * b)
 
-	rank, _, cond2 := blockOrth(be, v, gbuf, 1e-8) // ONE pass, deliberately
+	rank, _, cond2 := blockOrth(be, v, gbuf, 1e-8, nil) // ONE pass, deliberately
 	if rank != b {
 		t.Fatalf("rank %d: block deflated, so this does not test the cond² path", rank)
 	}
@@ -1051,4 +1051,81 @@ func TestRitzResidualVanishesAtFullSubspace(t *testing.T) {
 		t.Errorf("full-subspace max residual %.3e, want ~0", maxResid)
 	}
 	t.Logf("dim=%d: max residual at full subspace %.3e", sp.Size(), maxResid)
+}
+
+// TestBlockOrthQScratchIsBitIdentical pins the memory fix that let a large triplet DIP sector fit:
+// blockOrth may borrow a caller-supplied panel for its nrows x rank product instead of allocating a
+// fifth n x b device panel (18.87 GiB per GPU at that shape, against 17.75 GiB free).
+//
+// Borrowing is only sound if the buffer's contents are dead and it does not alias v, and getting that
+// wrong corrupts the Krylov basis SILENTLY — the run continues and the spectrum is subtly wrong. So
+// this asserts bit-for-bit equality of everything blockOrth produces, with and without the scratch:
+// the rank, the R factor, and the orthonormalized panel written back over v. It also seeds the
+// scratch with non-zero junk, because be.Alloc zeroes and a borrowed buffer does not — if any code
+// path depended on q starting at zero, that difference would show up here.
+func TestBlockOrthQScratchIsBitIdentical(t *testing.T) {
+	const nrows, cols = 97, 7
+	be := backend.Gonum{}
+	rng := rand.New(rand.NewSource(20261022))
+	base := make([]float64, nrows*cols)
+	for i := range base {
+		base[i] = rng.NormFloat64()
+	}
+
+	run := func(withScratch bool) (int, backend.Mat, []float64) {
+		vb := be.Upload(append([]float64(nil), base...))
+		defer be.Free(vb)
+		v := backend.BlockView{V: vb, Rows: nrows, Cols: cols, Ld: nrows}
+		gbuf := be.Alloc(cols * cols)
+		defer be.Free(gbuf)
+		var qs backend.Vector
+		if withScratch {
+			junk := make([]float64, nrows*cols)
+			for i := range junk {
+				junk[i] = 1e3 + float64(i) // deliberately NOT zero
+			}
+			qsv := be.Upload(junk)
+			defer be.Free(qsv)
+			qs = qsv
+		}
+		rank, r, _ := blockOrth(be, v, gbuf, 1e-8, qs)
+		return rank, r, be.Download(vb)
+	}
+
+	rank0, r0, v0 := run(false)
+	rank1, r1, v1 := run(true)
+
+	if rank0 != rank1 {
+		t.Fatalf("rank differs: %d without scratch, %d with", rank0, rank1)
+	}
+	if rank0 == 0 {
+		t.Fatal("rank 0: the test asserts nothing")
+	}
+	if r0.Rows != r1.Rows || r0.Cols != r1.Cols {
+		t.Fatalf("R dims differ: %dx%d vs %dx%d", r0.Rows, r0.Cols, r1.Rows, r1.Cols)
+	}
+	for i := range r0.Data {
+		if r0.Data[i] != r1.Data[i] {
+			t.Fatalf("R[%d] = %.17g without scratch, %.17g with", i, r0.Data[i], r1.Data[i])
+		}
+	}
+	for i := range v0 {
+		if v0[i] != v1[i] {
+			t.Fatalf("v[%d] = %.17g without scratch, %.17g with", i, v0[i], v1[i])
+		}
+	}
+
+	// A scratch too short must be IGNORED, not sliced out of range: blockOrth falls back to its own
+	// allocation. Without the length check this panics.
+	vb := be.Upload(append([]float64(nil), base...))
+	defer be.Free(vb)
+	v := backend.BlockView{V: vb, Rows: nrows, Cols: cols, Ld: nrows}
+	gbuf := be.Alloc(cols * cols)
+	defer be.Free(gbuf)
+	short := be.Alloc(nrows) // far shorter than nrows*rank
+	defer be.Free(short)
+	rank2, _, _ := blockOrth(be, v, gbuf, 1e-8, short)
+	if rank2 != rank0 {
+		t.Errorf("short scratch: rank %d, want the fallback to give %d", rank2, rank0)
+	}
 }

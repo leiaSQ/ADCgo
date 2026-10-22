@@ -58,6 +58,32 @@ func (mx *Matrix) matFreeSatellite() bool {
 	return matfree.Decide(mx.matFree, 0, mx.matFreeBudget, mx.matFreeSupported())
 }
 
+// MatFreeDeviceBytes reports what the matrix-free satellite apply keeps resident on EACH device.
+//
+// It exists because OperatorResidentBytes() does not account for it and cannot: that figure sums the
+// assembled BLOCK storage, and going matrix-free is precisely the decision to stop storing blocks —
+// so it collapses to ~0 exactly when this term appears. The term is the dense norb^4 ERI copy the
+// per-scalar kernels index (flatERI / buildSatDeviceSoA), plus the orbital energies and symmetry
+// labels.
+//
+// TWO PROPERTIES THAT MAKE IT EASY TO MISS, and that cost a large triplet sector a 39-minute job
+// and five days of queue time. It is REPLICATED on every device, not row-partitioned, so
+// unlike the panels it must NOT be divided by the partition count — at norb = 222 that is 18.10 GiB
+// on each of 8 GPUs, 145 GiB in aggregate. And it is allocated through DeviceERI/UploadFloats/
+// UploadInts, which use a different device allocator from backend.Alloc, so it is invisible both to
+// the pre-flight estimate and to ADCGO_DEV_ALLOC_TRACE's own accounting; it showed up only as a
+// ~19.4 GiB discrepancy between tracked and driver-reported usage.
+//
+// Computed from norb rather than len(flatERI) because flatERI is built lazily on the first apply,
+// long after a pre-flight check needs the number.
+func (mx *Matrix) MatFreeDeviceBytes() uint64 {
+	if !mx.matFreeSatellite() {
+		return 0
+	}
+	n := uint64(mx.sp.Norb)
+	return n*n*n*n*8 + n*8 + n*4 // ERI + eps (float64) + osym (int32)
+}
+
 // matFreeSupported reports whether the current backend can apply the satellite region
 // matrix-free: a DeviceKernels device (per-scalar CUDA kernel), a row-partitioned backend
 // (PanelScatterAdd, the -mgpu gather-apply-scatter path), or a HostData host (block applier).

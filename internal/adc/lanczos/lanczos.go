@@ -435,7 +435,13 @@ func SolveDense(op DenseOperator, be backend.Backend) Result {
 // cond2 is the returned λ_max/λ_min over the surviving directions — the squared
 // condition number of v, which governs this pass's orthogonality loss. orthBlock uses it
 // to decide whether the second pass is needed at all.
-func blockOrth(be backend.Backend, v backend.BlockView, scratch backend.Vector, deflTol float64) (rank int, r backend.Mat, cond2 float64) {
+// qscratch, when non-nil and long enough, supplies the nrows x rank product panel instead of a fresh
+// device allocation. That allocation is an n x b PANEL — 18.87 GiB per GPU at a large triplet DIP
+// shape — and it is the 5th such panel live at once, which is precisely what exhausted the device in
+// a production run. The caller must pass a buffer whose contents are DEAD and which does not alias v;
+// SolveLowMem's two call sites differ in which of its two scratch panels qualifies, so the choice
+// cannot be made here. nil keeps the original allocate-and-free behaviour.
+func blockOrth(be backend.Backend, v backend.BlockView, scratch backend.Vector, deflTol float64, qscratch backend.Vector) (rank int, r backend.Mat, cond2 float64) {
 	nrows, cols := v.Rows, v.Cols
 	g := backend.BlockView{V: scratch, Rows: cols, Cols: cols, Ld: cols}
 	be.Gemm(true, false, 1, v, v, 0, g) // G = vᵀ v
@@ -480,8 +486,15 @@ func blockOrth(be backend.Backend, v backend.BlockView, scratch backend.Vector, 
 	// scratch panel: cols is small, so this is nrows×rank, never the basis.
 	tmv := be.Upload(tm)
 	defer be.Free(tmv)
-	qbuf := be.Alloc(nrows * rank)
-	defer be.Free(qbuf)
+	// No zeroing needed either way: the Gemm below writes q with beta = 0, so it is fully
+	// overwritten rather than accumulated into.
+	var qbuf backend.Vector
+	if qscratch != nil && qscratch.Len() >= nrows*rank {
+		qbuf = qscratch.Slice(0, nrows*rank)
+	} else {
+		qbuf = be.Alloc(nrows * rank)
+		defer be.Free(qbuf)
+	}
 	q := backend.BlockView{V: qbuf, Rows: nrows, Cols: rank, Ld: nrows}
 	be.Gemm(false, false, 1, v, backend.BlockView{V: tmv, Rows: cols, Cols: rank, Ld: cols}, 0, q)
 	be.Copy(v.ColRange(0, rank).V, qbuf)
@@ -516,9 +529,9 @@ const maxGramCond2 = 1e4
 // equals q·R, with q in v's leading `rank` columns. Since v = q₁R₁ and (after the
 // second projection, which barely moves q₁) q₁ = q₂R₂, the composite is R = R₂·R₁.
 func orthBlock(be backend.Backend, basis, v backend.BlockView, pbuf backend.Vector, ld int,
-	gbuf backend.Vector, deflTol float64) (int, backend.Mat) {
+	gbuf backend.Vector, deflTol float64, qscratch backend.Vector) (int, backend.Mat) {
 	cgs2(be, basis, v, pbuf, ld)
-	rank1, r1, cond2 := blockOrth(be, v, gbuf, deflTol)
+	rank1, r1, cond2 := blockOrth(be, v, gbuf, deflTol, qscratch)
 	if rank1 == 0 {
 		return 0, r1
 	}
@@ -528,7 +541,7 @@ func orthBlock(be backend.Backend, basis, v backend.BlockView, pbuf backend.Vect
 
 	v2 := v.Cut(rank1)
 	cgs2(be, basis, v2, pbuf, ld)
-	rank2, r2, _ := blockOrth(be, v2, gbuf, deflTol)
+	rank2, r2, _ := blockOrth(be, v2, gbuf, deflTol, qscratch)
 	if rank2 == 0 {
 		return 0, backend.NewMat(0, v.Cols)
 	}
@@ -694,7 +707,7 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 			t0 = time.Now()
 			v := backend.BlockView{V: vbuf, Rows: n, Cols: blkSize, Ld: n}
 			be.Copy(vbuf, wbuf)
-			_, rNext = orthBlock(be, basis.Cut(dim), v, pbuf, maxdim, gbuf, opts.DeflTol)
+			_, rNext = orthBlock(be, basis.Cut(dim), v, pbuf, maxdim, gbuf, opts.DeflTol, nil)
 			tm.Orth += time.Since(t0)
 			report(iter, dim, blkSize)
 			break
@@ -705,7 +718,7 @@ func Solve(op Operator, be backend.Backend, opts Options) Result {
 		t0 = time.Now()
 		v := backend.BlockView{V: vbuf, Rows: n, Cols: blkSize, Ld: n}
 		be.Copy(vbuf, wbuf)
-		rank, r := orthBlock(be, basis.Cut(dim), v, pbuf, maxdim, gbuf, opts.DeflTol)
+		rank, r := orthBlock(be, basis.Cut(dim), v, pbuf, maxdim, gbuf, opts.DeflTol, nil)
 		tm.Orth += time.Since(t0)
 
 		if rank == 0 {

@@ -922,17 +922,26 @@ func solveDIPSectorMGPU(subs []backend.Backend, cfg dipConfig, sp *dip.Space, in
 	// sums the real block sizes (and collapses to ~0 when the satellite region is matrix-free);
 	// the operator is replicated across the partitions it touches, so /npart charges each GPU
 	// its share of the panels and an approximate share of the operator.
-	// FIVE panels, not four. Mode B keeps [prev|cur] plus a work panel, but blockOrth allocates one
-	// MORE n x main panel per partition while orthogonalizing, and that allocation is the peak. It is
-	// what melanin job 15195647 died on: the guard below passed on a four-panel estimate of 77.5 GB
-	// against ~86 GB free, then blockOrth asked for 20259985680 bytes — exactly one partition's
-	// n*main*8 — and cudaMalloc returned NULL. Counting it makes the guard refuse cleanly, which is
-	// the entire point of having a guard rather than discovering the limit mid-assembly.
-	panels := 5 * uint64(n) * uint64(main) * 8 // float64 panels
-	perGPU := (panels + mx.OperatorResidentBytes()) / uint64(npart)
+	// FOUR panels: pcBuf (n*2b, holding [prev|cur]) + workBuf + tmpBuf, all allocated up front in
+	// SolveLowMem and held for the whole block loop.
+	//
+	// It was briefly five. blockOrth used to allocate one MORE n x main panel per partition while
+	// orthogonalizing, and that transient was the real peak — two large triplet DIP runs both
+	// died on exactly that allocation (20259985680 bytes = one partition's n*main*8). It no longer
+	// allocates: SolveLowMem's two call sites now lend it whichever of their scratch panels is dead at
+	// that point. Keep this at 4 only while that remains true.
+	panels := 4 * uint64(n) * uint64(main) * 8 // float64 panels
+	// The matrix-free ERI is added OUTSIDE the /npart: it is replicated on every device, not
+	// row-partitioned like the panels and the assembled blocks. Leaving it out is what let a large
+	// triplet sector pass this guard at 96.3 GiB and then die in cudaMalloc at ~126 GiB of a 140 GiB
+	// card — the estimate was missing 18.10 GiB per GPU. See dip.Matrix.MatFreeDeviceBytes.
+	perGPU := (panels+mx.OperatorResidentBytes())/uint64(npart) + mx.MatFreeDeviceBytes()
 	if cfg.profile {
-		fmt.Fprintf(os.Stderr, "dispatch %-18s mgpu n=%d main=%d over %d partition(s), ~%.1f GB/GPU\n",
-			label, n, main, npart, float64(perGPU)/(1<<30))
+		fmt.Fprintf(os.Stderr, "dispatch %-18s mgpu n=%d main=%d over %d partition(s), ~%.1f GB/GPU "+
+			"(panels %.1f + matfree %.1f)\n",
+			label, n, main, npart, float64(perGPU)/(1<<30),
+			float64((panels+mx.OperatorResidentBytes())/uint64(npart))/(1<<30),
+			float64(mx.MatFreeDeviceBytes())/(1<<30))
 	}
 	// Pre-flight guard: the -mgpu path uploads each partition's row-band of the operator plus
 	// its panels on the first apply. If a sub-backend GPU is too small, refuse cleanly here
