@@ -15,7 +15,10 @@ package fano
 //  2. lanczos.JacobiDavidson from each candidate start to a SCREENING residual (1e-3):
 //     enough to tell which converged state carries the most target weight;
 //  3. Jacobi-Davidson again on the winner only, from its vector and its neighbours in the
-//     final search space, down to the hand-over residual (1e-6);
+//     final search space, down to the hand-over residual (1e-6), FOLLOWING the winner's
+//     screened vector by overlap: selecting by target weight there pulled a non-heaviest
+//     branch (He5, 160.38 eV, weight 0.29) onto the heaviest one (0.34) its neighbours
+//     carried, and 22 h converged the wrong state;
 //  4. lanczos.PolishInverse, shifted inverse iteration to the goal, with an overlap guard
 //     against landing on a neighbour.
 // Inverse iteration is handed only a vector JD has taken to 1e-6: from 1e-3 inside a dense
@@ -67,10 +70,12 @@ type InteriorOptions struct {
 	// When charge resonance splits the target character (Ambiguous), each branch is a
 	// different decaying state and has its own width.
 	Branch int
-	// Guess, when set, replaces the dense start: Jacobi-Davidson starts from it and
-	// follows it by overlap (lanczos.JDOptions.Follow) instead of by target weight, so a
-	// branch converged at one transfer scaling is tracked to another. There are then no
-	// alternatives and no ambiguity check.
+	// Guess, when set, picks the candidate instead of Branch: the screened candidate with
+	// the largest overlap with it, so a branch converged at one transfer scaling is found
+	// again at another. The candidates still come from the dense start and are screened by
+	// target weight: following the guess itself through JD from lambda = (1,1) to (0,0)
+	// landed on a state with NO target weight (He5, overlap 0.46), because the guess's
+	// shape changes too much between the two operators.
 	Guess []float64
 	// JD and Polish tune the two stages; Targets and Diag are filled in here.
 	JD     lanczos.JDOptions
@@ -180,30 +185,23 @@ func SelectInterior(qsp Space, op Operator, diag []float64, be backend.Backend, 
 		copy(dst, be.Download(yout))
 	}
 
-	// 1. start vectors: the guess, or the dense start
-	var (
-		startVecs [][]float64
-		startIDs  []int
-	)
+	// 1. start vectors: the dense start
 	if o.Guess != nil {
 		if len(o.Guess) != n {
 			return InteriorResult{}, fmt.Errorf("fano: SelectInterior: the guess has %d rows, the Q space %d",
 				len(o.Guess), n)
 		}
 		if o.Branch != 0 {
-			return InteriorResult{}, fmt.Errorf("fano: SelectInterior: a guess selects its own state; branch %d is meaningless with it", o.Branch)
+			return InteriorResult{}, fmt.Errorf("fano: SelectInterior: a guess selects the candidate; branch %d is meaningless with it", o.Branch)
 		}
-		startVecs, startIDs = [][]float64{o.Guess}, []int{-1}
-		logf("interior: starting from the given guess, followed by overlap")
-	} else {
-		var err error
-		if startVecs, startIDs, err = denseStarts(qsp, n, apply, op, o, logf); err != nil {
-			return InteriorResult{}, err
-		}
+	}
+	startVecs, startIDs, err := denseStarts(qsp, n, apply, op, o, logf)
+	if err != nil {
+		return InteriorResult{}, err
 	}
 
 	jo := o.JD
-	jo.Targets, jo.Diag, jo.Follow = o.Targets, diag, o.Guess
+	jo.Targets, jo.Diag = o.Targets, diag
 	if jo.Log == nil && o.Log != nil {
 		jo.Log = o.Log
 	}
@@ -258,16 +256,39 @@ func SelectInterior(qsp Space, op Operator, diag []float64, be backend.Backend, 
 		return InteriorResult{}, fmt.Errorf("fano: SelectInterior: branch %d requested, %d distinct candidates converged",
 			o.Branch, len(ranked))
 	}
-	best := ranked[o.Branch]
+	rank := o.Branch
+	if o.Guess != nil {
+		// the candidate most like the guess
+		var gg float64
+		for _, v := range o.Guess {
+			gg += v * v
+		}
+		bestOv := -1.0
+		for r, k := range ranked {
+			var c float64
+			for i, v := range outs[k].jd.X {
+				c += v * o.Guess[i]
+			}
+			ov := math.Abs(c) / math.Sqrt(gg)
+			logf("interior: candidate %d overlaps the guess %.4f", outs[k].start, ov)
+			if ov > bestOv {
+				rank, bestOv = r, ov
+			}
+		}
+	}
+	best := ranked[rank]
 	win := outs[best]
-	if o.Branch > 0 {
+	if rank > 0 {
 		logf("interior: branch %d: candidate %d (target weight %.4f; the heaviest has %.4f)",
-			o.Branch, win.start, win.jd.TargetWeight, outs[ranked[0]].jd.TargetWeight)
+			rank, win.start, win.jd.TargetWeight, outs[ranked[0]].jd.TargetWeight)
 	}
 
-	// 3. the selected candidate to the hand-over residual, from its vector and its neighbours
+	// 3. the selected candidate to the hand-over residual, from its vector and its
+	// neighbours, following that vector by overlap so the neighbours cannot pull it onto a
+	// heavier branch
 	to := jo
 	to.Tol = math.Max(o.HandOver, o.Tol)
+	to.Follow = win.jd.X
 	x0s := [][]float64{win.jd.X}
 	near := slices.Clone(win.jd.Ritz)
 	slices.SortFunc(near, func(a, b lanczos.RitzPair) int {
@@ -291,7 +312,7 @@ func SelectInterior(qsp Space, op Operator, diag []float64, be backend.Backend, 
 	default:
 		return InteriorResult{JDIter: win.jd.Iter + jd.Iter}, err
 	}
-	res := InteriorResult{JDIter: win.jd.Iter + jd.Iter, Branch: o.Branch}
+	res := InteriorResult{JDIter: win.jd.Iter + jd.Iter, Branch: rank}
 	for _, rp := range jd.Ritz {
 		if math.Abs(rp.Theta-jd.Theta) > o.AuditWindow {
 			continue
