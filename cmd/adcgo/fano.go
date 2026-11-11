@@ -123,14 +123,26 @@ type FanoDocument struct {
 	// Lambda is the transfer scaling of a lock-in run (-fano-lambda), as given.
 	Lambda string `json:"lambda,omitempty"`
 	// Engine is the width engine when not the eigen path (gauss, shiftinvert, kpm).
-	Engine      string  `json:"engine,omitempty"`
-	States      int     `json:"pseudo_states"`
-	SumGamma    float64 `json:"sum_gamma_hartree2"` // zeroth moment, NOT a width
-	SumRule     float64 `json:"sum_rule_hartree2"`  // 2 pi ||g||^2
-	SumResidual float64 `json:"sum_rule_residual"`  // (rule - sum)/rule
-	DroppedE    int     `json:"dropped_energy"`
-	DroppedW    int     `json:"dropped_weight"`
-	DroppedG    int     `json:"dropped_gamma"`
+	Engine string `json:"engine,omitempty"`
+	// The shift-invert engine's smoothing ladder (KernelDiag): the converged Gaussian
+	// widths, Gamma_eta at each with its standard deviation, the local level spacing they
+	// are measured in, the widths dropped as unconverged, the fitted bias at the smallest
+	// width, and "below"/"above" when the ladder straddles the continuum's edge.
+	SIEta          []float64 `json:"si_eta_hartree,omitempty"`
+	SIDensityMeV   []float64 `json:"si_density_mev,omitempty"`
+	SISigmaMeV     []float64 `json:"si_density_sigma_mev,omitempty"`
+	SILocalSpacing float64   `json:"si_local_spacing_hartree,omitempty"`
+	SIDropped      []float64 `json:"si_dropped_eta_hartree,omitempty"`
+	SIBiasMeV      float64   `json:"si_bias_mev,omitempty"`
+	SIChi2         float64   `json:"si_chi2,omitempty"`
+	SIEdge         string    `json:"si_edge,omitempty"`
+	States         int       `json:"pseudo_states"`
+	SumGamma       float64   `json:"sum_gamma_hartree2"` // zeroth moment, NOT a width
+	SumRule        float64   `json:"sum_rule_hartree2"`  // 2 pi ||g||^2
+	SumResidual    float64   `json:"sum_rule_residual"`  // (rule - sum)/rule
+	DroppedE       int       `json:"dropped_energy"`
+	DroppedW       int       `json:"dropped_weight"`
+	DroppedG       int       `json:"dropped_gamma"`
 
 	// The width.
 	WidthMeV      float64 `json:"width_mev"`
@@ -151,6 +163,10 @@ type FanoDocument struct {
 	StieltjesMaxOrder int   `json:"stieltjes_max_order"`
 	StieltjesOrders   []int `json:"stieltjes_orders_used"`
 	StieltjesLowOrder bool  `json:"stieltjes_low_order,omitempty"`
+	// Gamma at every evaluated order (meV), for comparing the order series against another
+	// code's rather than one averaged number.
+	StieltjesAll      []int     `json:"stieltjes_orders,omitempty"`
+	StieltjesGammaMeV []float64 `json:"stieltjes_gamma_mev,omitempty"`
 	// Orders that fell outside their OWN density grid and so returned a fallback rather
 	// than an interpolation: the crude 0.5 g_1/e_1 estimate below the first midpoint, or
 	// zero above the last. Either one folded into the order average corrupts it, and the
@@ -279,6 +295,7 @@ type fanoConfig struct {
 	stPrec               uint
 	stAverage            stieltjes.AverageMode
 	stWindow             int
+	stOffset             float64 // -stieltjes-offset: 1/E origin below the lowest P energy
 
 	initSite string          // -init-atom, the initially ionized site for channel labels
 	sites    []spectrum.Site // -group
@@ -1143,7 +1160,8 @@ func runFano(d *fcidump.Data, cfg fanoConfig) error {
 // coupling vector and applications of PMP only, by the engine -fano-engine names.
 //
 //	gauss        W-B, Gauss rules of every order from -fano-order Lanczos steps seeded by g
-//	shiftinvert  W-B2, the same on (PMP - sigma)^-1, sigma = E + -fano-si-shift
+//	shiftinvert  W-B2, Lanczos on (PMP - sigma)^-1 (dense LU), sigma = E + -fano-si-shift;
+//	             the resolved measure smoothed by a Gaussian ladder, extrapolated to eta -> 0
 //	kpm          W-C, -fano-order Chebyshev moments with a Jackson kernel
 //
 // None has a final-state cut (the pseudo-continuum is never formed), so the result is
@@ -1184,11 +1202,59 @@ func runFanoEngine(doc *FanoDocument, cfg fanoConfig, fam fanoFamily, ch *choose
 			case "gauss":
 				w, _, err = fano.GaussWidth(apply, g, m, at, cfg.stieltjesOptions())
 			case "shiftinvert":
-				dv := pmx.Diagonal(be)
-				diag := be.Download(dv)
-				be.Free(dv)
-				w, err = fano.ShiftInvertWidth(apply, g, m, at,
-					fano.ShiftInvertOptions{Sigma: at + cfg.siShift, Diag: diag}, cfg.stieltjesOptions())
+				w, err = fano.ShiftInvertWidth(apply, g, m, at, fano.ShiftInvertOptions{Sigma: at + cfg.siShift})
+				if err != nil {
+					return err
+				}
+				kd := w.Kernel
+				fmt.Fprintf(os.Stderr, "adcgo: fano: shift-invert: %d nodes, local spacing %.4g Eh\n",
+					kd.Nodes, kd.LocalSpacing)
+				for j, eta := range kd.Eta {
+					fmt.Fprintf(os.Stderr, "adcgo: fano: shift-invert eta %8.4g Eh (%4.1f spacings): "+
+						"Gamma_eta = %.6g +/- %.3g meV\n", eta, eta/kd.LocalSpacing,
+						kd.Density[j]*fano.HartreeToMeV, kd.DensitySigma[j]*fano.HartreeToMeV)
+					doc.SIDensityMeV = append(doc.SIDensityMeV, kd.Density[j]*fano.HartreeToMeV)
+					doc.SISigmaMeV = append(doc.SISigmaMeV, kd.DensitySigma[j]*fano.HartreeToMeV)
+				}
+				if len(kd.EdgeDropped) > 0 {
+					fmt.Fprintf(os.Stderr, "adcgo: fano: shift-invert: %d wider eta reach past the "+
+						"edge of the coupled pseudo-continuum (dropped)\n", len(kd.EdgeDropped))
+				}
+				if len(kd.Curved) > 0 {
+					fmt.Fprintf(os.Stderr, "adcgo: fano: shift-invert: %d wider eta off the eta^2 "+
+						"line of the narrower ones (dropped)\n", len(kd.Curved))
+				}
+				if len(kd.Dropped) > 0 {
+					fmt.Fprintf(os.Stderr, "adcgo: fano: shift-invert: %d wider eta not converged in "+
+						"the Lanczos order (dropped)\n", len(kd.Dropped))
+				}
+				fmt.Fprintf(os.Stderr, "adcgo: fano: shift-invert: eta -> 0 fit chi2/dof %.3g, "+
+					"bias at the smallest eta %.3g meV\n", kd.Chi2, kd.Bias*fano.HartreeToMeV)
+				doc.SIEta, doc.SILocalSpacing, doc.SIDropped = kd.Eta, kd.LocalSpacing, kd.Dropped
+				doc.SIBiasMeV, doc.SIChi2 = kd.Bias*fano.HartreeToMeV, kd.Chi2
+				switch {
+				case kd.Below && kd.Above:
+					doc.SIEdge = "both"
+				case kd.Below:
+					doc.SIEdge = "below"
+				case kd.Above:
+					doc.SIEdge = "above"
+				}
+				if doc.SIEdge != "" {
+					fmt.Fprintf(os.Stderr, "adcgo: fano: WARNING E_Phi is too close to the %s "+
+						"edge of the coupled pseudo-continuum for 3 smoothing widths: the 3 smallest "+
+						"straddle it and the eta^2 extrapolation does not hold. Compare -fano-engine kpm.\n",
+						doc.SIEdge)
+				}
+				if a := math.Abs(w.Gamma); a > 0 && math.Abs(kd.Bias) > 0.1*a {
+					fmt.Fprintf(os.Stderr, "adcgo: fano: WARNING the eta^2 bias at the smallest "+
+						"eta is %.0f%% of Gamma: Gamma(E) varies on the smoothing scale\n",
+						100*math.Abs(kd.Bias)/a)
+				}
+				if kd.Chi2 > 3 {
+					fmt.Fprintf(os.Stderr, "adcgo: fano: WARNING the eta -> 0 fit has chi2/dof %.3g: "+
+						"Gamma_eta is not quadratic in eta over the ladder\n", kd.Chi2)
+				}
 			case "kpm":
 				lo, hi, e := fano.SpectralBounds(apply, g, min(80, n), 0.05)
 				if e != nil {
@@ -1230,6 +1296,7 @@ func runFanoEngine(doc *FanoDocument, cfg fanoConfig, fam fanoFamily, ch *choose
 				doc.StieltjesMaxOrder = w.Stieltjes.MaxOrder
 				doc.StieltjesOrders = w.Stieltjes.Used
 				doc.StieltjesLowOrder = w.Stieltjes.LowOrder
+				doc.StieltjesAll, doc.StieltjesGammaMeV = orderSeries(w.Stieltjes)
 				doc.StieltjesBelow, doc.StieltjesAbove = w.Stieltjes.Boundary()
 			}
 			return nil
@@ -1253,7 +1320,7 @@ func runFanoEngine(doc *FanoDocument, cfg fanoConfig, fam fanoFamily, ch *choose
 func (cfg fanoConfig) stieltjesOptions() stieltjes.Options {
 	return stieltjes.Options{
 		Prec: cfg.stPrec, MinOrder: cfg.stOrderLo, MaxOrder: cfg.stOrderHi,
-		Average: cfg.stAverage, Window: cfg.stWindow,
+		Average: cfg.stAverage, Window: cfg.stWindow, Offset: cfg.stOffset,
 	}
 }
 
@@ -1283,6 +1350,7 @@ func imageAndClassify(doc *FanoDocument, cfg fanoConfig, psp fano.Space, res lan
 	doc.StieltjesMaxOrder = w.Stieltjes.MaxOrder
 	doc.StieltjesOrders = w.Stieltjes.Used
 	doc.StieltjesLowOrder = w.Stieltjes.LowOrder
+	doc.StieltjesAll, doc.StieltjesGammaMeV = orderSeries(w.Stieltjes)
 	doc.StieltjesBelow, doc.StieltjesAbove = w.Stieltjes.Boundary()
 	lo, hi := ps.Energy[0], ps.Energy[len(ps.Energy)-1]
 	doc.PseudoEMinEV, doc.PseudoEMaxEV = lo*hartreeToEV, hi*hartreeToEV
@@ -1359,6 +1427,16 @@ func newFanoMatrix(ch *chooser, label string, sp *sip.Space, ints *integrals.Sto
 		mx.SetStaticSelfEnergy(cfg.sig)
 	}
 	return mx, nil
+}
+
+// orderSeries is every evaluated order and its Gamma in meV.
+func orderSeries(r *stieltjes.Result) ([]int, []float64) {
+	k := make([]int, len(r.Orders))
+	g := make([]float64, len(r.Orders))
+	for i, o := range r.Orders {
+		k[i], g[i] = o.Order, o.Gamma*fano.HartreeToMeV
+	}
+	return k, g
 }
 
 // fanoMatrix is what the Fano driver needs of an ADC matrix: the operator every solver

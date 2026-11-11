@@ -3,17 +3,18 @@ package fano
 // gauss.go — width engines that need no eigenvector of PHP. The eigen path (Widths +
 // ImageWidth) projects the coupling vector g onto the Ritz vectors of PHP, which needs
 // lanczos.Options.WantFull over P: fine for SIP, infeasible once P holds a (k+2)h2p relaxation class (1e6-1e7 rows).
-// All three engines below work from applications of PHP to vectors only, and all three
-// feed the same Stieltjes imaging:
+// The engines below work from applications of PHP to vectors only; W-B feeds Stieltjes
+// imaging, W-B2 and W-C smooth the measure with a kernel instead:
 //
 //   - W-B, GaussWidth: an m-step Lanczos run seeded by g gives the Gauss rule of every
 //     order k <= m of mu(E) = sum_j |<psi_j|g>|^2 delta(E - E_j) (lanczos.SolveSeeded);
 //     the rules go to stieltjes.ImageRules with weights 2 pi |.|^2, the gamma convention
 //     of Widths.
-//   - W-B2, ShiftInvertWidth: the same on (PHP - sigma)^-1 with sigma next to E_Phi, each
-//     application a MINRES solve. The Gauss nodes mu_i map back to E_i = sigma + 1/mu_i
-//     and crowd around sigma, which is where Gamma is evaluated; the weights are those of
-//     the same measure.
+//   - W-B2, ShiftInvertWidth: Lanczos on (PHP - sigma)^-1 with sigma next to E_Phi, PHP -
+//     sigma LU-factorized once (dense P only). The Gauss nodes mu_i map back to
+//     E_i = sigma + 1/mu_i and resolve the individual pseudo-continuum states around sigma;
+//     that resolved measure is NOT Stieltjes-imaged but smoothed by a ladder of Gaussians
+//     and extrapolated to zero width (see ShiftInvertWidth).
 //   - W-C, KPMWidth: the kernel polynomial method, Chebyshev moments of mu with a Jackson
 //     kernel (Weisse et al., Rev. Mod. Phys. 78, 275 (2006)). No quadrature at all, so an
 //     independent check of the imaged density, at the kernel's resolution.
@@ -29,7 +30,9 @@ import (
 	"sort"
 
 	"github.com/leiaSQ/ADCgo/internal/adc/lanczos"
+	"github.com/leiaSQ/ADCgo/internal/adc/parallel"
 	"github.com/leiaSQ/ADCgo/internal/adc/stieltjes"
+	"gonum.org/v1/gonum/mat"
 )
 
 // GaussRules turns a seeded Lanczos run into the Gauss rules of orders lo..hi (clamped to
@@ -75,49 +78,245 @@ func GaussWidth(apply func(dst, src []float64), g []float64, m int, at float64,
 	return newWidth(r), sr, nil
 }
 
-// ShiftInvertOptions controls W-B2's inner solves.
+// ShiftInvertOptions controls W-B2.
 type ShiftInvertOptions struct {
-	Sigma    float64   // the shift, next to (not on) E_Phi
-	Diag     []float64 // diag(PHP), for the MINRES preconditioner
-	InnerTol float64   // MINRES relative tolerance (default 1e-12)
-	Inner    int       // MINRES iteration cap (default 2000)
+	Sigma float64 // the shift, next to (not on) E_Phi
+	// DenseMax is the largest PHP the engine accepts (default 8192 rows): PHP - sigma is
+	// LU-factorized once. An iterative inner solve is no alternative, because sigma sits
+	// inside the pseudo-continuum, PHP - sigma has eigenvalues far below the level spacing,
+	// and MINRES runs to its cap on every application (6 h on 4392 rows, Ne2 C1).
+	DenseMax int
+	// WeightCut drops rule nodes whose weight is below WeightCut ||g||^2 (default 1e-12;
+	// < 0 keeps every node). (PHP - sigma)^-1 amplifies the rounding-level components of
+	// states g does not couple to (other irreps of a C1 run, degenerate partners) by
+	// 1/|E - sigma|, so they surface as nodes of weight 1e-36 to 1e-8 next to sigma; their
+	// degenerate copies collide with coupled nodes. Coupled nodes near sigma weigh
+	// Gamma Delta / (2 pi ||g||^2), orders of magnitude above the cut.
+	WeightCut float64
+	// EtaSpacings is the Gaussian smoothing ladder in units of the local level spacing
+	// (default 4 to 256). Widths below a few spacings are dominated by the fluctuation of
+	// the individual gamma_i, widths on the scale of Gamma(E)'s own variation by its
+	// curvature; the fit keeps the widths that lie on an eta^2 line and extrapolates it
+	// to eta -> 0.
+	EtaSpacings []float64
+	// LocalNodes is how many nodes nearest E_Phi set the local spacing (default 40).
+	LocalNodes int
 }
 
-// ShiftInvertWidth is W-B2: Gamma(at) from m Lanczos steps of (PHP - sigma)^-1 seeded
-// by g, the nodes mapped back to energies.
-func ShiftInvertWidth(apply func(dst, src []float64), g []float64, m int, at float64,
-	so ShiftInvertOptions, opts stieltjes.Options) (Width, error) {
+// KernelDiag is W-B2's record of the smoothing and the extrapolation.
+type KernelDiag struct {
+	Sigma        float64   // the shift (hartree)
+	Nodes        int       // nodes of the highest-order rule after the weight cut and merging
+	LocalSpacing float64   // mean spacing of the LocalNodes nodes nearest E_Phi (hartree)
+	Eta          []float64 // the converged smoothing widths used (hartree)
+	Density      []float64 // Gamma_eta(E_Phi) at each (hartree)
+	DensitySigma []float64 // its kernel-estimator standard deviation (hartree)
+	Dropped      []float64 // ladder widths dropped: not converged in the Lanczos order
+	EdgeDropped  []float64 // ladder widths dropped: 3 eta reaches past the lowest or highest node
+	Curved       []float64 // ladder widths dropped: off the eta^2 line fitted to the narrower ones
+	Bias         float64   // fitted b eta_min^2, the extrapolation's size at the smallest eta
+	Chi2         float64   // reduced chi^2 of the a + b eta^2 fit (correlated points: a guide)
+	// Below / Above: fewer than 3 ladder widths fit between E_Phi and the lowest / highest
+	// node (a threshold), so the 3 smallest were used although their Gaussians straddle the
+	// edge of the coupled pseudo-continuum, where the eta^2 law fails.
+	Below, Above bool
+}
 
-	if len(so.Diag) != len(g) {
-		return Width{}, fmt.Errorf("fano: ShiftInvertWidth needs the diagonal (%d rows)", len(g))
+// shiftedLU builds PHP - sigma column by column from apply (symmetrized, so the factor is
+// that of the operator's symmetric part) and LU-factorizes it.
+func shiftedLU(apply func(dst, src []float64), n int, sigma float64) (*mat.LU, error) {
+	A := make([]float64, n*n) // column c of PHP in row c (PHP is symmetric)
+	e := make([]float64, n)
+	for c := range n {
+		clear(e)
+		e[c] = 1
+		apply(A[c*n:(c+1)*n], e)
 	}
-	if so.InnerTol <= 0 {
-		so.InnerTol = 1e-12
+	S := mat.NewDense(n, n, nil)
+	parallel.Chunks(n, parallel.ChunkWorkers(n), func(_, lo, hi int) {
+		for r := lo; r < hi; r++ {
+			for c := range n {
+				S.Set(r, c, 0.5*(A[r*n+c]+A[c*n+r]))
+			}
+			S.Set(r, r, S.At(r, r)-sigma)
+		}
+	})
+	var lu mat.LU
+	lu.Factorize(S)
+	// LogDet, not Det: the product of thousands of pivots underflows for a regular matrix
+	if ld, _ := lu.LogDet(); math.IsInf(ld, -1) {
+		return nil, fmt.Errorf("fano: PHP - sigma is singular at sigma %.8f; change -fano-si-shift", sigma)
 	}
-	if so.Inner <= 0 {
-		so.Inner = 2000
+	return &lu, nil
+}
+
+// shiftInvertNodes is the k-point Gauss rule of the shift-inverted measure mapped back to
+// energies E = sigma + 1/mu, ascending, weights 2 pi |.|^2; nodes below cut ||g||^2 are
+// dropped and coincident ones merged.
+func shiftInvertNodes(sr lanczos.SeededResult, k int, sigma, cut float64) (e, w []float64, err error) {
+	mu, wt, err := sr.GaussRule(k)
+	if err != nil {
+		return nil, nil, err
+	}
+	type node struct{ e, w float64 }
+	nodes := make([]node, 0, k)
+	for i := range mu {
+		if mu[i] == 0 {
+			continue // a node at infinite energy carries no density near sigma
+		}
+		if wt[i] < cut*sr.Norm2 {
+			continue // an uncoupled state lifted out of rounding (WeightCut)
+		}
+		nodes = append(nodes, node{sigma + 1/mu[i], 2 * math.Pi * wt[i]})
+	}
+	sort.Slice(nodes, func(a, b int) bool { return nodes[a].e < nodes[b].e })
+	for _, nd := range nodes {
+		// 1/mu loses the digits that separate nodes far from sigma: merge coincident ones
+		if j := len(e) - 1; j >= 0 && nd.e <= e[j] {
+			w[j] += nd.w
+			continue
+		}
+		e, w = append(e, nd.e), append(w, nd.w)
+	}
+	return e, w, nil
+}
+
+// gaussKernel is the normalized Gaussian of standard deviation eta at x.
+func gaussKernel(x, eta float64) float64 {
+	return math.Exp(-0.5*x*x/(eta*eta)) / (eta * math.Sqrt(2*math.Pi))
+}
+
+// kernelDensity is Gamma_eta(at) = sum_i w_i G_eta(at - e_i).
+func kernelDensity(e, w []float64, at, eta float64) float64 {
+	var s float64
+	for i := range e {
+		s += w[i] * gaussKernel(at-e[i], eta)
+	}
+	return s
+}
+
+// kernelVariance is the variance of the linear estimator sum_i w_i K_i: the w_i
+// fluctuate state to state about their local mean wloc_i (the Porter-Thomas-like scatter
+// of a discretized continuum), so var = sum_i (w_i - wloc_i)^2 K_i^2.
+func kernelVariance(w, K, wloc []float64) float64 {
+	var v float64
+	for i := range w {
+		d := w[i] - wloc[i]
+		v += d * d * K[i] * K[i]
+	}
+	return v
+}
+
+// localMeans is each node's neighbours' kernel-weighted mean weight at scale h, the node
+// itself excluded: a smooth coupling then has (almost) no scatter about it, and a
+// fluctuating one keeps its full scatter.
+func localMeans(e, w []float64, h float64) []float64 {
+	out := make([]float64, len(e))
+	parallel.Chunks(len(e), parallel.ChunkWorkers(len(e)), func(_, lo, hi int) {
+		for i := lo; i < hi; i++ {
+			var sw, sk float64
+			for k := range e {
+				if k == i {
+					continue
+				}
+				g := gaussKernel(e[i]-e[k], h)
+				sw += w[k] * g
+				sk += g
+			}
+			if sk > 0 {
+				out[i] = sw / sk
+			} else {
+				out[i] = w[i]
+			}
+		}
+	})
+	return out
+}
+
+// fitEta2 is the weighted least-squares line rho = a + b x (x = eta^2, weights 1/v) and
+// the coefficients with a = sum_j c_j rho_j and b = sum_j d_j rho_j. The weights are the
+// diagonal only: the rho_j of neighbouring widths share most of their nodes, and a
+// generalized fit under that nearly singular covariance extrapolates past its data (on
+// Porter-Thomas couplings it biased Gamma 15% low where this is unbiased to 5%). The
+// correlations enter the error bar instead, through the exact kernel of a.
+func fitEta2(xs, ys, vs []float64) (a, b float64, c, d []float64) {
+	var S, Sx, Sxx float64
+	for j := range xs {
+		S += 1 / vs[j]
+		Sx += xs[j] / vs[j]
+		Sxx += xs[j] * xs[j] / vs[j]
+	}
+	D := S*Sxx - Sx*Sx
+	c = make([]float64, len(xs))
+	d = make([]float64, len(xs))
+	for j := range xs {
+		c[j] = (Sxx - Sx*xs[j]) / (vs[j] * D)
+		d[j] = (S*xs[j] - Sx) / (vs[j] * D)
+		a += c[j] * ys[j]
+		b += d[j] * ys[j]
+	}
+	return a, b, c, d
+}
+
+// localSpacing is the mean spacing of the nloc nodes nearest at.
+func localSpacing(e []float64, at float64, nloc int) float64 {
+	near := make([]int, len(e))
+	for i := range near {
+		near[i] = i
+	}
+	sort.Slice(near, func(a, b int) bool { return math.Abs(e[near[a]]-at) < math.Abs(e[near[b]]-at) })
+	near = near[:min(nloc, len(near))]
+	lo, hi := math.Inf(1), math.Inf(-1)
+	for _, i := range near {
+		lo, hi = math.Min(lo, e[i]), math.Max(hi, e[i])
+	}
+	return (hi - lo) / float64(len(near)-1)
+}
+
+// ShiftInvertWidth is W-B2: Gamma(at) from m Lanczos steps of (PHP - sigma)^-1 seeded by
+// g, PHP - sigma LU-factorized once.
+//
+// Near sigma the shift-inverted rules converge onto the individual pseudo-continuum
+// states, so they are NOT Stieltjes-imaged: the midpoint density of a resolved discrete
+// spectrum is the coupling of whichever state pair brackets E_Phi, and the per-state
+// gamma_i of a real continuum scatter by orders of magnitude (Ne2 C1: 0.12 meV against
+// 3.9). Instead the resolved measure is smoothed with a Gaussian of width eta, a ladder of
+// eta from a few to tens of local level spacings, and Gamma_eta = Gamma + b eta^2 + O(eta^4)
+// is extrapolated to eta -> 0. A ladder width counts only if the rules of order 3m/4 and m
+// agree on it within its statistical error (the Gaussian must not reach unconverged nodes).
+// The error bar is the extrapolated estimator's own variance (the fit is linear in the
+// node weights, so its kernel is exact, correlations included) plus the fitted bias at the
+// smallest eta.
+func ShiftInvertWidth(apply func(dst, src []float64), g []float64, m int, at float64,
+	so ShiftInvertOptions) (Width, error) {
+
+	n := len(g)
+	if so.DenseMax == 0 {
+		so.DenseMax = 8192
+	}
+	if n > so.DenseMax {
+		return Width{}, fmt.Errorf("fano: shift-invert needs PHP factorized directly, and %d rows "+
+			"exceed DenseMax %d; use -fano-engine kpm", n, so.DenseMax)
+	}
+	if so.WeightCut == 0 {
+		so.WeightCut = 1e-12
+	}
+	if len(so.EtaSpacings) == 0 {
+		so.EtaSpacings = []float64{4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256}
+	}
+	if so.LocalNodes <= 0 {
+		so.LocalNodes = 40
 	}
 	sigma := so.Sigma
-	shifted := func(dst, src []float64) {
-		apply(dst, src)
-		for i := range dst {
-			dst[i] -= sigma * src[i]
-		}
-	}
-	pre := func(dst, src []float64) {
-		for i := range dst {
-			dst[i] = src[i] / (math.Abs(so.Diag[i]-sigma) + 1e-3)
-		}
+	lu, err := shiftedLU(apply, n, sigma)
+	if err != nil {
+		return Width{}, err
 	}
 	var failed error
 	inv := func(dst, src []float64) {
-		x, info := lanczos.Minres(shifted, src, nil, lanczos.MinresOptions{
-			RTol: so.InnerTol, MaxIter: so.Inner, Precond: pre})
-		if !info.Converged && failed == nil {
-			failed = fmt.Errorf("fano: shift-invert inner solve stopped at relative residual %.1e "+
-				"after %d iterations (sigma %.8f)", info.RelResid, info.Iter, sigma)
+		if err := lu.SolveVecTo(mat.NewVecDense(n, dst), false, mat.NewVecDense(n, src)); err != nil && failed == nil {
+			failed = fmt.Errorf("fano: shift-invert direct solve at sigma %.8f: %w", sigma, err)
 		}
-		copy(dst, x)
 	}
 	sr, err := lanczos.SolveSeeded(inv, g, m)
 	if err != nil {
@@ -126,39 +325,169 @@ func ShiftInvertWidth(apply func(dst, src []float64), g []float64, m int, at flo
 	if failed != nil {
 		return Width{}, failed
 	}
-	lo, hi := max(opts.MinOrder, 2), opts.MaxOrder
-	if hi <= 0 || hi > sr.Steps() {
-		hi = sr.Steps()
+	top := sr.Steps()
+	if top < 8 {
+		return Width{}, fmt.Errorf("fano: shift-invert needs at least 8 Lanczos steps, has %d", top)
 	}
-	var rules []stieltjes.Rule
-	for k := lo; k <= hi; k++ {
-		mu, w, err := sr.GaussRule(k)
-		if err != nil {
-			return Width{}, err
-		}
-		type node struct{ e, w float64 }
-		nodes := make([]node, 0, k)
-		for i := range mu {
-			if mu[i] == 0 {
-				continue // a node at infinite energy carries no density near sigma
-			}
-			nodes = append(nodes, node{sigma + 1/mu[i], 2 * math.Pi * w[i]})
-		}
-		sort.Slice(nodes, func(a, b int) bool { return nodes[a].e < nodes[b].e })
-		r := stieltjes.Rule{Energy: make([]float64, len(nodes)), Weight: make([]float64, len(nodes))}
-		for i, nd := range nodes {
-			r.Energy[i], r.Weight[i] = nd.e, nd.w
-		}
-		rules = append(rules, r)
-	}
-	if len(rules) == 0 {
-		return Width{}, fmt.Errorf("fano: %d shift-invert steps give no rule of order >= %d", sr.Steps(), lo)
-	}
-	r, err := stieltjes.ImageRules(rules, at, opts)
+	e, w, err := shiftInvertNodes(sr, top, sigma, so.WeightCut)
 	if err != nil {
 		return Width{}, err
 	}
-	return newWidth(r), nil
+	ePrev, wPrev, err := shiftInvertNodes(sr, 3*top/4, sigma, so.WeightCut)
+	if err != nil {
+		return Width{}, err
+	}
+	if len(e) < 3 {
+		return Width{}, fmt.Errorf("fano: shift-invert kept %d nodes of %d; the coupling is "+
+			"below the weight cut everywhere", len(e), top)
+	}
+	diag := &KernelDiag{Sigma: sigma, Nodes: len(e)}
+
+	// local spacing and scatter. Rounding nodes above WeightCut can still sit between
+	// coupled ones; next to their neighbours they weigh < 1e-6 of the local mean (a
+	// Porter-Thomas weight does with probability 8e-4) and would fake both a finer spacing
+	// and a large scatter, so they leave before either is measured.
+	diag.LocalSpacing = localSpacing(e, at, so.LocalNodes)
+	if !(diag.LocalSpacing > 0) {
+		return Width{}, fmt.Errorf("fano: shift-invert found no level spacing near %.8f", at)
+	}
+	// A coupled state with an exactly degenerate uncoupled partner comes back as two nodes a
+	// rounding error apart sharing its weight; one node at the kernel's resolution.
+	keep := 0
+	for i := range e {
+		if keep > 0 && e[i]-e[keep-1] < 1e-3*diag.LocalSpacing {
+			w[keep-1] += w[i]
+			continue
+		}
+		e[keep], w[keep] = e[i], w[i]
+		keep++
+	}
+	e, w = e[:keep], w[:keep]
+	wloc := localMeans(e, w, 4*diag.LocalSpacing)
+	keep = 0
+	for i := range e {
+		if w[i] >= 1e-6*wloc[i] {
+			e[keep], w[keep] = e[i], w[i]
+			keep++
+		}
+	}
+	e, w = e[:keep], w[:keep]
+	diag.Nodes = len(e)
+	if len(e) < 3 {
+		return Width{}, fmt.Errorf("fano: shift-invert kept %d coupled nodes", len(e))
+	}
+	diag.LocalSpacing = localSpacing(e, at, so.LocalNodes)
+	if !(diag.LocalSpacing > 0) {
+		return Width{}, fmt.Errorf("fano: shift-invert found no level spacing near %.8f", at)
+	}
+	// each node's scatter is measured against its neighbours' mean over 16 spacings: wide
+	// enough that a run of weak states (a local hole in the coupling) does not pull the
+	// mean down with it and hide its own scatter, narrow enough that a smooth Gamma(E)
+	// leaves almost none
+	wloc = localMeans(e, w, 16*diag.LocalSpacing)
+
+	// Gamma(E) is not smooth at a threshold: a Gaussian that reaches past the lowest or
+	// highest node is excluded, unless that leaves fewer than 3 widths
+	ladder := make([]float64, 0, len(so.EtaSpacings))
+	for _, f := range so.EtaSpacings {
+		eta := f * diag.LocalSpacing
+		if at-3*eta < e[0] || at+3*eta > e[len(e)-1] {
+			diag.EdgeDropped = append(diag.EdgeDropped, eta)
+			continue
+		}
+		ladder = append(ladder, eta)
+	}
+	if len(ladder) < 3 {
+		ladder = ladder[:0]
+		for _, f := range so.EtaSpacings[:min(3, len(so.EtaSpacings))] {
+			ladder = append(ladder, f*diag.LocalSpacing)
+		}
+		diag.EdgeDropped = nil
+		diag.Below = at-3*ladder[len(ladder)-1] < e[0]
+		diag.Above = at+3*ladder[len(ladder)-1] > e[len(e)-1]
+	}
+
+	K := make([]float64, len(e))
+	var xs, ys, vs []float64
+	var G [][]float64 // G[j][i] = G_eta_j(at - e_i) for the converged widths
+	for _, eta := range ladder {
+		Kj := make([]float64, len(e))
+		var rho float64
+		for i := range e {
+			Kj[i] = gaussKernel(at-e[i], eta)
+			rho += w[i] * Kj[i]
+		}
+		v := kernelVariance(w, Kj, wloc)
+		if math.Abs(rho-kernelDensity(ePrev, wPrev, at, eta)) > math.Max(math.Sqrt(v), 1e-6*math.Abs(rho)) {
+			diag.Dropped = append(diag.Dropped, eta)
+			continue
+		}
+		G = append(G, Kj)
+		xs, ys = append(xs, eta*eta), append(ys, rho)
+		vs = append(vs, math.Max(v, 1e-24*rho*rho+1e-300))
+	}
+	if len(xs) < 3 {
+		return Width{}, fmt.Errorf("fano: shift-invert converged on %d smoothing widths of %d "+
+			"(%d steps, %d nodes, local spacing %.3g Eh); raise -fano-order", len(xs),
+			len(ladder), top, len(e), diag.LocalSpacing)
+	}
+
+	// combo is the kernel of sum_j coef_j rho_j over the first len(coef) widths
+	combo := func(coef []float64) []float64 {
+		out := make([]float64, len(e))
+		for j, cj := range coef {
+			for i := range out {
+				out[i] += cj * G[j][i]
+			}
+		}
+		return out
+	}
+
+	// grow the fit from the 3 narrowest widths while each wider one lies on the line
+	// within 2 sigma of its deviation (rho_j - a - b x_j is linear in the node weights, so
+	// its variance is exact, correlations between the widths included); past that,
+	// O(eta^4) — the scale on which Gamma(E) itself varies — is resolved
+	use := 3
+	for ; use < len(xs); use++ {
+		a, b, c, d := fitEta2(xs[:use], ys[:use], vs[:use])
+		coef := make([]float64, use)
+		for k := range coef {
+			coef[k] = -(c[k] + xs[use]*d[k])
+		}
+		Kd := combo(coef)
+		for i := range Kd {
+			Kd[i] += G[use][i]
+		}
+		dev := ys[use] - a - b*xs[use]
+		if math.Abs(dev) > 2*math.Sqrt(kernelVariance(w, Kd, wloc))+1e-9*math.Abs(ys[use]) {
+			break
+		}
+	}
+	for j := use; j < len(xs); j++ {
+		diag.Curved = append(diag.Curved, math.Sqrt(xs[j]))
+	}
+	xs, ys, vs = xs[:use], ys[:use], vs[:use]
+	for j := range xs {
+		diag.Eta = append(diag.Eta, math.Sqrt(xs[j]))
+		diag.Density = append(diag.Density, ys[j])
+		diag.DensitySigma = append(diag.DensitySigma, math.Sqrt(vs[j]))
+	}
+	a, b, c, _ := fitEta2(xs, ys, vs)
+	for j := range xs {
+		r := ys[j] - a - b*xs[j]
+		diag.Chi2 += r * r / vs[j]
+	}
+	if use > 2 {
+		diag.Chi2 /= float64(use - 2)
+	}
+	diag.Bias = b * xs[0]
+
+	// the extrapolated estimator's kernel K_i = sum_j c_j G_eta_j(at - e_i)
+	K = combo(c)
+	sigmaA := math.Sqrt(kernelVariance(w, K, wloc) + diag.Bias*diag.Bias)
+	out := NewWidth(a, sigmaA)
+	out.Kernel = diag
+	return out, nil
 }
 
 // SpectralBounds estimates [lo, hi] enclosing PHP's spectrum from a short seeded Lanczos

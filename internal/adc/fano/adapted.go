@@ -104,6 +104,88 @@ func NewAdapted(n int, blocks []AdaptedBlock) (*Adapted, error) {
 // Size is the dimension of the parent space.
 func (a *Adapted) Size() int { return a.n }
 
+// Support returns the smallest ascending row set containing rows that every block of T
+// (inner and outer) either covers whole or misses. T maps the span of those unit vectors
+// onto itself, so S^T T^T M T S needs only M on that set: the parent's sub-block there.
+// For a scheme B P space that is the 2h1p class, a few thousand rows of millions.
+func (a *Adapted) Support(rows []int) []int {
+	link := make([]int, a.n) // union-find over rows joined by a common block
+	for i := range link {
+		link[i] = i
+	}
+	find := func(x int) int {
+		for link[x] != x {
+			link[x] = link[link[x]]
+			x = link[x]
+		}
+		return x
+	}
+	for t := a; t != nil; t = t.outer {
+		for _, bl := range t.blocks {
+			r0 := find(bl.Rows[0])
+			for _, r := range bl.Rows[1:] {
+				if rr := find(r); rr != r0 {
+					link[rr] = r0
+				}
+			}
+		}
+	}
+	want := make(map[int]bool, len(rows))
+	for _, r := range rows {
+		want[find(r)] = true
+	}
+	var out []int
+	for r := range a.n {
+		if want[find(r)] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// Restrict returns T on the rows u (ascending, closed under every block as Support
+// returns them), renumbered 0..len(u)-1 in u's order.
+func (a *Adapted) Restrict(u []int) (*Adapted, error) {
+	pos := make(map[int]int, len(u))
+	for i, r := range u {
+		pos[r] = i
+	}
+	one := func(t *Adapted) (*Adapted, error) {
+		var blocks []AdaptedBlock
+		for b, bl := range t.blocks {
+			in := 0
+			for _, r := range bl.Rows {
+				if _, ok := pos[r]; ok {
+					in++
+				}
+			}
+			switch in {
+			case 0:
+				continue
+			case len(bl.Rows):
+			default:
+				return nil, fmt.Errorf("fano: adapted block %d is split by the restriction (%d of %d rows)",
+					b, in, len(bl.Rows))
+			}
+			rows := make([]int, len(bl.Rows))
+			for i, r := range bl.Rows {
+				rows[i] = pos[r]
+			}
+			blocks = append(blocks, AdaptedBlock{Rows: rows, U: bl.U, Values: bl.Values})
+		}
+		return &Adapted{n: len(u), blocks: blocks}, nil
+	}
+	inner, err := one(a)
+	if err != nil || a.outer == nil {
+		return inner, err
+	}
+	outer, err := one(a.outer)
+	if err != nil {
+		return nil, err
+	}
+	return Compose(outer, inner)
+}
+
 // Blocks returns the blocks.
 func (a *Adapted) Blocks() []AdaptedBlock { return a.blocks }
 

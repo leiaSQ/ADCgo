@@ -412,3 +412,34 @@ func TestGridSamplesTheDensity(t *testing.T) {
 	t.Logf("the imaged density integrates to %.6g over [%.4g, %.4g]",
 		area, r.Grid[0], r.Grid[len(r.Grid)-1])
 }
+
+// TestOffsetOrigin: moving the 1/E origin below the spectrum (Options.Offset, Fano-ADC22's
+// convention) must recover the density of a spectrum sitting far from zero, where the
+// absolute origin stalls at a low order (here 20 orders and an 18% error, against 58 and
+// 2%), and must report the sampled grid in the input's energies.
+func TestOffsetOrigin(t *testing.T) {
+	f := lorentzian(4.0, 0.6)
+	es, gs := sample(f, 2.5, 8.0, 400)
+	abs, err := Image(es, gs, 3.5, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	off, err := Image(es, gs, 3.5, Options{Offset: 0.5, GridPoints: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relAbs := math.Abs(abs.Gamma-f(3.5)) / f(3.5)
+	relOff := math.Abs(off.Gamma-f(3.5)) / f(3.5)
+	if relOff > 0.05 || relOff > relAbs {
+		t.Errorf("offset Gamma %.6g is %.1f%% off (absolute origin %.1f%%), exact %.6g",
+			off.Gamma, 100*relOff, 100*relAbs, f(3.5))
+	}
+	if off.MaxOrder < abs.MaxOrder {
+		t.Errorf("offset origin reaches order %d, absolute %d", off.MaxOrder, abs.MaxOrder)
+	}
+	if off.Grid[0] < 2.5 || off.Grid[len(off.Grid)-1] > 8.0 {
+		t.Errorf("grid [%.4g, %.4g] is not in the input's energies [2.5, 8]", off.Grid[0], off.Grid[len(off.Grid)-1])
+	}
+	t.Logf("max order: absolute %d, offset 0.5 %d; Gamma %.5g / %.5g (exact %.5g)",
+		abs.MaxOrder, off.MaxOrder, abs.Gamma, off.Gamma, f(3.5))
+}

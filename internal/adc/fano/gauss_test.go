@@ -2,6 +2,7 @@ package fano
 
 import (
 	"math"
+	"math/rand/v2"
 	"sort"
 	"testing"
 
@@ -50,8 +51,7 @@ func TestWidthEnginesRecoverLorentzian(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wb2, err := ShiftInvertWidth(m.apply, m.g, 60, m.e0,
-			ShiftInvertOptions{Sigma: m.e0 + 1e-4, Diag: m.e}, stieltjes.Options{MaxOrder: 60})
+		wb2, err := ShiftInvertWidth(m.apply, m.g, 200, m.e0, ShiftInvertOptions{Sigma: m.e0 + 1e-4})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -86,6 +86,141 @@ func TestWidthEnginesRecoverLorentzian(t *testing.T) {
 				t.Errorf("Gamma0 %.0e: %s gives %.6e, relative error %.2e", g0, name, x, rel(x))
 			}
 		}
+	}
+}
+
+// TestShiftInvertDensePHP: the Lorentzian model plus states g does not couple to — an
+// exact degenerate copy of every level and one level midway between each pair, as a C1
+// run has for other irreps and degenerate partners — rotated by a Householder reflection
+// H = 1 - 2 v v^T, so PHP is dense and sigma sits inside its continuum. MINRES with a
+// Jacobi preconditioner runs to its cap there on every application; the direct LU path
+// must recover the width, which neither the rotation nor the uncoupled states change.
+// (PHP - sigma)^-1 lifts the uncoupled states out of rounding: without the weight cut in
+// ShiftInvertWidth they enter the rules as zero-weight nodes that empty the density at
+// sigma, and their degenerate copies collide with the coupled nodes.
+func TestShiftInvertDensePHP(t *testing.T) {
+	const nc = 1000
+	lm := newLorentzModel(nc, 1e-3)
+	m := lorentzModel{e0: lm.e0, w: lm.w, gamma0: lm.gamma0}
+	m.e = append(append([]float64(nil), lm.e...), lm.e...)
+	m.g = append(append([]float64(nil), lm.g...), make([]float64, nc)...)
+	for j := range nc - 1 {
+		m.e = append(m.e, 0.5*(lm.e[j]+lm.e[j+1]))
+		m.g = append(m.g, 0)
+	}
+	n := len(m.e)
+	v := make([]float64, n)
+	var nv float64
+	for i := range v {
+		v[i] = math.Sin(0.37*float64(i)) + 0.5
+		nv += v[i] * v[i]
+	}
+	for i := range v {
+		v[i] /= math.Sqrt(nv)
+	}
+	reflect := func(x []float64) {
+		var d float64
+		for i := range x {
+			d += v[i] * x[i]
+		}
+		for i := range x {
+			x[i] -= 2 * d * v[i]
+		}
+	}
+	tmp := make([]float64, n)
+	apply := func(dst, src []float64) {
+		copy(tmp, src)
+		reflect(tmp)
+		m.apply(dst, tmp)
+		reflect(dst)
+	}
+	g := append([]float64(nil), m.g...)
+	reflect(g)
+	// 200 and 400 steps: the production orders, where the uncoupled nodes are most numerous
+	for _, steps := range []int{200, 400} {
+		w, err := ShiftInvertWidth(apply, g, steps, m.e0, ShiftInvertOptions{Sigma: m.e0 + 1e-4})
+		if err != nil {
+			t.Fatalf("%d steps: %v", steps, err)
+		}
+		rel := math.Abs(w.Gamma-m.gamma0) / m.gamma0
+		t.Logf("dense PHP (%d rows, %d coupled), %d steps: W-B2 %.6e, exact %.6e, rel err %.1e",
+			n, nc, steps, w.Gamma, m.gamma0, rel)
+		if rel > 1e-2 {
+			t.Errorf("dense PHP, %d steps: W-B2 gives %.6e, relative error %.2e", steps, w.Gamma, rel)
+		}
+	}
+}
+
+// TestShiftInvertFluctuatingCoupling: a discretized continuum whose per-state couplings
+// scatter like a real pseudo-continuum's, |g_j|^2 = Gamma(E_j) delta / (2 pi) chi_j with
+// chi_j = z_j^2, z_j standard normal (Porter-Thomas, mean 1), and the two states that
+// bracket E_Phi made almost uncoupled. Stieltjes-imaging the shift-inverted rules returned
+// those two states' coupling, ~1e-6 of the width; the smoothed, extrapolated engine must
+// recover the smooth Gamma(E_Phi) within its own error bar, and that bar must be honest
+// over seeds. The bounds allow for what the model builds in: chi^2_1 weights are heavy-
+// tailed, so a sum over the few states of the narrowest Gaussians is not normal, and the
+// uncoupled pair is a real hole at E_Phi that pulls the eta -> 0 limit down (by ~5% on
+// average over seeds).
+func TestShiftInvertFluctuatingCoupling(t *testing.T) {
+	const (
+		n      = 1500
+		e0, w0 = 2.0, 0.8
+		gamma0 = 1e-3
+	)
+	lo, hi := 0.5, 3.5
+	delta := (hi - lo) / n
+	within1, seeds := 0, 20
+	var relSum float64
+	for seed := range seeds {
+		rng := rand.New(rand.NewPCG(uint64(seed), 7))
+		e := make([]float64, n)
+		g := make([]float64, n)
+		for j := range n {
+			e[j] = lo + (float64(j)+0.5)*delta
+			gam := gamma0 * w0 * w0 / ((e[j]-e0)*(e[j]-e0) + w0*w0)
+			z := rng.NormFloat64()
+			g[j] = math.Sqrt(gam*delta/(2*math.Pi)) * z
+		}
+		at := e[n/2] + 0.5*delta // between states n/2 and n/2+1
+		g[n/2] *= 1e-3
+		g[n/2+1] *= 1e-3
+		exact := gamma0 * w0 * w0 / ((at-e0)*(at-e0) + w0*w0)
+		apply := func(dst, src []float64) {
+			for i := range dst {
+				dst[i] = e[i] * src[i]
+			}
+		}
+		w, err := ShiftInvertWidth(apply, g, 600, at, ShiftInvertOptions{Sigma: at + 1e-4})
+		if err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		dev := math.Abs(w.Gamma - exact)
+		relSum += (w.Gamma - exact) / exact
+		if seed < 3 {
+			kd := w.Kernel
+			t.Logf("seed %d: W-B2 %.4e +/- %.2e, exact %.4e (%.1f sigma); eta %d used, %d off the "+
+				"eta^2 line, %d past the edge, %d unconverged; bias %.2e, chi2 %.2f", seed, w.Gamma,
+				w.Sigma, exact, dev/w.Sigma, len(kd.Eta), len(kd.Curved), len(kd.EdgeDropped),
+				len(kd.Dropped), kd.Bias, kd.Chi2)
+		}
+		if dev > 4*w.Sigma {
+			t.Errorf("seed %d: W-B2 %.4e +/- %.2e misses the exact %.4e by %.1f sigma",
+				seed, w.Gamma, w.Sigma, exact, dev/w.Sigma)
+		}
+		if w.Sigma > 0.25*exact {
+			t.Errorf("seed %d: W-B2 error bar %.2e is %.0f%% of the width", seed, w.Sigma, 100*w.Sigma/exact)
+		}
+		if dev <= w.Sigma {
+			within1++
+		}
+	}
+	mean := relSum / float64(seeds)
+	t.Logf("%d of %d seeds within 1 sigma; mean relative error %.3f", within1, seeds, mean)
+	if within1 < 12 {
+		t.Errorf("only %d of %d seeds within 1 sigma: the error bar is too small", within1, seeds)
+	}
+	if math.Abs(mean) > 0.1 {
+		t.Errorf("mean relative error over seeds %.3f: W-B2 is biased", mean)
 	}
 }
 

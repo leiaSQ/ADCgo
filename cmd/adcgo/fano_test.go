@@ -398,16 +398,16 @@ func TestFanoPhiSaveGuessRoundTrip(t *testing.T) {
 // three eigenvector-free width engines. Agreement between engines is gated in
 // internal/adc/fano, where the continuum is well sampled (TestWidthEnginesRecoverLorentzian,
 // TestGaussRuleIsEigenMeasure). This case is not one: the O 2s^-2 state sits at the
-// bottom edge of its coupled pseudo-continuum in cc-pVDZ, so Gauss and shift-invert both
-// return the below-the-first-node fallback and report it, and KPM finds almost no density
-// there. What is checked is that each engine runs, records itself, returns a finite
+// bottom edge of its coupled pseudo-continuum in cc-pVDZ, so Gauss returns the
+// below-the-first-node fallback, shift-invert's smoothing ladder straddles the edge, both
+// report it, and KPM finds almost no density there. What is checked is that each engine runs, records itself, returns a finite
 // width, and flags the edge.
 func TestFanoEnginesRun(t *testing.T) {
 	d := testFCIDUMP(t)
 	for _, c := range []struct {
 		engine string
 		order  int
-	}{{"gauss", 390}, {"shiftinvert", 60}, {"kpm", 2000}} {
+	}{{"gauss", 390}, {"shiftinvert", 200}, {"kpm", 2000}} {
 		out := filepath.Join(t.TempDir(), c.engine+".json")
 		cfg := fanoConfig{
 			sip: sipConfig{solver: "dense", sym: "none", backend: "gonum", order: 2, blocks: 50, out: out},
@@ -433,8 +433,15 @@ func TestFanoEnginesRun(t *testing.T) {
 		if math.IsNaN(doc.WidthMeV) || math.IsInf(doc.WidthMeV, 0) || doc.WidthMeV < 0 {
 			t.Errorf("%s: width %g", c.engine, doc.WidthMeV)
 		}
-		if c.engine != "kpm" && doc.StieltjesBelow == 0 {
-			t.Errorf("%s: the edge case was not flagged (no order below its density grid)", c.engine)
+		switch c.engine {
+		case "gauss":
+			if doc.StieltjesBelow == 0 {
+				t.Errorf("gauss: the edge case was not flagged (no order below its density grid)")
+			}
+		case "shiftinvert":
+			if doc.SIEdge != "below" && doc.SIEdge != "both" {
+				t.Errorf("shiftinvert: the edge case was not flagged (si_edge %q)", doc.SIEdge)
+			}
 		}
 	}
 }

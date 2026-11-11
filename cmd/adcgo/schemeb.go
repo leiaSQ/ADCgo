@@ -463,7 +463,16 @@ func (s *schemeBSpace) Holes(r int, dst []int) []int {
 type adaptedFamily struct {
 	parent fano.Space
 	full   *fano.AdaptedOperator
+	sf     sipFamily // builds the parent's sub-block on a small support
 }
+
+// ownedSub is a restriction over an operator it built, which it releases.
+type ownedSub struct {
+	*fano.SubOperator
+	mx fanoMatrix
+}
+
+func (o ownedSub) Release() { o.mx.Release() }
 
 func (f adaptedFamily) restrict(rows []int) (fano.Space, error) {
 	main := 0
@@ -475,7 +484,10 @@ func (f adaptedFamily) restrict(rows []int) (fano.Space, error) {
 	return &schemeBSpace{parent: f.parent, rows: rows, main: main}, nil
 }
 
-func (f adaptedFamily) matrix(_ *chooser, _ string, sp fano.Space) (fanoMatrix, error) {
+// matrix restricts T^T M T to sp. When T maps sp's rows into a small part of the parent
+// (P: the 2h1p class), M is assembled on that support alone, so a product costs a 2h1p
+// block instead of a full parent mat-vec, which for ADC(2,2) is the whole 3h2p apply.
+func (f adaptedFamily) matrix(ch *chooser, label string, sp fano.Space) (fanoMatrix, error) {
 	if sp == f.parent {
 		return f.full, nil
 	}
@@ -483,7 +495,43 @@ func (f adaptedFamily) matrix(_ *chooser, _ string, sp fano.Space) (fanoMatrix, 
 	if !ok {
 		return nil, fmt.Errorf("fano: scheme B family given a %T", sp)
 	}
-	return fano.NewSubOperator(f.full, f.full.Backend(), s.rows, s.main, f.full.DiagonalHost()), nil
+	ad := f.full.Transform()
+	u := ad.Support(s.rows)
+	if f.sf.parent == nil || 2*len(u) > ad.Size() {
+		return fano.NewSubOperator(f.full, f.full.Backend(), s.rows, s.main, f.full.DiagonalHost()), nil
+	}
+	fmt.Fprintf(os.Stderr, "adcgo: fano: %s: the adapted rows span %d of %d parent rows; "+
+		"assembling that sub-block\n", label, len(u), ad.Size())
+	adU, err := ad.Restrict(u)
+	if err != nil {
+		return nil, err
+	}
+	sub, err := f.sf.restrict(u)
+	if err != nil {
+		return nil, err
+	}
+	mx, err := f.sf.matrix(ch, label, sub)
+	if err != nil {
+		return nil, err
+	}
+	be := mx.Backend()
+	dv := mx.Diagonal(be)
+	d := be.Download(dv)
+	be.Free(dv)
+	op, err := fano.NewAdaptedOperator(mx, be, adU, d)
+	if err != nil {
+		mx.Release()
+		return nil, err
+	}
+	pos := make(map[int]int, len(u))
+	for i, r := range u {
+		pos[r] = i
+	}
+	rows := make([]int, len(s.rows))
+	for i, r := range s.rows {
+		rows[i] = pos[r]
+	}
+	return ownedSub{fano.NewSubOperator(op, be, rows, s.main, op.DiagonalHost()), mx}, nil
 }
 
 // buildSchemeB constructs the adapted basis, classifies it and returns the scheme B
@@ -764,5 +812,5 @@ func buildSchemeBWith(md *mo.Data, cfg fanoConfig, ssp *sip.Space, f sipFamily, 
 		map[string]string{"x": "EXCLUDED", "q": "Q"}[cfg.bOneSite], st.AdaptedX, cfg.bCut, st.AdaptedXBound,
 		base.Selector())
 	part := fano.NewPartitionFromClasses(class, ssp.MainBlockSize(), holes, desc)
-	return part, adaptedFamily{parent: ssp, full: full}, st, nil
+	return part, adaptedFamily{parent: ssp, full: full, sf: f}, st, nil
 }

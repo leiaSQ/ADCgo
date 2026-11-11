@@ -184,3 +184,84 @@ func TestSchemeBRotatedBlocksAreDiagonal(t *testing.T) {
 		st.CompactVirtuals, d.NORB-nocc, st.Blocks, st.AdaptedQ, st.AdaptedP, st.AdaptedX, st.AdaptedXBound,
 		part.CensusString())
 }
+
+// TestSchemeBPMPOnItsSupport: on an ADC(2,2) parent the P adapted states live in the
+// 2h1p class, so adaptedFamily.matrix assembles M there alone (bCut above 1 sends every
+// adapted state to P, since water's holes all localize on O). Its products must equal
+// the full-parent restriction (embed, T^T M T, gather) to rounding.
+func TestSchemeBPMPOnItsSupport(t *testing.T) {
+	for _, particle := range []string{"any", "free"} {
+		t.Run(particle, func(t *testing.T) { schemeBPMPOnItsSupport(t, particle) })
+	}
+}
+
+// schemeBPMPOnItsSupport runs it for one -fano-b-particle; "free" composes the virtual
+// compact | free rotation (hydrogens as non-compact centres) with the particle blocks.
+func schemeBPMPOnItsSupport(t *testing.T, particle string) {
+	d, err := fcidump.ReadFile("../../testdata/h2o_dzp.fcidump")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nocc := mp.NOcc(d)
+	eps := mp.OrbitalEnergies(d, nocc)
+	ints := integrals.New(d, nocc, nil)
+	ssp := sip.NewSpace22(nocc, d.NORB, nil, 0)
+	pmx := sip.New(ssp, ints, eps, sip.Order22, backend.Gonum{})
+	md, err := mo.ReadCanonical("../../testdata/h2o_dzp.mo.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if particle == "free" {
+		md.AtomCharges[1], md.AtomCharges[2] = 0, 0
+	}
+	sel, err := fano.ParseClassRule("q:1/0-3:0;q:3/0-3:0", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := fano.NewPartition(ssp, sel)
+	cfg := fanoConfig{sip: sipConfig{order: sip.Order22}, bInner: "e<-1.0", bCut: 1.01, bOneSite: "q",
+		bParticle: particle, bCompactThresh: 0.02,
+		sites: []spectrum.Site{{Name: "W", Members: []string{"O"}}, {Name: "H", Members: []string{"H1", "H2"}}}}
+	f := sipFamily{parent: ssp, ints: ints, eps: eps, cfg: cfg.sip}
+	part, fam, _, err := buildSchemeBWith(md, cfg, ssp, f, pmx, base, eps, nocc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if part.PSize() == 0 {
+		t.Fatalf("empty P: %s", part.CensusString())
+	}
+	psp, _ := fam.restrict(part.P)
+	ch := &chooser{cands: []candidate{{name: "gonum", be: backend.Gonum{}}}}
+	red, err := fam.matrix(ch, "test PMP", psp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer red.Release()
+	if _, ok := red.(ownedSub); !ok {
+		t.Fatalf("PMP over %d of %d rows took the full-parent path", part.PSize(), ssp.Size())
+	}
+	s := psp.(*schemeBSpace)
+	full := fano.NewSubOperator(fam.full, fam.full.Backend(), s.rows, s.main, fam.full.DiagonalHost())
+	be := backend.Gonum{}
+	n := psp.Size()
+	rng := rand.New(rand.NewSource(7))
+	var worst, scale float64
+	for range 3 {
+		x := make([]float64, n)
+		for i := range x {
+			x[i] = rng.NormFloat64()
+		}
+		ya, yb := be.Alloc(n), be.Alloc(n)
+		red.ApplyFull(ya, be.Upload(x))
+		full.ApplyFull(yb, be.Upload(x))
+		a, b := be.Download(ya), be.Download(yb)
+		for i := range a {
+			worst = math.Max(worst, math.Abs(a[i]-b[i]))
+			scale = math.Max(scale, math.Abs(b[i]))
+		}
+	}
+	if worst > 1e-10*scale {
+		t.Errorf("reduced PMP differs from the full restriction by %.3g (scale %.3g)", worst, scale)
+	}
+	t.Logf("P %d of %d rows; max |diff| %.3g of %.3g", n, ssp.Size(), worst, scale)
+}

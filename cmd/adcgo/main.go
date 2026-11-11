@@ -161,7 +161,7 @@ func main() {
 	fanoWMin := flag.Float64("fano-wmin", 0.05, "-fano: drop pseudo-continuum states whose weight on P's decay class (2h1p for single ionization) is at or below this (the reference's cntr > 0.05; its ADC(2)-extended variant used 0.2). NOTE this is the 2h1p weight, not the 1h weight — the polarization-propagator reference tests its own lowest class, which is 1h1p. Negative disables the cut")
 	fanoGMin := flag.Float64("fano-gmin", 1e-16, "-fano: drop pseudo-continuum states with gamma_i at or below this, in hartree squared (the reference's 1e-16 floor). Negative disables the cut")
 	fanoGMinRel := flag.Float64("fano-gmin-rel", 0, "-fano eigen path: drop pseudo-continuum states with gamma_i at or below this fraction of the largest gamma_i (0 = off). Relative, so it scales with the width; -khci runs switch the absolute -fano-gmin off unless it is given")
-	fanoEngine := flag.String("fano-engine", "eigen", "-fano: the PMP width engine. eigen = PMP eigenvectors and the pseudo-continuum {E_i, gamma_i} (the paper's path; needs Ritz vectors over P); gauss = Gauss rules of every order from -fano-order Lanczos steps seeded by the coupling vector; shiftinvert = the same on (PMP - sigma)^-1 around E_Phi; kpm = -fano-order Chebyshev moments with a Jackson kernel. The last three need no PMP eigenvector and have no final-state cut, so a 1e-15 Eh width survives")
+	fanoEngine := flag.String("fano-engine", "eigen", "-fano: the PMP width engine. eigen = PMP eigenvectors and the pseudo-continuum {E_i, gamma_i} (the paper's path; needs Ritz vectors over P); gauss = Gauss rules of every order from -fano-order Lanczos steps seeded by the coupling vector; shiftinvert = -fano-order Lanczos steps on (PMP - sigma)^-1 around E_Phi (P up to 8192 rows, LU-factorized), the resolved states smoothed by a ladder of Gaussians of 4-48 level spacings and extrapolated to zero width; kpm = -fano-order Chebyshev moments with a Jackson kernel. The last three need no PMP eigenvector and have no final-state cut, so a 1e-15 Eh width survives")
 	fanoOrder := flag.Int("fano-order", 200, "-fano-engine gauss|shiftinvert|kpm: Lanczos steps (the largest Gauss rule) or KPM moments")
 	fanoSIShift := flag.Float64("fano-si-shift", 1e-4, "-fano-engine shiftinvert: sigma = E_Phi + this (hartree); nonzero so sigma is not an eigenvalue of PMP")
 	fanoLambda := flag.String("fano-lambda", "", "-khci -fano with a labelled -mo: scale every integral whose charge distribution pairs an orbital of atom A with one of atom B by lambda, 'A:B=lambda,C:D=mu' (a lock-in: 'C:D=0' switches the C-D transfer off exactly, so a width that needs it vanishes and what remains is the noise floor)")
@@ -174,6 +174,7 @@ func main() {
 	stOrders := flag.String("stieltjes-orders", "", "-fano: Stieltjes order range as lo-hi (e.g. 5-40, or 8- for no upper bound). Empty = 5 to the largest order whose orthogonal polynomials survive, which is discovered rather than fixed")
 	stPrec := flag.Uint("stieltjes-prec", 256, "-fano: mantissa bits for the Stieltjes moment recurrence. The maximum usable order is set purely by this: on a Lorentzian model, 53 bits (float64) reaches order 17 with a 21% density error, 113 bits (the reference's REAL*16) order 34 with 2.9%, and 256 bits order 72 with 0.37%")
 	stAverage := flag.String("stieltjes-average", "paper", "-fano: how the per-order widths are combined. paper = the mean over -stieltjes-window consecutive orders in the region of best convergence, with that window's standard deviation as the error bar (Kolorenc & Averbukh's own protocol, and what their tabulated uncertainties are). reference = stieltjes_phi1.f's mean of the three highest orders with its relaxing convergence search")
+	stOffset := flag.Float64("stieltjes-offset", 0, "-fano: move the origin of the Stieltjes 1/E moments to this many hartree below the lowest pseudo-continuum energy, as Fano-ADC22 does (its default 0.5). 0 = the absolute origin of stieltjes_phi1.f. Not a gauge: for ionization energies far from zero the absolute origin loses orthogonality early (Ne2 2s^-1 ADC(2,2)f: order 22 vs 52 at 0.5), and with 0.5 the per-order widths reproduce Fano-ADC22's exactly")
 	stWindow := flag.Int("stieltjes-window", 9, "-fano -stieltjes-average paper: consecutive orders per averaging window (the paper uses nine)")
 
 	// Tiered help (help.go): `adcgo -h` prints the grouped overview, `adcgo -h <topic>`
@@ -396,7 +397,7 @@ func main() {
 			lambdaSpec: *fanoLambda, saveG: *fanoSaveG, imageG: *fanoImageG, decompose: *fanoDecompose,
 			emax: *fanoEMax, emaxRel: *fanoEMaxRel, wmin: *fanoWMin, gmin: *fanoGMin,
 			pBlock: *fanoBlock, pBlocks: *fanoBlocks, atEV: *fanoAt,
-			stOrderLo: lo, stOrderHi: hi, stPrec: *stPrec, stAverage: avg, stWindow: *stWindow,
+			stOrderLo: lo, stOrderHi: hi, stPrec: *stPrec, stAverage: avg, stWindow: *stWindow, stOffset: *stOffset,
 			initSite: *initAtom, sites: groups.sites, specOpts: specCfg.classify,
 		}, nil
 	}

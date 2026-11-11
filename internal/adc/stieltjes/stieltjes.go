@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"sort"
 
 	"github.com/leiaSQ/ADCgo/backend"
@@ -104,6 +105,14 @@ type Options struct {
 	// GridPoints samples the imaged density onto Result.Grid/Density at the highest order
 	// used, for plotting. 0 disables it; the reference always builds 200 points.
 	GridPoints int
+
+	// Offset, when positive, moves the energy origin of the 1/E moments to Offset below
+	// the lowest input energy (E' = E - E_min + Offset), as Fano-ADC22's stieltjes.f90
+	// does with its default 0.5 hartree. The origin is not a gauge: the polynomials in
+	// 1/E' are different polynomials, and with absolute ionization energies far from zero
+	// the recurrence loses orthogonality much earlier (Ne2 2s^-1 ADC(2,2)f: order 22 at
+	// the absolute origin, 52 at Offset 0.5). Zero keeps stieltjes_phi1.f's absolute origin.
+	Offset float64
 }
 
 func (o Options) withDefaults() Options {
@@ -481,6 +490,15 @@ type Result struct {
 // available Stieltjes order, and combine the orders into one width with an error bar.
 func Image(e, g []float64, at float64, opts Options) (*Result, error) {
 	opts = opts.withDefaults()
+	var shift float64
+	if opts.Offset > 0 && len(e) > 0 {
+		shift = slices.Min(e) - opts.Offset
+		e = slices.Clone(e)
+		for i := range e {
+			e[i] -= shift
+		}
+		at -= shift
+	}
 	t, err := NewTable(e, g, opts)
 	if err != nil {
 		return nil, err
@@ -518,6 +536,9 @@ func Image(e, g []float64, at float64, opts Options) (*Result, error) {
 	}
 	if err := evaluateRules(res, rules, at, opts); err != nil {
 		return nil, err
+	}
+	for i := range res.Grid {
+		res.Grid[i] += shift
 	}
 	return res, nil
 }

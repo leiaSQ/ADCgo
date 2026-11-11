@@ -316,7 +316,7 @@ var helpTopics = []helpTopic{
 			"",
 			"-stieltjes-average paper (the default) is Kolorenc & Averbukh's own protocol — the mean over -stieltjes-window consecutive orders in the region of best convergence, with that window's standard deviation as the uncertainty, which is what their tabulated error bars are.",
 		},
-		flags: []string{"stieltjes-orders", "stieltjes-prec", "stieltjes-average", "stieltjes-window"},
+		flags: []string{"stieltjes-orders", "stieltjes-prec", "stieltjes-average", "stieltjes-window", "stieltjes-offset"},
 		see:   []string{"fano"},
 	},
 

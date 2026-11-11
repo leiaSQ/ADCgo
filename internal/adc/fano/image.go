@@ -30,6 +30,8 @@ type Width struct {
 	// Stieltjes carries the imaging diagnostics: the orders used, the maximum usable
 	// order, whether only a low-order approximation was available.
 	Stieltjes *stieltjes.Result
+	// Kernel carries W-B2's smoothing ladder and extrapolation (ShiftInvertWidth).
+	Kernel *KernelDiag
 }
 
 func newWidth(r *stieltjes.Result) Width {
