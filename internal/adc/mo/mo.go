@@ -220,7 +220,7 @@ func (d *Data) readLabels(s *sidecar) error {
 // ReadCanonical is ReadFile for the ADC drivers: it refuses a sidecar that declares
 // its orbitals non-canonical (a localized-orbital dump). Every ADC path reads
 // orbital energies off the Fock diagonal and simplifies with a diagonal Fock matrix,
-// which such a dump violates by O(0.1) Eh; those dumps are for the khci engine.
+// which such a dump violates by O(0.1) Eh; those dumps are for CI-type methods, not ADC.
 // Sidecars without the label group (every other dump) load exactly as before.
 func ReadCanonical(path string) (*Data, error) {
 	d, err := ReadFile(path)

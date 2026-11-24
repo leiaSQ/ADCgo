@@ -392,7 +392,7 @@ func promptGrouping(w io.Writer, in *bufio.Scanner, columns []string) []model.Si
 		for _, m := range strings.Split(mem, ",") {
 			m = strings.TrimSpace(m)
 			if m == "" {
-				continue	
+				continue
 			}
 			col, isPassive := strings.CutPrefix(m, "~")
 			col = strings.TrimSpace(col)

@@ -130,7 +130,7 @@ type jiiBatchPlan struct {
 	// that the device SoA buildJIIDeviceBufs uploads is indexed by application rather than slot.
 	// Under -mgpu both are more than repaid by filling only the applications this device OWNS
 	// (newSatBatchedPerDevice), which the whole-plan fill did nd-fold redundantly: measured on
-	// uracil2W_dz singlet at nd=4, batched calls fall 21.3x (members/call 33.2 -> 706.2) while
+	// system B (DZ) singlet at nd=4, batched calls fall 21.3x (members/call 33.2 -> 706.2) while
 	// the blocks filled fall 2.0x. The single-GPU path pays the 2x with no ownership saving.
 	//
 	// Built LAZILY, by ensureApps at the head of buildJIIDeviceBufs — the one funnel every

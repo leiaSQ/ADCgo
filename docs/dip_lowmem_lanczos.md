@@ -9,7 +9,7 @@ the original analysis (still the correct explanation of the gap) and the
 record what shipped and what the work discovered.
 
 Written 2026-07 while splitting the production pipeline into DIP=Davidson /
-SIP=Lanczos (see `scripts/helix/HELIX.md`). The immediate production DIP runs use
+SIP=Lanczos. The immediate production DIP runs use
 block-Davidson (lowest `-nroots` roots); the low-memory solver is for whoever
 wants the *whole* double-ionization band.
 
@@ -167,7 +167,7 @@ for both eigenvalues and the top/bottom partial-vector slices
 
 ## Parallelizing the band reduction
 
-The band→tridiagonal reduction plus QL sweep is one call that at the melanin DIP shape
+The band→tridiagonal reduction plus QL sweep is one call that at the production DIP shape
 (`dim` 308000, half-bandwidth 3079) is ~10^15 element updates — **~23 days on one core**.
 That is what job 14834817 was doing for 2 d 15 h after its last block line: one core busy,
 all eight H200s idle. It is CPU-only and stays that way — cuSOLVER has no band or
@@ -195,7 +195,7 @@ Four changes, all bit-for-bit output-preserving:
 ### What it actually bought: 3.3x, and it is not from the threading
 
 Measured at the production half-bandwidth (band 3079, dim 4620, 64-core node,
-`scripts/helix/eigensolver_tier2.sbatch`):
+a cluster benchmark job):
 
 | configuration | wall | vs reference |
 |---|---|---|
@@ -217,7 +217,7 @@ in that run, whereas at production's `dim/band` = 100 a chase carries ~1.2e6 upd
 reproduces production's chase length *and* its bandwidth without also reproducing its cost, so that
 one can only be settled by a production run with `-eig-workers 16`.
 
-At 3.32×, expect the melanin DIP reduction to be **~4 days** rather than the ~23 it was, against a
+At 3.32×, expect the production DIP reduction to be **~4 days** rather than the ~23 it was, against a
 120 h walltime — it fits a resumed generation, with roughly a day of margin and no checkpoint inside
 the stage. `Options.EigenProgress` is what makes that margin observable.
 
@@ -246,7 +246,7 @@ Bit-exactness on the device needs care and gets a dedicated test. Go on amd64 do
 `a*b+c` into an FMA; nvcc and hipcc do by default, and a fused product rounds once where Go rounds
 twice. The kernel therefore uses explicit `__dmul_rn`/`__dadd_rn`/`__dsub_rn` rather than relying on
 `-fmad=false`, and `TestGPUBandEigReplayParity`
-(`scripts/gpu/bandeig_device_parity.sbatch`) compares device against host with `!=` on real
+(`TestGPUBandEigReplayParity`, run by `scripts/slurm/gpu_tests.sbatch`) compares device against host with `!=` on real
 hardware — the only place the claim can be checked.
 
 ### The replay has far more parallelism than the kernel first claimed
@@ -534,8 +534,8 @@ the same binary.
 `Options.EigenProgress` reports the column reached during the reduction, so the stage is no longer
 silent.
 
-Measuring it: `scripts/helix/eigensolver_bench.sbatch` (barrier latency, replay throughput vs block
-size, tier-1 solve) and `scripts/helix/eigensolver_tier2.sbatch` (production band 3079, the only
+Measuring it: two cluster benchmark jobs (barrier latency, replay throughput vs block
+size, tier-1 solve; and production band 3079, the only
 shape that reproduces the real accumulated-row width and per-column footprint). The login node's
 cgroup caps this account at 4 CPUs while `nproc` reports 128, so nothing measured there says
 anything about scaling — every number above comes from a batch job.

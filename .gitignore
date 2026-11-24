@@ -2,11 +2,16 @@
 /adcgo
 /adcgo-cuda
 /plotspec
+/sizeprobe
+/ADCanalysis
 /bin/
 *.test
 *.out.tmp
 
-# Python / conda
+# CUDA kernel objects (scripts/build_cuda.sh)
+backend/*.o
+
+# Python
 .venv/
 __pycache__/
 *.pyc
@@ -14,25 +19,9 @@ __pycache__/
 # editors
 .idea/
 .vscode/
-backend/adc4_kernels.o
-backend/adc2dip_kernels.o
-backend/tensor_kernels.o
-backend/bandeig_kernels.o
 
-# large local-only inputs: pyridine N K-edge demo (658 MB FCIDUMP), no test reads these
-testdata/pyridine_N.*
-
-# H2O aug-cc-pVTZ (405 MB FCIDUMP); regenerate with
-#   python scripts/fcidump/dump_fcidump.py --input examples/h2o_augccpvtz.in
-testdata/h2o_augccpvtz.*
-
-# uracil geometries — kept local-only for possible publication
-examples/uracil1W/zmat
-examples/uracil2W/zmat
-examples/uracil2W.zmat
-
-# run logs (SLURM job logs, solver logs)
+# adcgo run artifacts: caches written beside the FCIDUMP, checkpoints, per-sector sidecars
+*.mainblock.o*.cache
+*.sigma-*.cache
+*.ckpt*
 *.log
-
-# uracil results and inputs — local-only (64 MB result JSONs, publication data)
-*uracil*

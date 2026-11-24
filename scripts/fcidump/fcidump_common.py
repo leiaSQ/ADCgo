@@ -61,7 +61,7 @@ def dipole_keys(mol, dm=None):
     return keys
 
 
-def write_sidecar(path, mol, mo_coeff, overlap, dm=None, labels=None):
+def write_sidecar(path, mol, mo_coeff, overlap, dm=None):
     """Write the sidecar JSON from scratch.
 
     ``mo_coeff`` is (nAO x nMO) for the MOs actually in the FCIDUMP (full space or
@@ -81,9 +81,6 @@ def write_sidecar(path, mol, mo_coeff, overlap, dm=None, labels=None):
         "atom_names": atom_names(mol),
     }
     doc.update(dipole_keys(mol, dm))
-    if labels:
-        # orbital-label group of a rotated basis (orbitals.sidecar_labels)
-        doc.update(labels)
     with open(path, "w") as fh:
         json.dump(doc, fh)
         fh.write("\n")

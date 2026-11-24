@@ -11,8 +11,8 @@ longer the problem**: the materialized block-sparse ADC operator itself, which
 for large satellite spaces is hundreds of GB to multiple TB — bigger than any
 single GPU, and for the production system bigger than a whole 8×H200 node.
 
-Written 2026-07-20 while sizing the uracil / production DIP runs on bwForCluster
-Helix (see `scripts/helix/HELIX.md`, `scripts/helix/uracil_dip.sbatch`).
+Written 2026-07-20 while sizing the mid-size / production DIP runs on bwForCluster
+Helix.
 
 ## The wall in one line
 
@@ -36,10 +36,10 @@ run offline on each FCIDUMP:
 
 | system / sector          |          n | main | panels  | **operator** | total need | verdict                    |
 |--------------------------|-----------:|-----:|--------:|-------------:|-----------:|----------------------------|
-| uracil1W DZP · singlet   |    681,525 |  325 |  6.6 GB | **532.8 GB** |   539.3 GB | needs `-mgpu ≥4`           |
-| uracil2W DZP · singlet   |  ~1,226,000 | 435 | ~17 GB  | **~1518 GB** | 1535 GB¹   | does not fit 8×H200        |
-| uracil2W DZ+fc · singlet |    625,675 |  435 |  8.1 GB | **395.3 GB** |   403.4 GB | `-mgpu ≥4` (100 GB/GPU)    |
-| uracil2W DZ+fc · triplet |    907,004 |  406 | 11.0 GB | **847.3 GB** |   858.3 GB | `-mgpu 8` (107 GB/GPU)     |
+| system A DZP · singlet   |    681,525 |  325 |  6.6 GB | **532.8 GB** |   539.3 GB | needs `-mgpu ≥4`           |
+| system B DZP · singlet   |  ~1,226,000 | 435 | ~17 GB  | **~1518 GB** | 1535 GB¹   | does not fit 8×H200        |
+| system B DZ+fc · singlet |    625,675 |  435 |  8.1 GB | **395.3 GB** |   403.4 GB | `-mgpu ≥4` (100 GB/GPU)    |
+| system B DZ+fc · triplet |    907,004 |  406 | 11.0 GB | **847.3 GB** |   858.3 GB | `-mgpu 8` (107 GB/GPU)     |
 | production DZP · singlet    | 10,014,483 | 1711 | 510.7 GB| **~6 TB (est.²)**  | ~6.5 TB² | does not fit 8×H200        |
 | production DZP · triplet    | 14,766,249 | 1653 | 728 GB  | **~13 TB (est.²)** | ~14 TB²  | does not fit 8×H200        |
 
@@ -59,7 +59,7 @@ below.
 
 > **Aside — the operator walk is single-threaded.** `visitBlocks` /
 > `OperatorResidentBytes` (and, by extension, `assemble()`) evaluate every operator
-> block serially on one core. That is tolerable at uracil scale (a few minutes) but
+> block serially on one core. That is tolerable at mid-size scale (a few minutes) but
 > becomes a real drag at production scale (n ≈ 10–15 M): sizing alone runs into hours,
 > and the same serial walk sits on the critical path of the *actual* solve's first
 > apply. The blocks are independent, so this walk is embarrassingly parallel —
@@ -70,8 +70,8 @@ below.
 **Takeaways:**
 - Panels are cheap and already `-mgpu`-partitionable; the operator is the ceiling.
 - Banding (`-lowmem-block b`) is not a memory lever here — at b=10% of `main`,
-  uracil1W's need is still 533 GB.
-- Dropping polarization (DZP→DZ) + frozen core cut uracil2W's operator ~4× (1518→847 GB),
+  system A's need is still 533 GB.
+- Dropping polarization (DZP→DZ) + frozen core cut system B's operator ~4× (1518→847 GB),
   enough to fit `-mgpu 8`. It does **not** scale down enough for the production system.
 
 ## Why ADCgo pays this and theADCcode does not
@@ -104,13 +104,13 @@ dodge a resident-memory blowup. The proposal:
    Reuse `OperatorResidentBytes()` per block as the switch.
 3. With the satellite block matrix-free, the resident footprint collapses to the
    panels (+ the tiny main block) — tens of GB, already `-mgpu`-friendly. The production
-   whole-band DIP then fits a single node, and uracil2W fits without DZ.
+   whole-band DIP then fits a single node, and system B fits without DZ.
 
 **Cost/benefit:** matrix-free adds recompute per mat-vec (×`-blocks` iterations),
 but the applies are compute-bound GEMMs on the H200 and the operator upload it
 replaces is a one-time multi-hundred-GB transfer; removing the resident-operator
 ceiling is very likely worth the extra flops. Validate against theADCcode
-`adc2dip` sticks on a small case (h2o DIP, `examples/DIP_h2o`) before scaling.
+`adc2dip` sticks on a small case (h2o DIP, `examples/h2o_dzp`) before scaling.
 
 ## Implementation (shipped)
 
@@ -176,7 +176,7 @@ kernels on every partition **and** `AllPeered()`; otherwise the host path (still
 Chunking repeats the element evaluation `ceil(b/w)` times, but the column loop dominates
 (~`b` ops applied per element vs ~30 to evaluate it), so at `w=64` the overhead is ~15%.
 
-**Measured production budget** (job 14010811, `cmd/sizeprobe`; the matrix-free walk is cheap because
+**Measured production budget** (job 14010811, a sizing probe; the matrix-free walk is cheap because
 `OperatorResidentBytes` skips `satelliteResidentBytes` entirely when matrix-free):
 
 | sector  |          n | main | panels   | **matrix-free operator** (main+coupling) | ERI/device | mgpu 8    |
@@ -201,7 +201,7 @@ cuBLAS/cuSOLVER workspace and allocator fragmentation, so the headroom is not al
   `internal/adc/matfree`; shared worker pool `internal/adc/parallel`.
 - Matrix-free satellite per-scalar form (CUDA source of truth + device/distributed paths):
   `internal/adc/dip/satelem.go`, `satscalar.go`, `matfree_device.go`, `matfree_dist.go`;
-  kernel `internal/adc/backend/adc2dip_kernels.cu`; binding `internal/adc/backend/cuda_kernels.go`.
+  kernel `backend/adc2dip_kernels.cu`; binding `backend/cuda_kernels.go`.
 - Pre-flight guard (single-GPU path only): `cmd/adcgo/dispatch.go`
   (`checkDeviceFit`); the `-mgpu` path (`main.go` `solveDIPSectorMGPU`) has none —
   add one there as part of this work.

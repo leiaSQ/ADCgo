@@ -250,7 +250,7 @@ func TestDiscountHalvesPassivePairs(t *testing.T) {
 	passive := map[string]bool{"H1": true, "H2": true}
 	got := Discount(firstStateRow(), passive)
 
-	wantOne := map[string]float64{"O": 0.8065} // H1, H2 one-site dropped
+	wantOne := map[string]float64{"O": 0.8065}                            // H1, H2 one-site dropped
 	wantTwo := map[string]float64{"O/H1": 0.0131 / 2, "O/H2": 0.0131 / 2} // H1/H2 dropped
 	if len(got.OneSite) != len(wantOne) || len(got.TwoSite) != len(wantTwo) {
 		t.Fatalf("got one=%v two=%v, want one=%v two=%v", got.OneSite, got.TwoSite, wantOne, wantTwo)

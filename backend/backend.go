@@ -200,8 +200,7 @@ type Backend interface {
 
 	// AxpyDiag applies a resident diagonal operator block: y += d ⊙ x (elementwise
 	// product accumulate), with d, x, y equal-length views. It lets a purely diagonal
-	// block — e.g. the CVS-ADC(4) 3h2p/3h2p block, whose off-diagonal WERT3 coupling is
-	// deferred — be stored and applied as an O(n) vector instead of a dense n×n matrix,
+	// block be stored and applied as an O(n) vector instead of a dense n×n matrix,
 	// which is the difference between a few MB and terabytes for a large satellite space.
 	AxpyDiag(d, x, y Vector)
 
@@ -340,12 +339,6 @@ type PartitionedDevices interface {
 	AllPeered() bool
 }
 
-// DeviceKernels is the optional capability a device backend implements to run a
-// matrix-free operator block on-device: the element recompute (wert2elem4) is a custom
-// CUDA kernel reading a device-resident ERI tensor, so the large ADC(4) 2h1p×3h2p
-// coupling never occupies VRAM. Device counterpart of HostData. Implemented by the cuda
-// backend (cuda_kernels.go, kernel in adc4_kernels.cu); the hip backend and Gonum do not
-// implement it, so those take the dense / HostData paths. See docs/adc4_matfree_gpu.md.
 // BandEigKernels is the optional capability a device backend advertises when it can replay the
 // projected banded eigensolver's deferred eigenvector rotations on the device
 // (internal/adc/lanczos, zTape). Detect it with a type assertion, as the sip matrix does for
@@ -388,9 +381,14 @@ type BandEigZ interface {
 	Free()
 }
 
+// DeviceKernels is the optional capability a device backend implements to run a
+// matrix-free operator block on-device: the element recompute is a custom CUDA kernel
+// reading a device-resident ERI tensor, so the large satellite blocks (the SIP-ADC(3)
+// 2h1p×2h1p block, the DIP-ADC(2) 3h1p×3h1p region) never occupy VRAM. Device
+// counterpart of HostData. Implemented by the cuda backend (cuda_kernels.go, kernels in
+// sip_kernels.cu and adc2dip_kernels.cu); the hip backend and Gonum do not implement it,
+// so those take the dense / HostData paths.
 type DeviceKernels interface {
-	// SetCoeff1 uploads the flattened [3][13][30] spin table to constant memory (once).
-	SetCoeff1(coeff1 []float64)
 	// DeviceERI uploads a flat norb⁴ ERI tensor to the device; returns its pointer. The
 	// caller frees it via FreeDev.
 	DeviceERI(eri []float64) unsafe.Pointer
@@ -403,9 +401,6 @@ type DeviceKernels interface {
 	FreeDev(p unsafe.Pointer)
 	// DevPtr is the device pointer backing a resident float64 Vector.
 	DevPtr(v Vector) unsafe.Pointer
-	// Wert2Apply launches the matrix-free 2h1p×3h2p coupling apply (forward + transpose),
-	// accumulating into a.Out.
-	Wert2Apply(a Wert2Args)
 	// C22Apply launches the matrix-free order-3 2h1p×2h1p satellite apply (symmetric block,
 	// a single pass — one thread per output row), accumulating into a.Out.
 	C22Apply(a C22Args)
@@ -466,17 +461,6 @@ type DipFillJIIArgs struct {
 	ColVOff, ColNv      unsafe.Pointer
 	BufOff, Virs        unsafe.Pointer
 	ERI, Eps, OrbSym    unsafe.Pointer
-}
-
-// Wert2Args carries the device buffers and dimensions for DeviceKernels.Wert2Apply. The
-// R* / C* pointers are UploadInts results (row/col config struct-of-arrays); ERI is a
-// DeviceERI result; In/Out are resident panels (their device pointers via DevPtr).
-type Wert2Args struct {
-	N2, N3, B, LdIn, LdOut, MainOff, Off3, Norb, Nocc int
-	RVir, RK, RL, RTyp                                unsafe.Pointer
-	CI, CJ, CK, CL, CM, CSpin                         unsafe.Pointer
-	ERI                                               unsafe.Pointer
-	In, Out                                           Vector
 }
 
 // C22Args carries the device buffers and dimensions for DeviceKernels.C22Apply. K/L/Vir/Typ

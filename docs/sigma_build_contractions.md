@@ -9,34 +9,9 @@
 
 ## UPDATE (2026-09-23): the generated σ-build
 
-The contraction route is implemented, not for the hand-ported `dip` but for the
-adcgen-generated operators (`internal/adc/isrgen/*/sigma_generated.go`, run by
-`internal/adc/isrgen/sigma`). It is the form this note argued for: σ = integrals ⊗ vector as
-binary contractions on batched GEMMs. Nothing is materialized; the losing A/B below built
-operator blocks and then GEMM'd them. See `internal/adc/isrgen/README.md`.
-
-| | hand `dip` (matrix-free satellites) | generated σ (dip adc2x, Ms = 0) |
-|---|---|---|
-| FLOP/vector, o = 58, v = 154 (production triplet size) | 9.3e13 (satellite only) | 8.8e12 (whole operator) |
-| scaling of the 3h1p/3h1p part | ~o⁵v² (δ-gated v×v blocks) | o⁴v² |
-| host wall, o = 16, v = 64, 32 cores, b = 1 / 16 / 64 | 27.9 s / 50.9 s / 167 s | 0.27 s / 1.9 s / 19.6 s |
-
-- **Correctness:** the σ-build equals the element-wise `BuildDense` to ≤ 1.3e-13 relative, and
-  reproduces package dip's singlet and triplet poles one to one (|ΔE| ≤ 5.4e-13 Eh).
-- **One H200** (job 15047806), against the hand dip device path:
-
-  | o, v | b = 1 | b = 16 | b = 64 |
-  |---|---|---|---|
-  | 12, 48 | 0.10× | 0.15× | 0.21× |
-  | 16, 64 | 0.04× | 0.05× | 0.11× |
-
-  On the hand path the time barely moves with b, because launches dominate it.
-- **Four H200s** (NVLink, column split), at o = 24, v = 96: no speed-up. b = 64 takes 266 vs
-  258 ms, b = 256 1.03 vs 0.93 s. One GPU is already milliseconds per apply, so the gather and
-  scatter cost what the split saves. `-mgpu` is for memory, not time, at these sizes.
-- **Devices:** it runs on the CUDA backend through `backend.TensorKernels`
-  (`backend/tensor_kernels.cu`); device ≡ host was checked on an A40 (job 14895641). It runs
-  across devices by panel-column split (`sigma/partitioned.go`, `adcgo -isr … -mgpu G`).
+The contraction route was later implemented for adcgen-generated ISR operators on the
+development branch, at ~10x fewer FLOPs than the hand `dip` satellite apply at production size.
+It is not part of v0.1, whose DIP solver is the hand-ported `dip` package described below.
 
 ## The short answer
 
@@ -117,9 +92,9 @@ Separate the two questions, because most of the win is not cuTENSOR's:
 So: do not adopt cuTENSOR *in order to* get faster. Reformulate as contractions first; adopt
 cuTENSOR only if permutation overhead then shows up in a profile.
 
-## MEASURED (2026-07-25) — the contraction path is SLOWER than per-scalar for uracil2W
+## MEASURED (2026-07-25) — the contraction path is SLOWER than per-scalar for system B
 
-> **A direct A/B on 4×H200 contradicts the premise below.** Job `14040958`, uracil2W_dz singlet,
+> **A direct A/B on 4×H200 contradicts the premise below.** Job `14040958`, system B (DZ) singlet,
 > same sector as the gate measurement, comparing the two device paths end to end:
 >
 > | path | wall | apply | note |
@@ -131,7 +106,7 @@ cuTENSOR only if permutation overhead then shows up in a profile.
 > GEMM densifies and *materializes* the block-sparse operator (hundreds of GB of writes, then reads
 > it back), whereas the per-scalar kernel recomputes each element in registers and never
 > materializes. For a memory-bound apply the materialization traffic dwarfs the recompute it
-> replaces, and at uracil2W's panel width (b=435) the GEMM's b-fold reuse does not amortize it.
+> replaces, and at system B's panel width (b=435) the GEMM's b-fold reuse does not amortize it.
 > Bounded chunking (JIIFillBudgetElems) is what lets it *fit* at all — the unchunked fill OOM'd at
 > 424 GB (job 14026481) — but chunking per column-chunk also adds refill cost.
 >
@@ -143,7 +118,7 @@ cuTENSOR only if permutation overhead then shows up in a profile.
 
 ## MEASURED (2026-07-23) — the gate is cleared
 
-Job `14015067`, uracil2W_dz singlet, 4×H200, per-device NVLink path (i.e. *after* the 12.6× win):
+Job `14015067`, system B (DZ) singlet, 4×H200, per-device NVLink path (i.e. *after* the 12.6× win):
 
 | | |
 |---|---|
@@ -219,7 +194,7 @@ device kernel) are what would move the production number.
 **Do not scope a σ-build rewrite until the current kernel's efficiency is measured.** The whole
 case rests on the "~2–5% of peak" assumption above, which nobody has checked.
 
-Job `14015067` (`scripts/gpu/uracil2W_mgpu_timing.sbatch`) produces the first real per-mat-vec time for
+Job `14015067` (a cluster timing job) produces the first real per-mat-vec time for
 the satellite apply. Convert it to a fraction of peak, then:
 
 - **≳20% of peak** — a contraction rewrite buys maybe 3×, and is probably not worth losing
@@ -232,9 +207,9 @@ the satellite apply. Convert it to a fraction of peak, then:
 ## Pointers
 
 - per-scalar element evaluation (the thing a rewrite would replace):
-  `internal/adc/dip/satelem.go`, `satscalar.go`; kernel `internal/adc/backend/adc2dip_kernels.cu`.
+  `internal/adc/dip/satelem.go`, `satscalar.go`; kernel `backend/adc2dip_kernels.cu`.
 - correctness oracles a rewrite must keep passing: `TestSatelliteScalarMatchesDense`,
   `TestSatelliteScalarApplyEqualsDense`, `dip/matfree_test.go`.
 - why the operator is matrix-free at all, and the measured production budget:
   [`dip_operator_memory.md`](dip_operator_memory.md).
-- how a block is split across devices today: [`../internal/adc/backend/README.md`](../internal/adc/backend/README.md).
+- how a block is split across devices today: [`../backend/README.md`](../backend/README.md).

@@ -1,11 +1,10 @@
 // davidson.go — a block Davidson–Liu eigensolver for the same real-symmetric ADC
 // secular problem the block-Lanczos driver (Solve) handles, but root-targeting: it
 // iterates the algebraically lowest `NRoots` eigenpairs to a residual threshold rather
-// than sweeping the whole spectral band. This is what reproduces the legacy
-// adc4_diag.x Davidson positions directly (see examples/CVS_NSOB/lanczos_vs_davidson_N1s.md):
-// where block-Lanczos at a fixed `-blocks` count leaves interior CVS core poles shifted by
-// ~1 eV (each Ritz value is a pole-strength-weighted centroid of a cluster of true states),
-// Davidson pins the specific lowest roots to ‖Mψ−θψ‖ ≤ ConvThr.
+// than sweeping the whole spectral band. Where block-Lanczos at a fixed `-blocks` count
+// can leave interior poles shifted (each Ritz value is a pole-strength-weighted centroid
+// of a cluster of true states), Davidson pins the specific lowest roots to
+// ‖Mψ−θψ‖ ≤ ConvThr.
 //
 // The algorithm mirrors ../ADC/adc4core/adc4_diag/davidson.F:
 //   - block size = NRoots, subspace grown by up to NRoots correction vectors per iteration;
@@ -47,7 +46,7 @@ type dkey struct {
 // PreconOperator is an Operator that can also expose its matrix diagonal as a resident
 // vector, which the Davidson (θ − D)⁻¹ preconditioner needs. *sip.Matrix and *dip.Matrix
 // satisfy it. The diagonal is assembled directly from the per-block element functions,
-// never from BuildMatrix (which is terabytes for a large matrix-free ADC(4) sector).
+// never from BuildMatrix (which is terabytes for a large matrix-free sector).
 type PreconOperator interface {
 	Operator
 	Diagonal(be backend.Backend) backend.Vector

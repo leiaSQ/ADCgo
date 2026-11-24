@@ -102,7 +102,7 @@ func TestHelpRequested(t *testing.T) {
 		{[]string{"-h"}, "", true},
 		{[]string{"--help"}, "", true},
 		{[]string{"-help", "sip"}, "sip", true},
-		{[]string{"-h", "order", "4"}, "order4", true},
+		{[]string{"-h", "order", "3"}, "order3", true},
 		{[]string{"-h", "lanczos-lowmem"}, "lanczoslowmem", true},
 		{[]string{"-h", "solver", "lanczos"}, "lanczos", true},
 		{[]string{"-h", "-solver"}, "solver", true}, // a flag name resolves to its page
@@ -120,11 +120,10 @@ func TestHelpRequested(t *testing.T) {
 // TestHelpTopicLookup checks the aliases a user is most likely to type.
 func TestHelpTopicLookup(t *testing.T) {
 	cases := map[string]string{
-		"dip": "dip", "sip": "sip", "order": "order", "order22": "order22",
-		"adc22": "order22", "cvs": "order4", "adc4": "order4", "adc2x": "order2",
+		"dip": "dip", "sip": "sip", "order": "order", "order3": "order", "adc3": "order",
 		"lowmem": "lowmem", "lanczoslowmem": "lowmem", "davidson": "davidson",
 		"gpu": "backend", "cuda": "backend", "nvlink": "mgpu", "cache": "checkpoint",
-		"bare": "spectrum", "rassi": "tdm", "widths": "fano",
+		"bare": "spectrum",
 	}
 	for in, want := range cases {
 		got := lookupTopic(normalizeTopic(in))
@@ -149,7 +148,7 @@ func TestPrintHelpRenders(t *testing.T) {
 	if !printHelp(&overview, "") {
 		t.Fatal("printHelp(overview) reported an unknown topic")
 	}
-	for _, want := range []string{"METHODS", "SOLVERS", "-dip", "-order", "lanczos", "adcgo -h all"} {
+	for _, want := range []string{"METHODS", "SOLVERS", "-dip", "-sip", "lanczos", "adcgo -h all"} {
 		if !strings.Contains(overview.String(), want) {
 			t.Errorf("overview is missing %q", want)
 		}

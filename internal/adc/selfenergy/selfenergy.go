@@ -9,7 +9,7 @@
 //
 // Omitting Σ is worth ~0.2–0.35 eV on every SIP main line (satellites are untouched: they never
 // enter the 1h block), which is why the pyscf cross-check only ever showed a vague band on the
-// mains. See docs/adc4_sip_spec.md Finding F1.
+// mains. TestSIPMatchedReference pins it against theADCcode.
 //
 // Schemes, in increasing completeness, mirroring theADCcode's `&self-energy` orders:
 //

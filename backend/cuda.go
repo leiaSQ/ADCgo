@@ -245,7 +245,7 @@ func devMalloc(n int) unsafe.Pointer {
 // ckDevAlloc reports a failed device allocation instead of returning a NULL that only faults
 // later, somewhere else. k_malloc (cuda_kernels.go) swallows cudaMalloc's status and returns the
 // pointer, so NULL is the only signal there is — and these are the big ones: DeviceERI uploads
-// norb⁴ doubles, 16 GB at melanin's norb=212.
+// norb⁴ doubles, 16 GB at the production system's norb=212.
 func ckDevAlloc(p unsafe.Pointer, bytes int, what string) unsafe.Pointer {
 	if p == nil && bytes > 0 {
 		st := C.dev_last_error()
@@ -280,7 +280,7 @@ var cudaStrict = os.Getenv("ADCGO_CUDA_STRICT") == "1"
 
 // ckLaunch checks a kernel launcher's returned cudaError_t.
 //
-// Every launcher in adc2dip_kernels.cu / adc4_kernels.cu returns cudaGetLastError(), and every
+// Every launcher in adc2dip_kernels.cu / sip_kernels.cu returns cudaGetLastError(), and every
 // one of those return values used to be discarded at the call site — so a launch that failed
 // outright did so silently and only announced itself later as a sticky error somewhere else.
 func ckLaunch(st C.int, op string) {
@@ -467,27 +467,6 @@ func blasDgmm(h unsafe.Pointer, m, n int, a unsafe.Pointer, lda int, x unsafe.Po
 		cudaErr := int(C.dev_last_error())
 		panic(fmt.Sprintf("backend: cublasDdgmm failed (cublasStatus_t %d, cudaError_t %d): m=%d n=%d lda=%d ldc=%d",
 			int(st), cudaErr, m, n, lda, ldc))
-	}
-}
-
-// blasGemmStridedBatched: batch members at fixed element strides of a, b and c.
-func blasGemmStridedBatched(h unsafe.Pointer, transA, transB bool, m, n, k int, alpha float64,
-	a unsafe.Pointer, lda, strideA int, b unsafe.Pointer, ldb, strideB int, beta float64,
-	c unsafe.Pointer, ldc, strideC, batch int) {
-	var ta, tb C.int
-	if transA {
-		ta = 1
-	}
-	if transB {
-		tb = 1
-	}
-	st := C.blas_gemm_strided_batched(handle(h), ta, tb, C.int(m), C.int(n), C.int(k), C.double(alpha),
-		(*C.double)(a), C.int(lda), C.longlong(strideA), (*C.double)(b), C.int(ldb), C.longlong(strideB),
-		C.double(beta), (*C.double)(c), C.int(ldc), C.longlong(strideC), C.int(batch))
-	if st != 0 {
-		cudaErr := int(C.dev_last_error())
-		panic(fmt.Sprintf("backend: cublasDgemmStridedBatched failed (cublasStatus_t %d, cudaError_t %d): transA=%v transB=%v m=%d n=%d k=%d lda=%d ldb=%d ldc=%d batch=%d",
-			int(st), cudaErr, transA, transB, m, n, k, lda, ldb, ldc, batch))
 	}
 }
 

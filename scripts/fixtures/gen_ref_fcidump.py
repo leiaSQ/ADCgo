@@ -9,8 +9,8 @@ out in _basisset.dat), at the geometry in _zmatrix.dat, with active space "2 to
 electrons). Its total SCF energy is -76.0498071428 Ha; we gate on that number to
 prove the basis + geometry are transcribed correctly before trusting the FCIDUMP.
 
-Run with the `adcgo` conda env:
-    /home/leia/miniconda3/envs/adcgo/bin/python scripts/fixtures/gen_ref_fcidump.py
+Run with a Python that has pyscf:
+    python scripts/fixtures/gen_ref_fcidump.py
 
 With --sidecar-only, only the dipole/geometry keys of the existing sidecar are
 refreshed; the matched FCIDUMP that the DIP and ADC(4) gates compare against is left

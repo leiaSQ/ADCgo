@@ -204,7 +204,7 @@ func TestJoinGroupArgs(t *testing.T) {
 		{[]string{"-group=A=O", "-sip"}, []string{"-group=A=O", "-sip"}},   // already joined
 		{[]string{"-group", "noequals"}, []string{"-group", "noequals"}},   // not a site spec
 		{[]string{"--", "-group", "A=O"}, []string{"--", "-group", "A=O"}}, // after --
-		{[]string{"-fano-qp", "q:1/e<0:1"}, []string{"-fano-qp", "q:1/e<0:1"}},
+		{[]string{"-init-atom", "O"}, []string{"-init-atom", "O"}},
 	} {
 		if got := joinGroupArgs(c.in); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("joinGroupArgs(%q) = %q, want %q", c.in, got, c.want)

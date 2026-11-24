@@ -11,10 +11,10 @@ pyscf and writes:
   * a small provenance manifest.
 
 Configuration comes from either a sectioned input file (``--input dump.in``, see
-adcgo_input.py) or plain CLI flags. Run with the adcgo conda env:
+adcgo_input.py) or plain CLI flags. Run with a Python that has pyscf:
 
-    /home/leia/miniconda3/envs/adcgo/bin/python scripts/fcidump/dump_fcidump.py --input dump.in
-    /home/leia/miniconda3/envs/adcgo/bin/python scripts/fcidump/dump_fcidump.py \
+    python scripts/fcidump/dump_fcidump.py --input dump.in
+    python scripts/fcidump/dump_fcidump.py \
         --zmat _zmatrix.dat --basis-file _basisset.dat --cartesian \
         --active "2 to 30" --gate -76.0498071428 --fcidump out.fcidump
 
@@ -53,38 +53,8 @@ def build_mol(cfg):
         basis = cfg.basis_name
     if cfg.ghost:
         atoms, basis = _apply_ghosts(atoms, basis, cfg.ghost)
-    if cfg.ghost_sites:
-        atoms, basis = _add_ghost_sites(atoms, basis, cfg, unit)
     return gto.M(atom=atoms, basis=basis, charge=cfg.charge, spin=cfg.spin,
                  cart=cfg.cartesian, symmetry=cfg.symmetry, unit=unit)
-
-
-def _add_ghost_sites(atoms, basis, cfg, unit):
-    """Append the &ghost_sites basis-only centres (continuum / Rydberg sets).
-
-    Unlike `ghost`, which turns existing atoms into counterpoise ghosts, these are
-    extra centres with their own basis (KBJ continuum exponents or a named basis taken
-    from an element). Site n becomes pyscf dummy "X<n>", which carries no nuclear
-    charge; the sidecar names it by its &ghost_sites label.
-    """
-    import orbitals  # the localized-basis module beside this script (loads pyscf lazily)
-    if not isinstance(basis, dict):
-        basis = {sym: basis for sym, _ in atoms}
-    else:
-        basis = dict(basis)
-    scale = 1.0
-    if cfg.ghost_unit != (unit or "angstrom").lower():
-        # site coordinates are converted into the geometry's unit
-        bohr = 0.52917721092
-        scale = 1.0 / bohr if cfg.ghost_unit == "angstrom" else bohr
-    out = list(atoms)
-    for n, g in enumerate(cfg.ghost_sites, start=1):
-        label = f"X{n}"
-        out.append([label, [x * scale for x in g["xyz"]]])
-        basis[label] = orbitals.ghost_basis_list(g["basis"])
-    print(f"added {len(cfg.ghost_sites)} ghost site(s): "
-          f"{[g['label'] for g in cfg.ghost_sites]}", file=sys.stderr)
-    return out, basis
 
 
 def _apply_ghosts(atoms, basis, spec):
@@ -133,7 +103,7 @@ def _apply_ghosts(atoms, basis, spec):
 def run_scf(cfg, mol):
     """Tightly-converged RHF, with an optional reference-energy gate."""
     if cfg.lindep is not None:
-        # canonical orthogonalization for diffuse/ghost sets: overlap eigenvalues below
+        # canonical orthogonalization for diffuse sets: overlap eigenvalues below
         # the threshold are dropped (pyscf's built-in replacement for remove_linear_dep_)
         from pyscf.scf import hf as scf_hf
         scf_hf.remove_overlap_zero_eigenvalue = True
@@ -204,49 +174,8 @@ def dump(cfg):
     sel = orbital_select.resolve(nmo, mol.nelectron, cfg.active, cfg.frozen_core,
                                  cfg.frozen_list)
     fcidump_path = cfg.resolve(cfg.fcidump)
-    labels = None
 
-    if cfg.orbitals in ("localized", "fragment"):
-        # Rotated basis: localized occupied, per-atom compact virtuals, free complement
-        # (orbitals.py beside this script). Not canonical: the FCIDUMP's Fock matrix is
-        # not diagonal, which the sidecar and manifest record.
-        import orbitals
-        reals = orbitals.real_atoms(mol)
-        names = fcidump_common.atom_names(mol)
-        compact = cfg.compact_basis or (cfg.basis_name or "").lower()
-        if not compact:
-            raise SystemExit(f"&orbitals {cfg.orbitals} with a basis file needs compact_basis")
-        if cfg.orbitals == "fragment":
-            lb = orbitals.build_fragments(mol, mf, cfg.fragments, compact_basis=compact,
-                                          thresh=cfg.compact_thresh)
-        else:
-            lb = orbitals.build(mol, mf, [names[a] for a in reals], compact_basis=compact,
-                                thresh=cfg.compact_thresh, one_per_atom=cfg.one_per_atom)
-        h1e, eri, ecore = orbitals.mo_integrals(mol, mf, lb.C)
-        orbsym = lb.orbsym_gamess()
-        fcidump.from_integrals(fcidump_path, h1e, eri, lb.nmo, mol.nelectron,
-                               nuc=ecore, ms=cfg.spin, orbsym=orbsym, tol=_TOL,
-                               float_format=_FLOAT_FMT)
-        mo_side = lb.C
-        norb, nelec, ncore = lb.nmo, mol.nelectron, 0
-        ghost_names = list(names)
-        gi = 0
-        for a in range(mol.natm):
-            if mol.atom_charge(a) == 0 and mol.atom_symbol(a).startswith("X") \
-                    and gi < len(cfg.ghost_sites):
-                ghost_names[a] = cfg.ghost_sites[gi]["label"]
-                gi += 1
-        labels = orbitals.sidecar_labels(mol, lb, extra={
-            "atom_names": ghost_names,
-            "lindep_threshold": cfg.lindep,
-            "ghost_sites": cfg.ghost_sites,
-            "kbj": [__import__("kbj").describe(b) for g in cfg.ghost_sites
-                    for b in g["basis"] if __import__("kbj").is_spec(b)],
-        })
-        print(f"{cfg.orbitals} basis: {lb.nocc} occ, {lb.ncompact} compact, {lb.nfree} free; "
-              f"IAO pop min {lb.metrics['occ_iao_pop_min']:.6f}, off-atom ghost weight "
-              f"{lb.metrics['occ_ghost_pop_max']:.2e}, dropped {lb.metrics['n_dropped_lindep']}")
-    elif sel.full:
+    if sel.full:
         # Whole MO space: from_scf, then relabel ORBSYM (as gen_fcidump.py does).
         fcidump.from_scf(mf, fcidump_path, tol=_TOL, float_format=_FLOAT_FMT,
                          molpro_orbsym=True)
@@ -276,7 +205,7 @@ def dump(cfg):
     if cfg.sidecar:
         side = cfg.resolve(cfg.sidecar)
         doc = fcidump_common.write_sidecar(side, mol, mo_side, mf.get_ovlp(),
-                                           dm=mf.make_rdm1(), labels=labels)
+                                           dm=mf.make_rdm1())
         print(f"wrote {side}  nAO={doc['nao']} atoms={doc['atom_names']} "
               f"dipole_origin={doc['dip_origin']}")
 
@@ -285,7 +214,7 @@ def dump(cfg):
         # no basis set, and no viewer can draw an orbital without the GTOs.
         if args_molden:
             fcidump_common.write_molden(args_molden, mol, mo_side,
-                                        nelec_active=int(nelec), labels=labels)
+                                        nelec_active=int(nelec))
             print(f"wrote {args_molden}  {mo_side.shape[1]} MOs, "
                   f"{int(nelec) // 2} occupied (orbital numbering matches ADCgo's)")
 
@@ -298,7 +227,7 @@ def dump(cfg):
             "norb": int(norb), "nelec": int(nelec), "ncore_frozen": int(ncore),
             "e_scf": float(mf.e_tot),
             "orbsym_gamess": [int(x) for x in orbsym],
-            "canonical": cfg.orbitals == "canonical",
+            "canonical": True,
         }
         if cfg.gate is not None:
             manifest["e_scf_gate"] = cfg.gate

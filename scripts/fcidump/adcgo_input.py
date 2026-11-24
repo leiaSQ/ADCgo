@@ -10,6 +10,7 @@ Grammar (``#`` starts a comment; blank lines ignored):
     &geometry
       file   _zmatrix.dat        # GAMESS-UK zmat, .xyz, or Cartesian list
       unit   angstrom            # optional override (zmat carries its own)
+      ghost  13 to 24            # optional: atoms kept as basis centres only (counterpoise)
     &basis
       file   _basisset.dat       # OR:  name cc-pvdz
       cartesian on               # GAMESS-UK uses cartesian GTOs
@@ -19,6 +20,7 @@ Grammar (``#`` starts a comment; blank lines ignored):
       symmetry auto              # auto | off | C2v | Cs | ...
       gate   -76.0498071428      # optional SCF-energy gate
       max_cycle 200              # optional; pyscf's 50 can be short of conv_tol=1e-12
+      lindep 1e-6                # optional: canonical orthogonalization for diffuse bases
     &active
       frozen-core 1              # optional: freeze the N lowest MOs
       frozen-list 2 to 6         # optional: freeze an explicit (non-lowest) MO set
@@ -30,35 +32,14 @@ Grammar (``#`` starts a comment; blank lines ignored):
     &adc                         # optional; consumed by adcgo_run.sh only
       args   -dip -order 2 -solver lanczos -spin both
       sym    1 to 4              # loop target irreps, or `all`
-    &ghost_sites                 # optional: basis-only centres (continuum / Rydberg sets)
-      unit   angstrom            # optional, default angstrom
-      GT     0.0 0.0 0.0  kbj:2:1-8           # label x y z basis-spec [basis-spec...]
-      GCOM   0.0 1.5 0.0  kbj:1:6-10 aug-cc-pvdz@He
     &charges                     # optional: point-charge embedding (pyscf qmmm)
       unit   angstrom            # optional, default angstrom
       file   env.charges         # optional: lines "q x y z" ('#' comments)
       -0.834  1.20 0.00 3.10     # inline: q x y z
-    &orbitals                    # optional: rotated MO basis (orbitals.py)
-      scheme        localized    # canonical (default) | localized | fragment
-      fragments     D:1-3 A:4-6  # scheme fragment: NAME:atoms (1-based, a-b ranges), space-separated
-      compact_basis cc-pvdz      # parent basis whose shells count as compact
-      compact_thresh 0.02        # projected-overlap eigenvalue kept as compact
-      one_per_atom  on           # every real atom owns exactly one occupied orbital
-      lindep        1e-6         # canonical orthogonalization threshold
 
 Point charges enter the one-electron Hamiltonian and the core energy (their interaction with
 the nuclei); their mutual interaction is a constant and is left out. A field of charges
 breaks the molecular point group, so &charges forces `symmetry off` and refuses a named group.
-
-Ghost-site basis specs are "kbj:<lmax>:<n1>-<n2>" (Kaufmann-Baumeister-Jungen
-continuum exponents, kbj.py; "kbjr:" for the Rydberg set) or "<basis>@<element>". The localized scheme
-writes a NON-canonical FCIDUMP (localized occupied, per-atom compact virtuals, free
-complement) and labels every MO in the sidecar (orb_kind, orb_atom, ghost_atoms,
-canonical=false); it cannot be combined with &active. The fragment scheme does the same per
-MOLECULE (orbitals.build_fragments): occupied orbitals localized onto fragments and
-Fock-canonicalized within each (a water's come out 1s, 2a1, 1b2, 3a1, 1b1), compact virtuals
-per fragment, free complement; every orbital is labelled with its fragment's first atom.
-Both are for CI-type operators (adcgo -khci) only: ADC needs canonical orbitals.
 
 Keys are the first token on a line; the value is the rest of the line (so multi-word
 values like `active 2 to 30` or `args -dip -order 2` work). Relative file paths
@@ -101,6 +82,7 @@ class Config:
     level_shift: float = 0.0        # Ha added to the virtual diagonal; decays as it converges
     damp: float = 0.0               # Fock damping factor for the early cycles
     soscf: bool = False             # second-order (Newton) SCF after DIIS stalls
+    lindep: float = None            # drop overlap eigenvalues below this (diffuse bases)
     # orbital selection
     frozen_core: int = None
     frozen_list: str = None
@@ -112,19 +94,9 @@ class Config:
     # adc (driver only)
     adc_args: str = ""
     adc_sym: str = "all"
-    # ghost sites: list of {"label", "xyz" (Angstrom), "basis": [specs]}
-    ghost_sites: list = field(default_factory=list)
-    ghost_unit: str = "angstrom"
     # point charges: [(q, x, y, z)], coordinates in charges_unit
     charges: list = field(default_factory=list)
     charges_unit: str = "angstrom"
-    # orbital scheme
-    orbitals: str = "canonical"
-    fragments: list = field(default_factory=list)  # scheme fragment: [(name, [0-based atoms])]
-    compact_basis: str = None
-    compact_thresh: float = 0.02
-    one_per_atom: bool = True
-    lindep: float = None
     # provenance
     meta: dict = field(default_factory=dict)
 
@@ -177,8 +149,6 @@ def parse_input_file(path):
         parts = stripped.split(None, 1)
         key = parts[0].lower()
         val = parts[1].strip() if len(parts) > 1 else ""
-        if section == "ghost_sites" and key != "unit":
-            key = parts[0]  # a site label is a name (charge rules refer to it): keep case
         _apply(cfg, section, key, val)
 
     _validate(cfg)
@@ -230,6 +200,8 @@ def _apply(cfg, section, key, val):
             cfg.damp = float(val)
         elif key == "soscf":
             cfg.soscf = _to_bool(val)
+        elif key == "lindep":
+            cfg.lindep = float(val)
         else:
             raise ValueError(f"unknown &scf key {key!r}")
     elif section == "active":
@@ -250,22 +222,6 @@ def _apply(cfg, section, key, val):
             cfg.manifest = val
         else:
             raise ValueError(f"unknown &output key {key!r}")
-    elif section == "ghost_sites":
-        if key == "unit":
-            if val.lower() not in ("angstrom", "bohr"):
-                raise ValueError(f"&ghost_sites unit {val!r}: want angstrom or bohr")
-            cfg.ghost_unit = val.lower()
-            return
-        fields = val.split()
-        if len(fields) < 4:
-            raise ValueError(f"&ghost_sites line for {key!r} wants x y z basis-spec...")
-        try:
-            xyz = [float(x) for x in fields[:3]]
-        except ValueError:
-            raise ValueError(f"&ghost_sites {key!r}: bad coordinates {fields[:3]}")
-        if any(g["label"] == key for g in cfg.ghost_sites):
-            raise ValueError(f"&ghost_sites label {key!r} given twice")
-        cfg.ghost_sites.append({"label": key, "xyz": xyz, "basis": fields[3:]})
     elif section == "charges":
         if key == "unit":
             if val.lower() not in ("angstrom", "bohr"):
@@ -275,23 +231,6 @@ def _apply(cfg, section, key, val):
             cfg.charges.extend(read_charges(cfg.resolve(val)))
         else:
             cfg.charges.append(_charge_line(f"{key} {val}", "&charges"))
-    elif section == "orbitals":
-        if key == "scheme":
-            if val not in ("canonical", "localized", "fragment"):
-                raise ValueError(f"&orbitals scheme {val!r}: want canonical, localized or fragment")
-            cfg.orbitals = val
-        elif key == "compact_basis":
-            cfg.compact_basis = val
-        elif key == "compact_thresh":
-            cfg.compact_thresh = float(val)
-        elif key == "one_per_atom":
-            cfg.one_per_atom = _to_bool(val)
-        elif key == "fragments":
-            cfg.fragments = _parse_fragments(val)
-        elif key == "lindep":
-            cfg.lindep = float(val)
-        else:
-            raise ValueError(f"unknown &orbitals key {key!r}")
     elif section == "adc":
         if key == "args":
             cfg.adc_args = val
@@ -326,26 +265,6 @@ def read_charges(path):
     return out
 
 
-def _parse_fragments(val):
-    """'D:1-3 A:4-6' -> [('D', [0, 1, 2]), ('A', [3, 4, 5])] (1-based in, 0-based out)."""
-    out = []
-    for tok in val.split():
-        name, _, spec = tok.partition(":")
-        if not name or not spec:
-            raise ValueError(f"&orbitals fragments {tok!r}: want NAME:atoms")
-        atoms = []
-        for part in spec.split(","):
-            lo, _, hi = part.partition("-")
-            lo, hi = int(lo), int(hi or lo)
-            if lo < 1 or hi < lo:
-                raise ValueError(f"&orbitals fragments {tok!r}: bad atom range {part!r}")
-            atoms += list(range(lo - 1, hi))
-        if any(name == n for n, _ in out):
-            raise ValueError(f"&orbitals fragments: {name!r} given twice")
-        out.append((name, atoms))
-    return out
-
-
 def _validate(cfg):
     if not cfg.geom_file:
         raise ValueError("&geometry file is required")
@@ -359,13 +278,4 @@ def _validate(cfg):
         if isinstance(cfg.symmetry, str):
             raise ValueError(f"&scf symmetry {cfg.symmetry}: point charges break the point "
                              "group; use symmetry off (or auto, which &charges turns off)")
-        cfg.symmetry = False
-    if cfg.orbitals in ("localized", "fragment") and (cfg.active or cfg.frozen_core or cfg.frozen_list):
-        raise ValueError(f"&orbitals {cfg.orbitals} cannot be combined with &active: the "
-                         "rotated basis spans the full occupied and virtual spaces")
-    if cfg.orbitals == "fragment":
-        if not cfg.fragments:
-            raise ValueError("&orbitals scheme fragment needs `fragments NAME:atoms ...`")
-        if isinstance(cfg.symmetry, str):
-            raise ValueError("&orbitals fragment assumes no point group; use symmetry off")
         cfg.symmetry = False

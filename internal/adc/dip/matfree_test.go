@@ -399,90 +399,11 @@ func assertClose(t *testing.T, spin Spin, sym int, what string, want, got []floa
 	}
 }
 
-// TestRestrictIsSubBlock: a space restricted by a hole predicate (the Fano scheme A
-// partition) assembles exactly the parent's sub-block, dense and with the satellite region
-// matrix-free, for both halves of the partition; and a restriction that splits a 3h1p group
-// is refused, since the operator builds each group as one panel.
-func TestRestrictIsSubBlock(t *testing.T) {
-	h2oSectors(t, func(spin Spin, sym int, sp *Space, ints *integrals.Store, eps []float64, be backend.Backend) {
-		full := New(sp, ints, eps, be).BuildMatrix()
-		var q, p []int
-		for r := range sp.Size() {
-			has := false
-			for _, h := range sp.Holes(r, nil) {
-				has = has || h == 1
-			}
-			if has {
-				q = append(q, r)
-			} else {
-				p = append(p, r)
-			}
-		}
-		for _, rows := range [][]int{q, p} {
-			sub, err := sp.Restrict(rows)
-			if err != nil {
-				t.Fatalf("spin=%v sym=%d: %v", spin, sym, err)
-			}
-			for i, r := range rows {
-				if got, want := sub.Holes(i, nil), sp.Holes(r, nil); fmt.Sprint(got) != fmt.Sprint(want) {
-					t.Fatalf("spin=%v sym=%d: restricted row %d holes %v, parent row %d %v", spin, sym, i, got, r, want)
-				}
-			}
-			S := New(sub, ints, eps, be).BuildMatrix()
-			for i, r := range rows {
-				for j, c := range rows {
-					if S.At(i, j) != full.At(r, c) {
-						t.Fatalf("spin=%v sym=%d: restricted (%d,%d)=%g, parent (%d,%d)=%g",
-							spin, sym, i, j, S.At(i, j), r, c, full.At(r, c))
-					}
-				}
-			}
-			if sub.Size() == sub.MainBlockSize() {
-				continue
-			}
-			free := New(sub, ints, eps, be)
-			free.SetMatFree(matfree.On, 0)
-			n := sub.Size()
-			x := make([]float64, n)
-			rng := rand.New(rand.NewSource(int64(n)))
-			for i := range x {
-				x[i] = rng.NormFloat64()
-			}
-			y := be.Alloc(n)
-			free.ApplyFull(y, be.Upload(x))
-			yh := be.Download(y)
-			var worst float64
-			for i := range n {
-				var s float64
-				for j := range n {
-					s += S.At(i, j) * x[j]
-				}
-				worst = max(worst, math.Abs(yh[i]-s))
-			}
-			free.Release()
-			if worst > 1e-11 {
-				t.Errorf("spin=%v sym=%d: matrix-free restricted apply differs from the sub-block by %.2e", spin, sym, worst)
-			}
-		}
-		if len(sp.JII) > 0 {
-			var split []int
-			for r := range sp.Size() {
-				if r != sp.JII[0] {
-					split = append(split, r)
-				}
-			}
-			if _, err := sp.Restrict(split); err == nil {
-				t.Errorf("spin=%v sym=%d: a restriction splitting a 3h1p group was accepted", spin, sym)
-			}
-		}
-	})
-}
-
 // matfree_test.go — a local, sub-second throughput signal for the 3h1p↔3h1p satellite
 // σ-build, the term that is ~96.6% of DIP solver wall time.
 //
 // WHY THIS EXISTS. Until now the only per-mat-vec timing signal was a cluster job (job 14015067,
-// scripts/gpu/uracil2W_mgpu_timing.sbatch), i.e. hours of queue per data point. That job measured the
+// a cluster timing job), i.e. hours of queue per data point. That job measured the
 // satellite apply at 0.196 TFLOP/s per H200 = 0.58% of fp64 vector peak — even after the
 // per-device NVLink rewrite that was itself 12.6× faster than its predecessor. The contraction
 // work planned on the back of that number (docs/sigma_build_contractions.md) needs a signal that
@@ -541,7 +462,7 @@ func benchSector(b *testing.B) (*Matrix, int, uint64) {
 }
 
 // BenchmarkSatelliteApply times the matrix-free satellite apply at several panel widths. b=435
-// matches the sector width of the cluster measurement (uracil2W_dz main=435); b=64 matches
+// matches the sector width of the cluster measurement (system B (DZ), main=435); b=64 matches
 // SatChunkCols, the per-device gather chunk. Report is GFLOP/s via the 2·nnz·b model.
 func BenchmarkSatelliteApply(bb *testing.B) {
 	for _, cols := range []int{1, 64, 435} {

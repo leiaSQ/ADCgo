@@ -20,17 +20,17 @@
 //	plotspec -in spec.json -exp h2o_auger_experimental.json -out spectrum.png
 //	plotspec -in spec.json -out spectrum.png -xrange 30-100
 //	plotspec -in sip.json  -out sip.png            # SIP: one curve per orbital
-//	plotspec -mode tdm -in tdm.json -out tdm.png -stick -overlay-broadened -stick-height 0.6
+//	plotspec -in sip.json  -out sip.png -stick -overlay-broadened -stick-height 0.6
 //	plotspec -mode stack -stack-manifest sip_manifest.json -stack-dir specs -stack-group 1 -out conformers.pdf
 //
-// The same renderer handles DIP, SIP and TDM JSON (meta.kind): SIP channels are
+// The same renderer handles DIP and SIP JSON (meta.kind): SIP channels are
 // orbitals, and the axis/title switch to single-ionization wording.
 //
 // -stick draws one bar per state instead of the broadened curves; adding
 // -overlay-broadened draws the curves on top of the sticks as well, and
 // -stick-height scales the sticks (sticks and curves are normalised separately,
 // so -stick-height 0.6 keeps the bars under the envelope). Both work in every
-// single-spectrum mode (spectrum/SIP/DIP/tdm) as well as in panel mode.
+// single-spectrum mode (spectrum/SIP/DIP) as well as in panel mode.
 //
 // The Y axis defaults to relative intensity (tallest displayed peak = 1); pass
 // -absolute to plot the raw broadened intensity instead.
@@ -101,7 +101,7 @@ func main() {
 
 func run() error {
 	var (
-		mode         = flag.String("mode", "spectrum", "plot mode: \"spectrum\" (single DIP/SIP JSON via -in), \"tdm\" (transition-dipole spectrum from an adcgo -tdm JSON via -in), \"ees\" (electron-emission spectrum from -sip + -dip), \"panel\" (SIP/DIP sticks plus the electron spectrum; with -ref-sip/-ref-dip panel (c) decomposes into Auger-Meitner vs ICD), \"stack\" (energy-offset waterfall of several conformers' spectra), or \"ees-diff\" (one electron-emission spectrum minus a scaled reference one, e.g. dimer - 2x monomer)")
+		mode         = flag.String("mode", "spectrum", "plot mode: \"spectrum\" (single DIP/SIP JSON via -in), \"ees\" (electron-emission spectrum from -sip + -dip), \"panel\" (SIP/DIP sticks plus the electron spectrum; with -ref-sip/-ref-dip panel (c) decomposes into Auger-Meitner vs ICD), \"stack\" (energy-offset waterfall of several conformers' spectra), or \"ees-diff\" (one electron-emission spectrum minus a scaled reference one, e.g. dimer - 2x monomer)")
 		sipPath      = flag.String("sip", "", "ees mode: single-ionization spectrum JSON (S_in)")
 		refSIP       = flag.String("ref-sip", "", "ees-diff and panel modes: the REFERENCE system's single-ionization spectrum JSON (e.g. the counterpoise monomer). In panel mode, setting this and -ref-dip turns panel (c) into the mechanism decomposition: the scaled non-interacting background as stacked Auger-Meitner (one-site) and ICD (two-site) bands, with the system drawn over them")
 		refDIP       = flag.String("ref-dip", "", "ees-diff and panel modes: the REFERENCE system's double-ionization spectrum JSON")
@@ -138,7 +138,7 @@ func run() error {
 		xRangeC      = flag.String("xrange-c", "0-14", "panel mode: X window (eV) for panel (c) electron-emission spectrum")
 		sipGroups    = multiFlag{}
 		sipGroupI    bool
-		overlay      = flag.Bool("overlay-broadened", false, "overlay the Gaussian-broadened curves on the -stick spectrum (spectrum/tdm mode: one curve per channel; panel mode: one total envelope on the (a)/(b) sticks)")
+		overlay      = flag.Bool("overlay-broadened", false, "overlay the Gaussian-broadened curves on the -stick spectrum (spectrum mode: one curve per channel; panel mode: one total envelope on the (a)/(b) sticks)")
 		stickHeight  = flag.Float64("stick-height", 1, "scale factor for the normalised stick heights (the broadened curves stay at 1); use <1 so the sticks sit below the -overlay-broadened curve")
 
 		// stack mode: the energy-offset waterfall (see stack.go).
@@ -220,25 +220,16 @@ func run() error {
 			width: *width, height: *height, dpi: *dpi,
 			refSIP: *refSIP, refDIP: *refDIP, refScale: *refScale,
 			twoSiteWeight: *twoSiteW, twoSiteShift: *twoSiteShift,
-			dataOut: *dataPath,
+			dataOut:  *dataPath,
 			panelSym: *panelSym, irrepLabels: *irrepLabels, dipFamily: *dipFamily,
 		})
 	case "spectrum":
 		// fall through to the single-spectrum renderer below
-	case "tdm":
-		// fall through: the transition-dipole document is flattened into the same
-		// (energy, intensity, channel) spectrum below, then rendered identically.
 	default:
-		return fmt.Errorf("-mode must be \"spectrum\", \"tdm\", \"ees\", \"ees-diff\", \"panel\" or \"stack\", got %q", *mode)
+		return fmt.Errorf("-mode must be \"spectrum\", \"ees\", \"ees-diff\", \"panel\" or \"stack\", got %q", *mode)
 	}
 
-	var spec *spectrum
-	var err error
-	if *mode == "tdm" {
-		spec, err = readTDM(*inPath)
-	} else {
-		spec, err = readSpectrum(*inPath)
-	}
+	spec, err := readSpectrum(*inPath)
 	if err != nil {
 		return err
 	}
@@ -466,43 +457,30 @@ func run() error {
 	p := plot.New()
 	kind := spec.Meta.Kind
 	sip := kind == "sip"
-	tdm := kind == "tdm"
 	unit := spec.Meta.EnergyUnit
 	if unit == "" {
 		unit = "eV"
 	}
 	var title string
-	switch {
-	case tdm:
-		title = "Transition-dipole spectrum"
-	case sip:
+	if sip {
 		title = "Single-ionization spectrum"
-	default:
+	} else {
 		title = "Decay-channel spectrum"
 	}
 	if spec.Meta.Molecule != "" {
 		title = spec.Meta.Molecule + " " + title
 	}
-	if a := spec.Meta.InitialIonization.Atom; a != "" && !sip && !tdm {
+	if a := spec.Meta.InitialIonization.Atom; a != "" && !sip {
 		title += fmt.Sprintf(" (initial: %s)", a)
 	}
 	p.Title.Text = title
-	switch {
-	case tdm:
-		p.X.Label.Text = "Transition energy (" + unit + ")"
-	case sip:
+	if sip {
 		p.X.Label.Text = "Ionization energy (" + unit + ")"
-	default:
+	} else {
 		p.X.Label.Text = "Double-ionization energy (" + unit + ")"
 	}
-	// The transition-dipole intensity is oscillator strength, not a population, so
-	// its Y axis is labelled accordingly; every other kind is a generic intensity.
 	yQty := "intensity"
 	yQtyCap := "Intensity"
-	if tdm {
-		yQty = "oscillator strength"
-		yQtyCap = "Oscillator strength"
-	}
 	geom := fmt.Sprintf("Gaussian-broadened, FWHM %.2g %s", *fwhm, unit)
 	switch {
 	case drawSticks && drawCurves:
@@ -597,85 +575,6 @@ func run() error {
 	fmt.Fprintf(os.Stderr, "plotspec: wrote %s (%d channels, %d sticks)\n",
 		*outPath, nChans, nLines)
 	return nil
-}
-
-// tdmTransition is one radiative transition (emission or cross-emission) of the
-// -tdm document written by `adcgo -sip -tdm` (cmd/adcgo/sip_tdm.go). Only the
-// fields the spectrum needs are decoded; the rest (mu, rate, indices) are ignored.
-type tdmTransition struct {
-	OmegaEV float64 `json:"omega_ev"` // photon energy E_init − E_mid, eV
-	Osc     float64 `json:"osc"`      // oscillator strength f
-}
-
-// tdmPhotChannel is one virtual-orbital channel of a state's Dyson
-// photoionization pseudo-spectrum.
-type tdmPhotChannel struct {
-	OmegaEV float64 `json:"omega_ev"` // photon energy E_state + ε_a, eV
-	Osc     float64 `json:"osc"`      // oscillator strength (2/3)·ω·|μ|²
-}
-
-type tdmPhotoionization struct {
-	Channels []tdmPhotChannel `json:"channels"`
-}
-
-// tdmDocument mirrors the subset of cmd/adcgo's SIPTDMDocument that carries
-// transition intensities. Unknown fields (sectors, norb, …) are ignored.
-type tdmDocument struct {
-	Emissions       []tdmTransition      `json:"emissions"`
-	CrossEmissions  []tdmTransition      `json:"cross_emissions"`
-	Photoionization []tdmPhotoionization `json:"photoionization"`
-}
-
-// tdmChannelOrder is the canonical channel ordering for a transition-dipole plot.
-var tdmChannelOrder = []string{"emission", "cross-emission", "photoionization"}
-
-// readTDM loads a -tdm document and flattens its transitions into the standard
-// (energy, intensity, channel) spectrum so the shared renderer draws it: the
-// x-position is the photon energy omega_ev, the height is the oscillator strength
-// osc, and the three transition families become the plotted channels. Transitions
-// with non-positive oscillator strength are dropped (dipole-forbidden / numerical
-// zeros contribute no visible stick).
-func readTDM(path string) (*spectrum, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var d tdmDocument
-	if err := json.Unmarshal(b, &d); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	s := &spectrum{}
-	s.Meta.Kind = "tdm"
-	s.Meta.EnergyUnit = "eV"
-	add := func(ch string, omega, osc float64) {
-		if osc <= 0 {
-			return
-		}
-		s.Lines = append(s.Lines, specLine{Energy: omega, Intensity: osc, Channel: ch})
-	}
-	for _, e := range d.Emissions {
-		add("emission", e.OmegaEV, e.Osc)
-	}
-	for _, e := range d.CrossEmissions {
-		add("cross-emission", e.OmegaEV, e.Osc)
-	}
-	for _, ph := range d.Photoionization {
-		for _, c := range ph.Channels {
-			add("photoionization", c.OmegaEV, c.Osc)
-		}
-	}
-	// Emit only the channels actually present, in canonical order, so the legend
-	// and colour assignment are deterministic across runs.
-	present := map[string]bool{}
-	for _, l := range s.Lines {
-		present[l.Channel] = true
-	}
-	for _, ch := range tdmChannelOrder {
-		if present[ch] {
-			s.Channels = append(s.Channels, ch)
-		}
-	}
-	return s, nil
 }
 
 // readSpectrum loads and decodes one spectrum JSON file.

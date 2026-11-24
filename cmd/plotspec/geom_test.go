@@ -7,26 +7,21 @@ import (
 	"testing"
 )
 
-// uracilW1 is the UW1_N1H basin as GAMESS-UK echoes it into sip.out: uracil
-// with one water hydrogen-bonded to the N1-H site. The ">>>>>" prefixes are
+// formamideW1 is formamide with one water bridging its cis N-H and its carbonyl,
+// written as GAMESS-UK echoes a Z-matrix into its output. The ">>>>>" prefixes are
 // kept deliberately -- reading a Z-matrix straight out of a run's output is the
-// path the figures take.
-const uracilW1 = `>>>>> zmat angstroms
->>>>> N
->>>>> C 1 1.375755
->>>>> N 2 1.370544 1 114.279419
->>>>> C 3 1.405248 1 94.732670 2 179.758427
->>>>> C 4 1.452074 2 87.650786 1 -0.235971
->>>>> C 5 1.350162 3 86.921053 2 0.112842
->>>>> O 2 1.228024 3 122.856338 5 179.769304
->>>>> O 4 1.218063 3 120.031629 1 179.904843
->>>>> H 1 1.023713 7 87.947141 8 -179.807073
->>>>> H 3 1.012333 7 89.074207 9 179.973201
->>>>> H 5 1.081068 8 94.129275 10 -179.728839
->>>>> H 6 1.084675 9 90.917638 7 179.555628
->>>>> O 9 1.875941 7 76.999576 8 176.783361
->>>>> H 13 0.976455 9 85.330123 7 1.398664
->>>>> H 13 0.960256 14 107.377315 11 -138.001223
+// path the figures take. The free water hydrogen sits out of the molecular plane
+// so the round trip below exercises a dihedral that is neither 0 nor 180 degrees.
+const formamideW1 = `>>>>> zmat angstroms
+>>>>> C
+>>>>> O 1 1.220000
+>>>>> N 1 1.360349 2 124.729783
+>>>>> H 1 1.100172 2 121.999863 3 179.750000
+>>>>> H 3 1.010046 1 119.948325 2 0.000000
+>>>>> H 3 1.010415 1 120.017942 2 180.000000
+>>>>> O 5 1.999634 3 139.092368 1 0.000000
+>>>>> H 7 0.970277 5 60.847977 3 0.000000
+>>>>> H 7 0.969153 8 104.464819 5 -165.000000
 >>>>> variables
 >>>>> constants
 >>>>> end
@@ -46,25 +41,24 @@ func writeTemp(t *testing.T, name, body string) string {
 // Z-matrix it came from. A sign slip in the dihedral convention would mirror
 // the molecule and silently draw the wrong enantiomeric view.
 func TestZMatRoundTrip(t *testing.T) {
-	g, err := readGeometry(writeTemp(t, "g.zmat", uracilW1))
+	g, err := readGeometry(writeTemp(t, "g.zmat", formamideW1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(g.pos) != 15 {
-		t.Fatalf("got %d atoms, want 15", len(g.pos))
+	if len(g.pos) != 9 {
+		t.Fatalf("got %d atoms, want 9", len(g.pos))
 	}
 
 	rows := []struct {
 		i, a, b, c       int // 0-based
 		dist, ang, dihed float64
 	}{
-		{1, 0, -1, -1, 1.375755, 0, 0},
-		{2, 1, 0, -1, 1.370544, 114.279419, 0},
-		{3, 2, 0, 1, 1.405248, 94.732670, 179.758427},
-		{6, 1, 2, 4, 1.228024, 122.856338, 179.769304},
-		{8, 0, 6, 7, 1.023713, 87.947141, -179.807073},
-		{12, 8, 6, 7, 1.875941, 76.999576, 176.783361},
-		{14, 12, 13, 10, 0.960256, 107.377315, -138.001223},
+		{1, 0, -1, -1, 1.220000, 0, 0},
+		{2, 0, 1, -1, 1.360349, 124.729783, 0},
+		{3, 0, 1, 2, 1.100172, 121.999863, 179.750000},
+		{4, 2, 0, 1, 1.010046, 119.948325, 0},
+		{6, 4, 2, 0, 1.999634, 139.092368, 0},
+		{8, 6, 7, 4, 0.969153, 104.464819, -165.000000},
 	}
 	for _, r := range rows {
 		if got := dist(g.pos[r.i], g.pos[r.a]); math.Abs(got-r.dist) > 1e-6 {
@@ -86,18 +80,18 @@ func TestZMatRoundTrip(t *testing.T) {
 	}
 }
 
-// TestTopology checks the inferred chemistry: the uracil ring, its substituents
-// and the single water, plus the N-H···OH2 contact that names this basin.
+// TestTopology checks the inferred chemistry: the formamide skeleton, the single
+// water, and the two hydrogen bonds that close the cyclic complex.
 func TestTopology(t *testing.T) {
-	g, err := readGeometry(writeTemp(t, "g.zmat", uracilW1))
+	g, err := readGeometry(writeTemp(t, "g.zmat", formamideW1))
 	if err != nil {
 		t.Fatal(err)
 	}
 	bonds := g.bonds()
 
-	// Uracil: 6 ring bonds + 2 C=O + 2 N-H + 2 C-H = 12; water: 2 O-H.
-	if len(bonds) != 14 {
-		t.Errorf("got %d covalent bonds, want 14 (12 uracil, 2 water O-H)", len(bonds))
+	// Formamide: C=O + C-N + C-H + 2 N-H = 5; water: 2 O-H.
+	if len(bonds) != 7 {
+		t.Errorf("got %d covalent bonds, want 7 (5 formamide, 2 water O-H)", len(bonds))
 	}
 	comp := components(len(g.pos), bonds)
 	nSolvent := 0
@@ -110,14 +104,13 @@ func TestTopology(t *testing.T) {
 		t.Errorf("solvent fragment has %d atoms, want 3 (one water)", nSolvent)
 	}
 
-	// The water bridges: it accepts from N1-H and donates back to the C2
-	// carbonyl. That bidentate motif is why the N1H, O2 and O2-N1H starting
-	// guesses all relax into one basin.
+	// The water bridges: it accepts from the N-H cis to the carbonyl and donates
+	// back to the carbonyl oxygen.
 	hb := g.hydrogenBonds(bonds)
 	if len(hb) != 2 {
 		t.Fatalf("got %d hydrogen bonds, want 2: %v", len(hb), hb)
 	}
-	want := [][2]int{{8, 12}, {13, 6}} // N1-H···Ow, and Hw···O(C2); 0-based
+	want := [][2]int{{4, 6}, {7, 1}} // N-H···Ow, and Hw···O=C; 0-based
 	for i, w := range want {
 		if hb[i] != w {
 			t.Errorf("hydrogen bond %d = %v, want %v", i, hb[i], w)
@@ -132,7 +125,7 @@ func TestTopology(t *testing.T) {
 // TestDepict checks the ball-and-stick reduction: every atom is drawn, carries
 // an element style, and lands in the unit box.
 func TestDepict(t *testing.T) {
-	g, err := readGeometry(writeTemp(t, "g.zmat", uracilW1))
+	g, err := readGeometry(writeTemp(t, "g.zmat", formamideW1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +133,8 @@ func TestDepict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(d.pts) != 15 {
-		t.Errorf("drew %d atoms, want 15", len(d.pts))
+	if len(d.pts) != 9 {
+		t.Errorf("drew %d atoms, want 9", len(d.pts))
 	}
 	if len(d.elems) != len(d.pts) {
 		t.Fatalf("%d elements for %d points", len(d.elems), len(d.pts))
@@ -150,7 +143,7 @@ func TestDepict(t *testing.T) {
 	for _, el := range d.elems {
 		counts[el]++
 	}
-	for el, want := range map[string]int{"C": 4, "N": 2, "O": 3, "H": 6} {
+	for el, want := range map[string]int{"C": 1, "N": 1, "O": 2, "H": 5} {
 		if counts[el] != want {
 			t.Errorf("%d %s atoms, want %d", counts[el], el, want)
 		}
@@ -162,8 +155,8 @@ func TestDepict(t *testing.T) {
 			t.Errorf("element %q has no CPK style", el)
 		}
 	}
-	if len(d.bonds) != 14 {
-		t.Errorf("%d bonds drawn, want 14", len(d.bonds))
+	if len(d.bonds) != 7 {
+		t.Errorf("%d bonds drawn, want 7", len(d.bonds))
 	}
 	if len(d.hbonds) != 2 {
 		t.Errorf("%d hydrogen bonds drawn, want 2", len(d.hbonds))
@@ -178,7 +171,7 @@ func TestDepict(t *testing.T) {
 // TestPlanarProjection checks that the best-fit plane really is the molecular
 // plane, by confirming the out-of-plane spread is tiny next to the in-plane one.
 func TestPlanarProjection(t *testing.T) {
-	g, err := readGeometry(writeTemp(t, "g.zmat", uracilW1))
+	g, err := readGeometry(writeTemp(t, "g.zmat", formamideW1))
 	if err != nil {
 		t.Fatal(err)
 	}

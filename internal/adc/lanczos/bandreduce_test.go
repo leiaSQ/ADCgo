@@ -171,7 +171,7 @@ func TestBlockQRReduceHalvesBandwidth(t *testing.T) {
 // into the strip's columns because blas64 forbids C aliasing A or B. If gonum declines to thread a
 // strided General, or the copy dominates, that shows up here and nowhere else.
 //
-// rows = 3080 is production's accumulated width. m = 1540 is the first sweep's window at the melanin
+// rows = 3080 is production's accumulated width. m = 1540 is the first sweep's window at the production
 // shape (bandwidth 3079 halving to 1540); m = 192 is the last.
 func BenchmarkStripApplyQ(b *testing.B) {
 	for _, m := range []int{1540, 192} {

@@ -100,8 +100,8 @@ func stackColor(t float64) color.RGBA {
 }
 
 // stackTrim drops the longest prefix shared by every label and ending at a "_",
-// so run names like UW1_O2-N1H / UW1_O4-N3H label their traces as O2-N1H /
-// O4-N3H -- the hydration level is already the figure's title. A label is left
+// so run names like W1_siteA-siteB / W1_siteC-siteD label their traces as siteA-siteB /
+// siteC-siteD -- the shared prefix is already in the figure's title. A label is left
 // alone if trimming would empty it.
 func stackTrim(traces []stackTrace) {
 	if len(traces) < 2 {

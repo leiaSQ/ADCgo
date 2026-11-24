@@ -3,8 +3,8 @@
 MO integrals as an FCIDUMP, and write a golden reference JSON that the Go tests
 validate against.
 
-Run with the `adcgo` conda env:
-    /home/leia/miniconda3/envs/adcgo/bin/python scripts/fixtures/gen_fcidump.py
+Run with a Python that has pyscf:
+    python scripts/fixtures/gen_fcidump.py
 
 With --sidecar-only, only the dipole/geometry keys of the existing sidecar are
 refreshed; the FCIDUMP and the golden reference are left alone. Use that to extend

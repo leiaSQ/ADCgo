@@ -20,9 +20,8 @@ type Matrix struct {
 	op    *assembledOp // built lazily on the first ApplyFull, reused thereafter
 	sigma func(i, j int) float64
 
-	matFree       MatFreeMode // dense (default) vs matrix-free for large ADC(4) blocks
+	matFree       MatFreeMode // dense (default) vs matrix-free for the 2h1p/2h1p satellite block
 	matFreeBudget int64       // Auto threshold: dense block bytes above which to go matrix-free
-	wert3         bool        // include the WERT3 5th-order 3h2p-diagonal correction (opt-in)
 
 	// loadMain/saveMain persist the assembled 1h/1h main block across processes. nil (the
 	// default) keeps this package free of I/O, exactly as lanczos.Options.Checkpoint does.
@@ -34,10 +33,6 @@ type Matrix struct {
 	// rebuilding it is 2.0e9 Eri() calls / 16.2 GB at the production system's norb=212. Mirrors dip's
 	// Matrix.flatERI.
 	flatERI []float64
-
-	// sat3dets is the ADC(2,2) 3h2p determinant table both matrix-free appliers share
-	// (matfree22.go), built on first use.
-	sat3dets *sat3Dets
 }
 
 // SetMainBlockCache installs load/save hooks for the assembled 1h/1h main block.
@@ -69,18 +64,12 @@ func (mx *Matrix) mainBlockCached() backend.Mat {
 	return m
 }
 
-// SetWert3 enables the WERT3 5th-order 3h2p-CI diagonal correction (the full EIGAB
-// effective diagonal). Off by default; opt-in until the theADCcode EIGAB value-gate is
-// unblocked. See sat3Diag / elements4.go wert3elem.
-func (mx *Matrix) SetWert3(on bool) { mx.wert3 = on }
-
 // SetStaticSelfEnergy supplies the static self-energy Σ_ij (a.u.) for the 1h/1h block,
-// indexed by absolute occupied-orbital indices. It is subtracted from the main block in
-// both paths: CVS-ADC(4) (−ε_i δ_ij − Σ_ij, mainBlock4) and ADC(2)/(3) (c11 − Σ,
-// mainBlock). This mirrors theADCcode, which in both propagators reads Σ from a separate
+// indexed by absolute occupied-orbital indices. It is subtracted from the main block
+// (c11 − Σ, mainBlock). This mirrors theADCcode, which reads Σ from a separate
 // self-energy module (&self-energy) rather than from the ADC matrix code — for ndadc3ip
 // the omission is worth ~0.2 eV on the main lines. Pass nil (the default) for no Σ.
-// See docs/adc4_sip_spec.md, TestADC4StaticSigmaGate and TestSIPMatchedReference.
+// See TestSIPMatchedReference.
 func (mx *Matrix) SetStaticSelfEnergy(sigma func(i, j int) float64) { mx.sigma = sigma }
 
 // New builds the IP-ADC(order) matrix engine for space sp. order is 2 or 3.
@@ -104,17 +93,25 @@ type assembledOp struct {
 	batches []backend.Batch
 	sa      []backend.DeviceMat
 	sb, sc  []backend.BlockView
-	diags   []diagPart    // purely diagonal blocks, applied elementwise (not via GEMM)
 	mf      []matFreePart // blocks applied by on-the-fly element recompute (not stored)
 }
 
-// diagPart is a diagonal operator block on the main diagonal at offset off: the resident
-// vector d holds its diagonal entries, applied as out[off:] += d ⊙ in[off:]. It exists so
-// the CVS-ADC(4) 3h2p/3h2p block (diagonal until WERT3 is added) never materializes as a
-// dense n×n matrix — the difference between MB and TB for a large satellite space.
-type diagPart struct {
-	off int
-	d   backend.Vector
+// finalizeOp plans the batched GEMM dispatch for the assembled blocks and sizes the
+// per-batch scratch slices ApplyBlock reuses.
+func finalizeOp(parts []placement, mf []matFreePart) *assembledOp {
+	batches := backend.PlanBatches(parts)
+	widest := 0
+	for _, b := range batches {
+		if len(b.Blocks) > widest {
+			widest = len(b.Blocks)
+		}
+	}
+	return &assembledOp{
+		parts: parts, batches: batches, mf: mf,
+		sa: make([]backend.DeviceMat, widest),
+		sb: make([]backend.BlockView, widest),
+		sc: make([]backend.BlockView, widest),
+	}
 }
 
 // mainBlock builds the dense symmetric 1h/1h main block: c11 (= k1 + c11_2 [+ c11_3])
@@ -193,8 +190,7 @@ func (mx *Matrix) mainBlock() backend.Mat {
 // range, so the work items are disjoint (parallel.Chunks' contract) and the fill is bit-identical
 // to the serial one — each cell is still computed exactly once by the same expression; only the
 // order in which independent cells are filled changes. `elements` is immutable after
-// construction and v/so are pure reads, so the concurrent c12 calls are safe. Same treatment
-// matvec4.go already gives the ADC(4) blocks (coupling2_4 etc.).
+// construction and v/so are pure reads, so the concurrent c12 calls are safe.
 func (mx *Matrix) coupling() backend.Mat {
 	sp := mx.sp
 	main := sp.BeginSat
@@ -256,56 +252,6 @@ func (mx *Matrix) OperatorResidentBytes() uint64 {
 	const w = 8 // sizeof(float64)
 	var bytes uint64
 
-	if mx.isADC4() {
-		n2 := sp.Begin3h2p - main // 2h1p
-		n3 := len(sp.Sat3)        // 3h2p
-		if main > 0 {
-			bytes += uint64(main) * uint64(main) * w
-			if n2 > 0 {
-				bytes += uint64(main) * uint64(n2) * w
-			}
-			if n3 > 0 {
-				bytes += uint64(main) * uint64(n3) * w
-			}
-		}
-		if n2 > 0 && !mx.matFreeC22(int64(n2)*int64(n2)*w) {
-			bytes += uint64(n2) * uint64(n2) * w
-		}
-		if n3 > 0 {
-			bytes += uint64(n3) * w // 3h2p/3h2p is diagonal: a vector, not a block
-			if n2 > 0 && !mx.matFreeWert2(int64(n2)*int64(n3)*w) {
-				bytes += uint64(n2) * uint64(n3) * w
-			}
-		}
-		return bytes
-	}
-
-	if mx.isADC22() {
-		n2 := sp.Begin3h2p - main // 2h1p
-		n3 := len(sp.Sat3)        // 3h2p
-		if main > 0 {
-			bytes += uint64(main) * uint64(main) * w
-			if n2 > 0 {
-				bytes += uint64(main) * uint64(n2) * w
-			}
-		}
-		if n2 > 0 {
-			bytes += uint64(n2) * uint64(n2) * w // 2h1p/2h1p: always dense today
-		}
-		if n3 > 0 {
-			switch {
-			case mx.el.variant == VariantM:
-				bytes += uint64(n3) * w // A18 only: a diagonal vector, not a block
-			case !mx.matFreeSat3(blockBytes(n3, n3)):
-				bytes += uint64(n3) * uint64(n3) * w
-			}
-			if n2 > 0 && !mx.matFreeC23(blockBytes(n2, n3)) {
-				bytes += uint64(n2) * uint64(n3) * w
-			}
-		}
-		return bytes
-	}
-
 	nSat := sp.Size() - main
 	if main > 0 {
 		bytes += uint64(main) * uint64(main) * w
@@ -319,8 +265,7 @@ func (mx *Matrix) OperatorResidentBytes() uint64 {
 	return bytes
 }
 
-// assemble uploads the blocks once for the resident matrix-vector product. Order 4
-// (CVS ADC(4), with a 3h2p space) uses the assemble4 path (matvec4.go).
+// assemble uploads the blocks once for the resident matrix-vector product.
 // Assembly progress logging. On by default, and deliberately: block assembly is the phase
 // between the static self-energy and the solver's first block, it can dominate a large run,
 // and it used to be completely silent. The production system's 1h/2h1p coupling ran >76 h there while the
@@ -359,12 +304,6 @@ func (mx *Matrix) assembleStep(what string, run func()) {
 }
 
 func (mx *Matrix) assemble() *assembledOp {
-	if mx.isADC4() {
-		return mx.assemble4()
-	}
-	if mx.isADC22() {
-		return mx.assemble22()
-	}
 	sp := mx.sp
 	main := sp.BeginSat
 	nSat := sp.Size() - main
@@ -400,7 +339,7 @@ func (mx *Matrix) assemble() *assembledOp {
 			})
 		}
 	}
-	return finalizeOp(parts, nil, mfree)
+	return finalizeOp(parts, mfree)
 }
 
 // Release frees the backend-resident operator blocks (a no-op on host backends).
@@ -412,16 +351,12 @@ func (mx *Matrix) Release() {
 	for _, p := range mx.op.parts {
 		mx.be.FreeMat(p.A)
 	}
-	for _, dg := range mx.op.diags {
-		mx.be.Free(dg.d)
-	}
 	for _, p := range mx.op.mf {
 		if p.release != nil {
 			p.release()
 		}
 	}
 	mx.op = nil
-	mx.sat3dets = nil
 }
 
 // Size is the matrix dimension.
@@ -434,70 +369,33 @@ func (mx *Matrix) MainBlockSize() int { return mx.sp.MainBlockSize() }
 // Space returns the underlying configuration space.
 func (mx *Matrix) Space() *Space { return mx.sp }
 
-// Backend returns the backend this matrix was built on, so a caller that had the backend
-// chosen for it (the Fano driver, which builds several sub-matrices through one chooser)
-// can allocate vectors on the same one rather than tracking it separately.
-func (mx *Matrix) Backend() backend.Backend { return mx.be }
-
 // Diagonal returns the resident diagonal of the secular matrix, assembled directly from
 // the per-block element functions — never from BuildMatrix, which is terabytes for a
-// large matrix-free order-4 sector. Only the block-diagonal blocks (1h, 2h1p, 3h2p)
+// large matrix-free sector. Only the block-diagonal blocks (1h, 2h1p)
 // contribute; the off-diagonal coupling blocks have zero diagonal. It backs the Davidson
 // (θ−D)⁻¹ preconditioner (lanczos.PreconOperator).
 func (mx *Matrix) Diagonal(be backend.Backend) backend.Vector {
 	sp := mx.sp
 	d := make([]float64, sp.Size())
 	main := sp.BeginSat
-	if mx.isADC22() {
-		mx.diagonal22(d)
-		return be.Upload(d)
+	// 1h: c11 − Σ (mainBlock).
+	for r := range main {
+		i := sp.Configs[r].Occ[0]
+		v := mx.el.c11(i, i)
+		if mx.sigma != nil {
+			v -= mx.sigma(i, i)
+		}
+		d[r] = v
 	}
-	if mx.isADC4() {
-		// 1h: −ε_P − Σ_PP (mainBlock4).
-		for r := range main {
-			p := sp.Configs[r].Occ[0]
-			v := -mx.el.eps[p]
-			if mx.sigma != nil {
-				v -= mx.sigma(p, p)
-			}
-			d[r] = v
-		}
-		// 2h1p: c22elem4 on the diagonal (satBlock2_4).
-		for r := main; r < sp.Begin3h2p; r++ {
-			cfg := sp.Configs[r]
-			d[r] = mx.el.c22elem4(cfg, cfg)
-		}
-		// 3h2p: the EIGAB effective diagonal (already a resident vector in the matfree path).
-		for r, v := range mx.sat3Diag() {
-			d[sp.Begin3h2p+r] = v
-		}
-	} else {
-		// 1h: c11 − Σ (mainBlock).
-		for r := range main {
-			i := sp.Configs[r].Occ[0]
-			v := mx.el.c11(i, i)
-			if mx.sigma != nil {
-				v -= mx.sigma(i, i)
-			}
-			d[r] = v
-		}
-		// 2h1p: k2 + c22_1 on the diagonal (satBlock).
-		for r := main; r < sp.Size(); r++ {
-			d[r] = mx.el.c22diag(sp.Configs[r])
-		}
+	// 2h1p: k2 + c22_1 on the diagonal (satBlock).
+	for r := main; r < sp.Size(); r++ {
+		d[r] = mx.el.c22diag(sp.Configs[r])
 	}
 	return be.Upload(d)
 }
 
 // BuildMatrix materializes the full symmetric secular matrix (both triangles).
-// Order 4 uses the buildMatrix4 path (matvec4.go).
 func (mx *Matrix) BuildMatrix() backend.Mat {
-	if mx.isADC4() {
-		return mx.buildMatrix4()
-	}
-	if mx.isADC22() {
-		return mx.buildMatrix22()
-	}
 	sp := mx.sp
 	main := sp.BeginSat
 	M := backend.NewMat(sp.Size(), sp.Size())
@@ -542,10 +440,6 @@ func (mx *Matrix) ApplyFull(out, in backend.Vector) {
 			mx.be.GemvT(1, p.A, in.Slice(p.RowOff, rows), out.Slice(p.ColOff, cols))
 		}
 	}
-	for _, dg := range mx.op.diags {
-		n := dg.d.Len()
-		mx.be.AxpyDiag(dg.d, in.Slice(dg.off, n), out.Slice(dg.off, n))
-	}
 	if len(mx.op.mf) > 0 {
 		n := mx.sp.Size()
 		inV := backend.BlockView{V: in, Rows: n, Cols: 1, Ld: n}
@@ -580,16 +474,6 @@ func (mx *Matrix) ApplyBlock(out, in backend.BlockView) {
 			}
 		}
 		mx.be.GemmMatBatched(bt.Trans, 1, op.sa[:n], op.sb[:n], 1, op.sc[:n])
-	}
-	// Diagonal blocks: apply d ⊙ (each column) over the block's row band. Columns are
-	// independent, so this is a per-column AxpyDiag on the sub-panel.
-	for _, dg := range op.diags {
-		n := dg.d.Len()
-		inSub := in.RowRange(dg.off, n)
-		outSub := out.RowRange(dg.off, n)
-		for j := range inSub.Cols {
-			mx.be.AxpyDiag(dg.d, inSub.Col(j), outSub.Col(j))
-		}
 	}
 	for _, p := range op.mf {
 		p.apply(in, out)

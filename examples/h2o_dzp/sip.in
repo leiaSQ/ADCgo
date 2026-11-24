@@ -1,0 +1,24 @@
+# ADCgo SIP-ADC(3) run on H2O, DZP+Diffuse (Dunning) basis, active space 2..30.
+#
+#   scripts/adcgo_run.sh examples/h2o_dzp/sip.in ./adcgo
+#
+# dip.in shares this orbital space, so both decks write the same FCIDUMP.
+#
+&geometry
+  file   _zmatrix.dat        # GAMESS-UK z-matrix (O-H 0.944 A, HOH 107.07 deg)
+&basis
+  file   _basisset.dat       # GAMESS-UK basis; cartesian GTOs (31 functions)
+  cartesian on
+&scf
+  charge 0
+  symmetry auto              # -> C2v; fixes 1-based GAMESS ORBSYM in the FCIDUMP
+  gate   -76.0498071428      # gate on the reference GAMESS-UK SCF energy
+&active
+  active 2 to 30             # freeze O 1s (MO 1), drop top virtual (MO 31) -> 29 orbitals
+&output
+  fcidump  h2o_dzp.fcidump
+  sidecar  h2o_dzp.mo.json
+  manifest h2o_dzp.ref.json
+&adc
+  args   -sip -sigma infinite -solver lanczos
+  sym    all                 # one run over every irrep

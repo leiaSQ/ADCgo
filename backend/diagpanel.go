@@ -2,8 +2,7 @@ package backend
 
 // Accumulate a resident diagonal operator across a whole column-major panel.
 //
-// AxpyDiag applies a diagonal to one vector, which is what the ADC(4) satellite block
-// needs: the block is applied once per Lanczos matvec, to one column at a time.
+// AxpyDiag applies a diagonal to one vector: once per Lanczos matvec, one column at a time.
 //
 // MCTDH needs the same diagonal applied to many columns at once. A grid-diagonal mode
 // operator — every potential, every CAP, every DVR-diagonal kinetic term — multiplies a

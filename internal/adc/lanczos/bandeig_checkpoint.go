@@ -6,7 +6,7 @@ package lanczos
 //
 // WHY THIS EXISTS, in numbers. Everything else in this tree checkpoints the Krylov phase; the
 // reduction that follows it was a single uninterruptible call. Measured at the production
-// half-bandwidth and extrapolated to the melanin DIP shape (dim 308000, band 3079), that call is
+// half-bandwidth and extrapolated to the production DIP shape (dim 308000, band 3079), that call is
 // ~144 h serial — longer than the 120 h walltime it runs under. With no restart point inside it,
 // every generation of the daisychain restored the Krylov state, ground ~114 h into the reduction,
 // was killed, and started over: the chain could not converge, and each generation burned five days

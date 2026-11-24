@@ -84,11 +84,11 @@ func TestStackTrim(t *testing.T) {
 		in   []string
 		want []string
 	}{
-		{"shared prefix", []string{"UW1_O2-N1H", "UW1_O4-N3H"}, []string{"O2-N1H", "O4-N3H"}},
+		{"shared prefix", []string{"W1_siteA-siteB", "W1_siteC-siteD"}, []string{"siteA-siteB", "siteC-siteD"}},
 		{"no underscore", []string{"alpha", "alfred"}, []string{"alpha", "alfred"}},
 		{"nothing shared", []string{"a_x", "b_y"}, []string{"a_x", "b_y"}},
-		{"trim would empty", []string{"UW1_", "UW1_O2"}, []string{"UW1_", "UW1_O2"}},
-		{"single trace", []string{"UW1_O2"}, []string{"UW1_O2"}},
+		{"trim would empty", []string{"W1_", "W1_siteA"}, []string{"W1_", "W1_siteA"}},
+		{"single trace", []string{"W1_siteA"}, []string{"W1_siteA"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			traces := make([]stackTrace, len(tc.in))
@@ -185,7 +185,7 @@ func TestStackLoadGeometry(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "has.zmat"), []byte(uracilW1), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "has.zmat"), []byte(formamideW1), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "broken.zmat"), []byte("zmat angstroms\nN\nC 1 r\n"), 0o644); err != nil {
@@ -201,8 +201,8 @@ func TestStackLoadGeometry(t *testing.T) {
 
 	if traces[0].depict == nil {
 		t.Error("has: expected a depiction")
-	} else if len(traces[0].depict.pts) != 15 {
-		t.Errorf("has: drew %d atoms, want 15", len(traces[0].depict.pts))
+	} else if len(traces[0].depict.pts) != 9 {
+		t.Errorf("has: drew %d atoms, want 9", len(traces[0].depict.pts))
 	}
 	// A symbolic Z-matrix is rejected, but only that trace loses its picture.
 	if traces[1].depict != nil {

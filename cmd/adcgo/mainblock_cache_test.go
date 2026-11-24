@@ -11,7 +11,7 @@ import (
 func mbKey() mainBlockCacheKey {
 	eps := []float64{-1.5, -0.9, 0.3, 1.1}
 	sig := func(i, j int) float64 { return 0.01 * float64(i*3+j) }
-	return mainBlockCacheKeyFor(3, 0, 4, 2, 2, 17, false, nil, eps, sig, "/nonexistent/fcidump")
+	return mainBlockCacheKeyFor(3, 0, 4, 2, 2, 17, eps, sig, "/nonexistent/fcidump")
 }
 
 func mbMat() backend.Mat {
@@ -58,19 +58,17 @@ func TestMainBlockCacheRejectsStale(t *testing.T) {
 		name string
 		key  mainBlockCacheKey
 	}{
-		{"order", mainBlockCacheKeyFor(4, 0, 4, 2, 2, 17, false, nil, eps, sig, fc)},
-		{"irrep", mainBlockCacheKeyFor(3, 1, 4, 2, 2, 17, false, nil, eps, sig, fc)},
-		{"norb", mainBlockCacheKeyFor(3, 0, 5, 2, 2, 17, false, nil, eps, sig, fc)},
-		{"nocc", mainBlockCacheKeyFor(3, 0, 4, 3, 2, 17, false, nil, eps, sig, fc)},
-		{"main", mainBlockCacheKeyFor(3, 0, 4, 2, 3, 17, false, nil, eps, sig, fc)},
-		{"sector dim", mainBlockCacheKeyFor(3, 0, 4, 2, 2, 18, false, nil, eps, sig, fc)},
-		{"wert3", mainBlockCacheKeyFor(3, 0, 4, 2, 2, 17, true, nil, eps, sig, fc)},
-		{"cvs core", mainBlockCacheKeyFor(3, 0, 4, 2, 2, 17, false, []int{0}, eps, sig, fc)},
-		{"orbital energies", mainBlockCacheKeyFor(3, 0, 4, 2, 2, 17, false, nil,
+		{"order", mainBlockCacheKeyFor(4, 0, 4, 2, 2, 17, eps, sig, fc)},
+		{"irrep", mainBlockCacheKeyFor(3, 1, 4, 2, 2, 17, eps, sig, fc)},
+		{"norb", mainBlockCacheKeyFor(3, 0, 5, 2, 2, 17, eps, sig, fc)},
+		{"nocc", mainBlockCacheKeyFor(3, 0, 4, 3, 2, 17, eps, sig, fc)},
+		{"main", mainBlockCacheKeyFor(3, 0, 4, 2, 3, 17, eps, sig, fc)},
+		{"sector dim", mainBlockCacheKeyFor(3, 0, 4, 2, 2, 18, eps, sig, fc)},
+		{"orbital energies", mainBlockCacheKeyFor(3, 0, 4, 2, 2, 17,
 			[]float64{-1.5, -0.9, 0.3, 1.2}, sig, fc)},
-		{"sigma values", mainBlockCacheKeyFor(3, 0, 4, 2, 2, 17, false, nil, eps,
+		{"sigma values", mainBlockCacheKeyFor(3, 0, 4, 2, 2, 17, eps,
 			func(i, j int) float64 { return 0.02 * float64(i*3+j) }, fc)},
-		{"sigma off", mainBlockCacheKeyFor(3, 0, 4, 2, 2, 17, false, nil, eps, nil, fc)},
+		{"sigma off", mainBlockCacheKeyFor(3, 0, 4, 2, 2, 17, eps, nil, fc)},
 	}
 
 	for _, tc := range cases {

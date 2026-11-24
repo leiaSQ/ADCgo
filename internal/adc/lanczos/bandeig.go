@@ -290,7 +290,7 @@ const (
 	// Everything needed to run the eigenvector and band-matrix replays in parallel is here and is
 	// tested bit-exact (zTape, aTape, parallel.FixedPool). It is off by default because at the
 	// production half-bandwidth it makes the solve SLOWER. Measured on a 64-core Helix node,
-	// band = 3079 with dim = 4620 (scripts/helix/eigensolver_tier2.sbatch):
+	// band = 3079 with dim = 4620 (a cluster benchmark job):
 	//
 	//	frozen serial reference                      462.1 s   1.00x
 	//	narrowed rows + transposed layout, 1 worker   139.1 s   3.32x

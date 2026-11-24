@@ -137,7 +137,7 @@ func BenchmarkC11_3sums(b *testing.B) {
 }
 
 // TestDavidsonMatchesDenseSIP checks the block-Davidson driver against the dense path on
-// an IP-ADC(2) SIP sector, covering the sip.Matrix.Diagonal() preconditioner surface (the
+// an IP-ADC(3) SIP sector, covering the sip.Matrix.Diagonal() preconditioner surface (the
 // c11/c22diag block-diagonal assembly). The lowest NRoots eigenvalues and pole strengths
 // must agree to a tight tolerance when converged to a small residual.
 func TestDavidsonMatchesDenseSIP(t *testing.T) {
@@ -145,13 +145,13 @@ func TestDavidsonMatchesDenseSIP(t *testing.T) {
 	const nr = 6
 	const tolE, tolPS = 1e-7, 1.0
 
-	_, mxRef, _ := dipoleSpace(t)
+	mxRef := buildH2O(t, 3)
 	ref := lanczos.SolveDense(mxRef, be)
 	if len(ref.Values) < nr {
 		t.Fatalf("dense SIP spectrum has only %d states, need %d", len(ref.Values), nr)
 	}
 
-	_, mx, _ := dipoleSpace(t)
+	mx := buildH2O(t, 3)
 	res := lanczos.SolveDavidson(mx, be, lanczos.Options{NRoots: nr, ConvThr: 1e-9, MaxDim: 2 * nr, MaxIters: 500})
 	if len(res.Values) != nr {
 		t.Fatalf("davidson returned %d roots, want %d", len(res.Values), nr)

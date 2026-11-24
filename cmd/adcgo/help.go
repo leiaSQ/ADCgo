@@ -48,14 +48,12 @@ var helpTopics = []helpTopic{
 			"",
 			"The -mo sidecar carries what FCIDUMP does not: MO coefficients, the AO overlap, and dipole integrals. It is required for",
 			"- atom-resolved two-hole populations (DIP, Tarantelli U-transform),",
-			"- DIP decay-channel spectra (-spectrum without it falls back to -bare),",
-			"- transition dipole moments (-tdm),",
-			"- per-channel partial widths under -fano.",
+			"- DIP decay-channel spectra (-spectrum without it falls back to -bare).",
 			"",
 			"    python scripts/fixtures/gen_fcidump.py                 # testdata/h2o.fcidump + h2o.mo.json",
 			"    adcgo -fcidump testdata/h2o.fcidump           # HF + MP2 ingestion check",
 		},
-		flags: []string{"fcidump", "mo"},
+		flags: []string{"fcidump", "mo", "version"},
 		see:   []string{"dip", "sip"},
 	},
 
@@ -79,245 +77,32 @@ var helpTopics = []helpTopic{
 	{
 		key:     "sip",
 		aliases: []string{"singleionization", "ip"},
-		title:   "single ionization — IP-ADC(n)  (-sip)",
-		usage:   []string{"adcgo -fcidump FILE -sip [-order 2|3|4|22] [-sym SEL] [-mo FILE]"},
+		title:   "single ionization — IP-ADC(3)  (-sip)",
+		usage:   []string{"adcgo -fcidump FILE -sip [-sym SEL] [-sigma S]"},
 		body: []string{
 			"Cation (doublet) states: ionization energies, spectroscopic factors, per-orbital one-hole overlaps. One sector per irrep.",
 			"",
-			"-order picks the ADC scheme; it is the choice that decides both accuracy and cost — see `adcgo -h order`. The static self-energy is added to the main block by default (`adcgo -h sigma`); omitting it shifts every main line by ~0.2-0.35 eV.",
+			"The scheme is non-Dyson IP-ADC(3) (`adcgo -h order`). The static self-energy is added to the main block by default (`adcgo -h sigma`); omitting it shifts every main line by ~0.2-0.35 eV.",
 			"",
-			"    adcgo -fcidump testdata/h2o.fcidump -sip -order 3 -sym all",
+			"    adcgo -fcidump testdata/h2o.fcidump -sip -sym all",
 		},
 		flags: []string{"sip", "order", "sym"},
-		see:   []string{"order", "sigma", "fano", "tdm"},
+		see:   []string{"order", "sigma", "matfree"},
 	},
 	{
 		key:     "order",
-		aliases: []string{"orders", "adc"},
-		title:   "ADC orders for -sip",
-		usage:   []string{"adcgo -sip -order 2|3|4|22 ...", "adcgo -h order2 | order3 | order4 | order22"},
+		aliases: []string{"orders", "adc", "order3", "adc3"},
+		title:   "ADC order — non-Dyson IP-ADC(3) for -sip, ADC(2) for -dip",
+		usage:   []string{"adcgo -sip [-order 3] ..."},
 		body: []string{
-			"All four build the same kind of real-symmetric secular matrix and run through the same solvers; they differ in which blocks exist and to what order they are correct.",
+			"-sip is non-Dyson IP-ADC(3): the 3rd-order hole/hole self-energy and the 2nd-order 1h/2h1p coupling over a 1h main space and a 2h1p satellite. It is validated against pyscf's ip_adc on matched integrals. -order 3 is the default and the only value this release accepts.",
 			"",
-			"                                                                          adcgo -h ...",
-			"  -order 2    extended ADC(2), \"ADC(2)x\": 2nd-order 1h/1h, 1st-order          order2",
-			"              1h/2h1p coupling, 1st-order 2h1p satellite",
-			"  -order 3    non-Dyson IP-ADC(3) (default): adds the 3rd-order              order3",
-			"              self-energy and the 2nd-order coupling",
-			"  -order 4    CVS Dyson ADC(4) for core holes; needs -core                   order4",
-			"  -order 22   ADC(2,2): explicit 3h2p class — what makes second-order        order22",
-			"              decay (double Auger, double ICD) describable at all",
+			"-dip is DIP-ADC(2) and takes no order of its own (-order is ignored).",
 			"",
-			"-dip is DIP-ADC(2) and takes no order of its own.",
+			"The 2h1p x 2h1p satellite is the memory ceiling at scale — TB-class for large systems — so a big -sip sector needs -matfree (`adcgo -h matfree`).",
 		},
 		flags: []string{"order"},
-		see:   []string{"sip", "fano"},
-	},
-	{
-		key:     "order2",
-		aliases: []string{"adc2", "adc2x"},
-		title:   "-order 2 — extended ADC(2) (ADC(2)x)",
-		body: []string{
-			"The reference's extended ADC(2). The 1h/1h main block carries the 2nd-order self-energy, the 1h/2h1p coupling is 1st order, and the 2h1p/2h1p satellite keeps its full 1st-order block (that first-order satellite is what the \"extended\" means — plain ADC(2) leaves it diagonal).",
-			"",
-			"Cheapest SIP scheme, and the base for Fano-ADC(2)x widths (`adcgo -h fano`).",
-			"",
-			"    adcgo -fcidump testdata/h2o.fcidump -sip -order 2 -sym all",
-		},
-		flags: []string{"order"},
-		see:   []string{"order", "sigma", "fano"},
-	},
-	{
-		key:     "order3",
-		aliases: []string{"adc3"},
-		title:   "-order 3 — non-Dyson IP-ADC(3)  (default)",
-		body: []string{
-			"Adds the 3rd-order hole/hole self-energy and the 2nd-order 1h/2h1p coupling on top of order 2. 1h main space, 2h1p satellite. This is the default and the production valence scheme; it is validated against pyscf's ip_adc on matched integrals.",
-			"",
-			"The 2h1p x 2h1p satellite is the memory ceiling at scale — TB-class for large systems — so a big order-3 sector needs -matfree (`adcgo -h matfree`).",
-			"",
-			"    adcgo -fcidump testdata/h2o.fcidump -sip -order 3 -sym all",
-		},
-		flags: []string{"order"},
-		see:   []string{"order", "matfree", "sigma"},
-	},
-	{
-		key:     "order4",
-		aliases: []string{"adc4", "cvs", "core"},
-		title:   "-order 4 — CVS Dyson ADC(4) for core holes",
-		usage:   []string{"adcgo -fcidump FILE -sip -order 4 -core LIST -sym IRREP"},
-		body: []string{
-			"Core-valence-separated Dyson ADC(4). -core names the occupied core orbital(s), 0-based. Only the core orbital's irrep has a main block, so pin the sector with -sym.",
-			"",
-			"The bare core diagonal is Koopmans-level: use it for relative core-state structure, not absolute core binding energies. -wert3 (on by default) adds the WERT3 5th-order 3h2p-diagonal correction — the full EIGAB effective diagonal theADCcode itself uses, bit-exact against its FT19 tape.",
-			"",
-			"A handful of converged core roots is usually what is wanted, which is -solver davidson territory rather than a whole-band Lanczos sweep.",
-			"",
-			"    # O 1s of water (orbital 0, a1 sector), lowest 8 roots",
-			"    adcgo -fcidump testdata/h2o.fcidump -sip -order 4 -core 0 -sym 0 \\",
-			"        -solver davidson -nroots 8 -convthr 1e-3",
-		},
-		flags: []string{"order", "core", "wert3"},
-		see:   []string{"davidson", "matfree", "tdm"},
-	},
-	{
-		key:     "order22",
-		aliases: []string{"adc22"},
-		title:   "-order 22 — ADC(2,2)",
-		usage:   []string{"adcgo -fcidump FILE -sip -order 22 [-adc22 f|x|m] ..."},
-		body: []string{
-			"The ADC(2,2) scheme of Kolorenc & Averbukh, J. Chem. Phys. 152, 214107 (2020). Its 1h/1h block stays 2nd order (emphatically not third), and it carries an explicit 3h2p class — the class that makes second-order decay, double Auger and double ICD, describable at all.",
-			"",
-			"-adc22 selects the Table I variant:",
-			"- f  full — the paper's recommendation and the only variant that gets double Auger right,",
-			"- x  drops the 2nd-order 1h/2h1p coupling (~24% overshoot in decay width),",
-			"- m  also leaves the 1st-order 3h2p/3h2p block diagonal (~14% overshoot).",
-			"m and x are diagnostics, not production settings.",
-			"",
-			"    adcgo -fcidump ne.fcidump -sip -order 22 -adc22 f -fano -fano-init 0 \\",
-			"        -sym all -solver lanczos -matfree on",
-		},
-		flags: []string{"order", "adc22"},
-		see:   []string{"fano", "matfree", "order"},
-	},
-	{
-		key:     "fano",
-		aliases: []string{"width", "widths", "gamma", "lifetime"},
-		title:   "decay widths and lifetimes — Fano/Feshbach + Stieltjes  (-fano)",
-		usage: []string{
-			"adcgo -fcidump FILE -sip -order 2|3|22 -fano -fano-init K",
-			"adcgo -fcidump FILE -dip -spin singlet|triplet -sym none|IRREP -fano -fano-init K",
-			"       [-fano-q LIST] [-fano-rule any|all] [-fano-qp SPEC]",
-		},
-		body: []string{
-			"Decay rates, not just channels: Gamma and tau = hbar/Gamma for a chosen vacancy, by the Fano/Feshbach method with Stieltjes imaging (Kolorenc & Averbukh 2020). The configuration space is partitioned into a bound half Q (still carrying the initial vacancy) and a pseudo-continuum P; |Phi> comes from the QMQ spectrum, the coupling density from PMP. Under -sip the vacancy fixes the target irrep, so -sym is determined rather than chosen. -dip -fano runs one DIP-ADC(2) sector (-spin singlet|triplet, -sym none|IRREP); its decay class is 3h1p, so -mo partial widths are not available there. -khci K -fano runs the same pipeline over k-hole CI (adcgo -h khci).",
-			"",
-			"Partition rules:",
-			"- -fano-rule any — a configuration is bound if at least one hole is in the Q set. The Auger criterion: right for local decay.",
-			"- -fano-rule all — bound only if every hole is on the donor subunit. Right for ICD/ETMD, where a hole OUTSIDE the donor is what marks a decay channel.",
-			"- -fano-qp — a Q/P partition stated per excitation class, for the cases neither reading can express (see its flag text for the grammar and two worked atomic examples).",
-			"",
-			"Excluding configurations (x: clauses in -fano-qp). Without them P is everything that is not Q (Q + P = 1). An x: clause removes what it matches from BOTH, tested before the q:/p: clauses, and the width is then that of the Hamiltonian restricted to Q (+) P. This is the usual practice — Fano-CI and the reference Fano-ADC code select the initial and final spaces separately, so configurations that belong to neither are dropped — and it is a model choice, not a numerical detail:",
-			"- Use it for configurations that are neither part of the decaying state nor an open channel. For ICD of a 2a1 vacancy in a water cluster, the one-site 2h1p (shake-up satellites, closed H2O2+ + e): in P they act as a fake continuum (an isolated water's 2a1 gets an 0.8 eV width), in Q they dress the 2a1 state until it is no longer one (measured 2026-10-08, water dimer).",
-			"- What is excluded no longer relaxes |Phi> nor receives flux. If an excluded class carries real decay (an open channel) or real 2a1 strength, the width is wrong; compare against runs with that class in P and in Q.",
-			"- The run log prints the excluded count per class and the document carries x_size, so an exclusion is never silent.",
-			"",
-			"Scheme B — adapted intermediate states (-fano-scheme b, -sip). The hole rules above presume a hole pair is one-site or two-site; with orbitals shared between subunits (the g/u pairs of a homonuclear dimer, the partly delocalized outer valence of a water dimer) it is neither. Scheme B rotates the 2h1p configurations of each particle orbital onto the eigenstates of their block of the secular matrix and classifies each adapted state by its own two-hole character over site-localized occupied orbitals (needs -mo and -group sites covering the molecules): inner-valence (-fano-b-inner, default e<-1.0) -> Q; one-site -> excluded (-fano-b-onesite x) or Q; two-site -> P only when its particle is a FREE virtual (-fano-b-particle free, default: the virtuals are first rotated, per irrep, into the real-atom AO span and its ghost/diffuse complement; a compact particle makes the state a bound D+A* charge-transfer/excitation state, which is excluded), or any two-site state (-fano-b-particle any, the paper's rule); -fano-b-cut (0.5) is the weight threshold. 1h stays Q and 3h2p follows the hole rule. Each product is one parent mat-vec between the rotation and its transpose (both exact orthogonal basis changes). No partial widths (P rows are adapted states). Measured on the water dimer: shared orbitals inflate the width 2-5x (6-31G, ADC(2)x: 206 -> 44 meV), and bound-particle states in P carried ~125 meV of spurious width at Fano-CI level (cc-pVDZ + KBJ: 129 -> 3.7 meV, donor).",
-			"",
-			"With -mo, approximate partial widths per channel (Auger@A, ICD:A->B, ETMD, and `double` for the 3h2p/second-order channel), each imaged separately.",
-			"",
-			"Orbitals by name — -fano-init, -fano-q, -fano-qp and -fano-phi-holes take, besides 0-based indices:",
-			"- @SITE — every occupied orbital whose largest population (Mulliken, or the labelled sidecar's assignment) is on SITE, a -group site or an unclaimed sidecar atom. Needs -mo.",
-			"- @SITE.k — the k-th lowest-energy of those, 0-based: with the O 1s frozen, @W3.0 is water W3's 2a1.",
-			"- e<X, e>X — every occupied orbital below / above X hartree: e<-1.0 is the whole inner valence of a water cluster.",
-			"The run log prints what each name resolved to, and the document records the vacancy's site and population there (vacancy_site_population; below ~0.8 the orbital is not localized on that site).",
-			"",
-			"BASIS REQUIREMENT — what decides whether a run is possible at all. Imaging can only evaluate Gamma(E_Phi) if the 2h1p pseudo-continuum brackets E_Phi, and a 2h1p state sits at eps_a - eps_k - eps_l. What matters is the energy span and level density of the VIRTUAL space near E_Phi, not diffuseness: for Ne 1s (E_Phi ~ 32 E_h) aug-cc-pVTZ tops out at 14.6 E_h and cannot describe the decay at all.",
-			"",
-			"Two printed diagnostics decide whether a width is trustworthy:",
-			"- coupled channels — how many P configurations carry any coupling. A few tens gives a large Stieltjes spread however good the rest of the pipeline is.",
-			"- sum-rule residual — the pseudo-continuum's total strength against the exact 2pi|g|^2. A large value means the Krylov space was truncated before it captured the coupling; raise -fano-blocks until it closes. An unconverged width can still carry a SMALL error bar, because the Stieltjes orders agree with each other about the wrong density.",
-			"",
-			"    # Ne+ (1s^-1) Auger width",
-			"    adcgo -fcidump ne.fcidump -sip -order 22 -adc22 f -fano -fano-init 0 \\",
-			"        -sym all -solver lanczos -matfree on",
-			"",
-			"    # interatomic decay: Q is every configuration with ALL holes on the donor",
-			"    adcgo -fcidump dimer.fcidump -sip -order 22 -fano -fano-init 2 \\",
-			"        -fano-q 2,3,4 -fano-rule all -mo dimer.mo.json -init-atom A",
-			"",
-			"    # 2a1 ICD of the centre water of a cluster: 1h and inner-valence holes in Q,",
-			"    # one-site outer-valence configurations excluded, two-site ones the continuum",
-			"    adcgo -fcidump wat6.fcidump -sip -order 2 -fano -mo wat6.mo.json \\",
-			"        -group=W1=O1,H1,H2 -group=W2=O2,H3,H4 ... -fano-init @W1.0 \\",
-			"        -fano-qp 'q:1/e<0:1;q:e<-1.0:1;x:2/@W1:2&2/e<-1.0:0:0;...' -init-atom W1",
-			"    # (&2/e<-1.0:0:0 keeps W1's own 2a1-hole configurations out of the exclusion)",
-		},
-		flags: []string{"fano", "fano-init", "fano-q", "fano-rule", "fano-qp", "fano-scheme", "fano-b-inner", "fano-b-cut", "fano-b-onesite", "fano-b-particle", "fano-b-compact", "fano-c-open", "fano-nth", "fano-qmin", "fano-phi-holes", "fano-phi-tol", "fano-phi-branch", "fano-phi-guess", "fano-phi-save"},
-		see:   []string{"fanotuning", "stieltjes", "order22", "khci"},
-	},
-	{
-		key:     "khci",
-		aliases: []string{"kholeci", "quip"},
-		title:   "k-hole CI Fano widths  (-khci K -fano)",
-		usage: []string{
-			"adcgo -fcidump FILE -khci K -fano -fano-init I -sym none|IRREP",
-			"       [-mo LABELLED.mo.json -fano-qp 'p: charge A=1,B=1 & free=1'] [-khci-maxfree 1]",
-		},
-		body: []string{
-			"The Fano width over configuration interaction in the classes Kh | (K+1)h1p | (K+2)h2p (K = 1..4) instead of an ADC matrix: M = H - E_HF with the general Fock matrix, so localized occupied and compact/free virtual orbitals are allowed (the spectrum is invariant under occupied-occupied and virtual-virtual rotations). For K = 4 the classes are 4h | 5h1p | 6h2p.",
-			"",
-			"With a labelled sidecar (dump_fcidump's &orbitals localized scheme: orb_kind, orb_atom), -fano-qp takes the net-charge grammar: net charge on atom X = holes on X - compact particles on X, and free particles belong to no atom. A hole list cannot express the relaxed open channel, whose (K+2)h2p configurations put a hole AND a compact particle on the same atom.",
-			"",
-			"The Q and P operators are stored as CSR when they fit -maxmem, since their solves apply them many times; otherwise every apply enumerates the couplings again.",
-			"",
-			"A lock-in measures the noise floor instead of assuming it. -fano-lambda 'C:D=0' scales the C-D transfer integrals to zero, so a width that needs that transfer vanishes exactly and what remains is the floor; with -fano-save-g at the four corners of (lambda_1, lambda_2) in {0,1}^2, the double difference g_AB = g(1,1) - g(1,0) - g(0,1) + g(0,0) is imaged with -fano-image-g. -fano-decompose splits the width by the excitation class of |Phi> the coupling starts from (the time orderings).",
-			"",
-			"    # a four-hole initial state; every atom +1 and one free electron is the continuum",
-			"    adcgo -fcidump sys.fcidump -mo sys.mo.json -khci 4 -khci-maxfree 1 -fano \\",
-			"        -fano-init 0 -sym none -fano-qp 'p: charge *=1 & free=1'",
-		},
-		flags: []string{"khci", "khci-maxclass", "khci-twoms", "khci-maxfree", "fano-lambda", "fano-save-g", "fano-image-g", "fano-decompose"},
-		see:   []string{"fano", "fanotuning"},
-	},
-	{
-		key:     "isr",
-		aliases: []string{"isrgen", "generated"},
-		title:   "generated ISR matrices  (-isr VARIANT:SCHEME)",
-		usage: []string{
-			"adcgo -fcidump FILE -isr dip:adc2x [-spin both|singlet,triplet]",
-			"       [-sym none|IRREP] [-khci-maxclass C] [-khci-twoms M]",
-			"       [-solver lanczos|dense] [-backend gonum|cuda] [-mgpu G]",
-		},
-		body: []string{
-			"The spectrum of a secular matrix derived by adcgen (scripts/codegen/generate_adc.py, internal/adc/isrgen) instead of a hand-ported one. The matrix is never stored: its matrix-vector product is the generated sequence of tensor contractions, run as batched GEMMs on the host or, with -backend cuda, on a GPU.",
-			"",
-			"The space is one Ms sector of spin-orbital configurations (the classes Kh | (K+1)h1p | (K+2)h2p up to -khci-maxclass, by default the classes the scheme couples). Every multiplicity is solved as its own sector: block Lanczos from the pure-spin main-class vectors, with every apply projected onto that spin, so -spin singlet,triplet gives what -dip gives as two runs. -blocks, -ps-thresh and -coeff-thresh act as for -dip; leading components name their holes as spin orbitals (0-based spatial index, a/b).",
-			"",
-			"-mgpu G splits every apply across G devices by panel column: each device gathers its columns full height, runs the whole program (it holds the integrals and intermediates) and scatters the row bands back, so the Krylov panels stay row-partitioned as for -dip -mgpu.",
-			"",
-			"Variants with a σ program: ip (schemes strict:3, adc22m/x/f), dip (strict:2, adc2x, ci), tip and qip (adc2x, ci; B12 and B22 as plain CI). The reference must be canonical Hartree-Fock.",
-			"",
-			"    # DIP-ADC(2) singlets and triplets, as -dip computes them",
-			"    adcgo -fcidump h2o.fcidump -isr dip:adc2x -spin singlet,triplet -blocks 60",
-		},
-		flags: []string{"isr"},
-		see:   []string{"khci"},
-	},
-	{
-		key:     "fanotuning",
-		aliases: []string{"fanocuts", "continuum"},
-		title:   "-fano tuning — the pseudo-continuum solve and its cuts",
-		body: []string{
-			"Which states enter the coupling density, and how the two halves are solved. The partition itself is on `adcgo -h fano`.",
-			"",
-			"The QMQ (bound) half wants a different solver from the PMP (continuum) half that -solver governs: only a few of QMQ's LOWEST roots are wanted, and under most partitions Q's main block is a single configuration, so -fano-qsolver defaults to davidson.",
-			"",
-			"The energy ceiling is the cut that matters most. The reference hard-codes 4 hartree, and that constant does NOT transfer — it is a polarization-propagator scale. -fano-emax-rel states it as a multiple of E_Phi instead, which is the transferable form; scanning it is the honest convergence check, and Gamma plateaus over roughly 3-10x.",
-			"",
-			"    # converge the width against the ceiling before believing it",
-			"    for r in 2 3 5 8; do adcgo ... -fano -fano-init 0 -fano-emax-rel $r; done",
-		},
-		flags: []string{
-			"fano-qsolver", "fano-qroots", "fano-block", "fano-blocks",
-			"fano-emax", "fano-emax-rel", "fano-wmin", "fano-gmin", "fano-gmin-rel", "fano-at",
-			"fano-engine", "fano-order", "fano-si-shift",
-		},
-		see: []string{"fano", "stieltjes"},
-	},
-	{
-		key:     "stieltjes",
-		aliases: []string{"imaging"},
-		title:   "Stieltjes imaging — turning the pseudo-continuum into Gamma(E)",
-		body: []string{
-			"The discrete PMP spectrum is a set of L^2 pseudo-states, not a continuum; Stieltjes imaging reconstructs the coupling density from its moments and evaluates it at E_Phi. Each order is an independent estimate, and the spread over orders is the error bar.",
-			"",
-			"The maximum usable order is set purely by the arithmetic precision of the moment recurrence (-stieltjes-prec): on a Lorentzian model, 53 bits reaches order 17 with a 21% density error, 113 bits (the reference's REAL*16) order 34 with 2.9%, and the default 256 bits order 72 with 0.37%.",
-			"",
-			"-stieltjes-average paper (the default) is Kolorenc & Averbukh's own protocol — the mean over -stieltjes-window consecutive orders in the region of best convergence, with that window's standard deviation as the uncertainty, which is what their tabulated error bars are.",
-		},
-		flags: []string{"stieltjes-orders", "stieltjes-prec", "stieltjes-average", "stieltjes-window", "stieltjes-offset"},
-		see:   []string{"fano"},
+		see:   []string{"sip", "dip", "matfree", "sigma"},
 	},
 
 	// --------------------------------------------------------------- solvers
@@ -381,15 +166,15 @@ var helpTopics = []helpTopic{
 		aliases: []string{"davidsonliu"},
 		title:   "-solver davidson — root-targeting block Davidson-Liu",
 		body: []string{
-			"Matrix-free block Davidson-Liu: targets the algebraically lowest -nroots eigenpairs and iterates each to a residual threshold with a diagonal (theta - D)^-1 preconditioner. When a handful of converged interior eigenvalues is what is wanted (the lowest ~20 core-edge roots, say) rather than a broad envelope, it hits the exact positions at a fraction of the Lanczos subspace size — this is what reproduces a legacy adc4_diag.x Davidson run directly.",
+			"Matrix-free block Davidson-Liu: targets the algebraically lowest -nroots eigenpairs and iterates each to a residual threshold with a diagonal (theta - D)^-1 preconditioner. When a handful of converged low-lying eigenvalues is what is wanted rather than a broad envelope, it hits the exact positions at a fraction of the Lanczos subspace size.",
 			"",
-			"Works for -sip (including CVS -order 4) and -dip. It is also the default QMQ solver under -fano, where only the lowest few bound roots matter.",
+			"Works for -sip and -dip.",
 			"",
-			"    adcgo -fcidump testdata/h2o.fcidump -sip -order 4 -core 0 -sym 0 \\",
+			"    adcgo -fcidump testdata/h2o.fcidump -dip -sym all \\",
 			"        -solver davidson -nroots 8 -convthr 1e-3",
 		},
 		flags: []string{"solver", "nroots", "convthr", "maxdavsp", "maxdavit"},
-		see:   []string{"order4", "fano", "solver"},
+		see:   []string{"lanczos", "solver"},
 	},
 	{
 		key:     "dense",
@@ -446,7 +231,7 @@ var helpTopics = []helpTopic{
 			"min-weight", "min-fraction", "include-zero",
 			"st-ratio", "molecule", "basis", "point-group",
 		},
-		see: []string{"convert", "tdm", "dip"},
+		see: []string{"convert", "dip"},
 	},
 	{
 		key:     "convert",
@@ -464,28 +249,6 @@ var helpTopics = []helpTopic{
 		flags: []string{"convert"},
 		see:   []string{"spectrum", "output"},
 	},
-	{
-		key:     "tdm",
-		aliases: []string{"rassi", "dipole", "dipoles", "emission"},
-		title:   "transition dipole moments — -tdm (-rassi)",
-		usage:   []string{"adcgo -fcidump FILE -sip -mo FILE -tdm [-order 4 -core LIST]"},
-		body: []string{
-			"RASSI-like transition properties along the ICD decay chain, from a single-ionization run. Requires -sip and a -mo sidecar carrying dipole integrals. Three sections:",
-			"",
-			"- emissions — ion->ion radiative transitions within a sector (mu, oscillator strength f, Einstein A in s^-1). Within one sector only the totally-symmetric dipole component connects states.",
-			"- photoionization — each cation state's Dyson orbital contracted with the dipole integrals into an L^2 pseudo-spectrum mu(eps_a), one channel per virtual orbital (the ejected-electron proxy).",
-			"- cross_emissions — for -order 4, core->valence X-ray emission between the CVS core sector and companion plain-ADC(3) valence sectors.",
-			"",
-			"-tdm-isr picks the ISR property-matrix order: 2 (correlation-corrected) is the default for -order 2/3 where it is order-consistent with the secular matrix; -order 4 defaults to 0 because an ADC(4)-consistent property matrix would need 3rd/4th-order terms that do not exist yet.",
-			"",
-			"    adcgo -fcidump testdata/h2o.fcidump -sip -order 3 \\",
-			"        -mo testdata/h2o.mo.json -solver dense -tdm -out tdm.json",
-			"    plotspec -mode tdm -in tdm.json -out tdm.png",
-		},
-		flags: []string{"tdm", "rassi", "tdm-osc-thresh", "tdm-isr"},
-		see:   []string{"order4", "spectrum", "sip"},
-	},
-
 	// ----------------------------------------------------------------- scale
 	{
 		key:     "backend",
@@ -513,7 +276,7 @@ var helpTopics = []helpTopic{
 		title:   "-matfree — recompute instead of store",
 		usage:   []string{"adcgo ... -matfree off|auto|on [-maxmem GB]"},
 		body: []string{
-			"By default the block-sparse ADC operator is materialized: every nonzero block is assembled once and kept resident, so each mat-vec is a batched GEMM. For a large sector the dominant blocks — the DIP 3h1p<->3h1p satellite region, the SIP ADC(4) 2h1p x 3h2p and ADC(3) 2h1p^2 coupling — are the resident-memory ceiling: hundreds of GB to several TB, larger than a whole 8-GPU node.",
+			"By default the block-sparse ADC operator is materialized: every nonzero block is assembled once and kept resident, so each mat-vec is a batched GEMM. For a large sector the dominant blocks — the DIP 3h1p<->3h1p satellite region and the SIP-ADC(3) 2h1p x 2h1p satellite — are the resident-memory ceiling: hundreds of GB to several TB, larger than a whole 8-GPU node.",
 			"",
 			"-matfree on recomputes those blocks from the MO integrals on every mat-vec and never stores them (the direct-sigma approach theADCcode uses), collapsing the footprint to the Krylov panels plus the small main/coupling blocks. -matfree auto decides per block by dense size against -maxmem; off keeps everything materialized.",
 			"",
@@ -537,7 +300,7 @@ var helpTopics = []helpTopic{
 			"",
 			"Requires -dip -solver lanczos-lowmem -lowmem-block 0 and a fast inter-GPU link. Sectors run SERIALLY, each spanning the whole pool — in contrast to -gpus, which runs independent sectors concurrently. Row-partitioning only divides the operator by the pool size, so pair it with -matfree on for the multi-TB satellite region.",
 			"",
-			"-satchunk and -sat-trace tune and instrument the matrix-free satellite apply. See scripts/helix/HELIX.md for a complete SLURM job.",
+			"-satchunk and -sat-trace tune and instrument the matrix-free satellite apply. See scripts/slurm/dip.sbatch for a complete SLURM job.",
 			"",
 			"    adcgo-cuda -fcidump system.fcidump -dip -order 2 \\",
 			"        -solver lanczos-lowmem -lowmem-block 0 -mgpu 8 -matfree on \\",
@@ -609,8 +372,8 @@ func normalizeTopic(s string) string {
 		}
 	}
 	key := b.String()
-	// "-h solver lanczos" / "-h order 4": the index name plus a member selects the
-	// member's page. order2..order22 are real keys, so only the solver prefix is cut.
+	// "-h solver lanczos": the index name plus a member selects the member's page.
+	// "-h order 3" folds to the "order3" alias of the order page.
 	if rest := strings.TrimPrefix(key, "solver"); rest != "" && rest != key {
 		return rest
 	}
@@ -666,16 +429,14 @@ func printOverview(w io.Writer) {
 	fmt.Fprint(w, `ADCgo — exact, hardware-accelerated ADC(n) ionization
 
 USAGE
-  adcgo -fcidump FILE (-dip | -sip [-order N]) [-solver S] [options] [-out FILE]
-  adcgo -h TOPIC                    detail on one method, order, solver or knob
+  adcgo -fcidump FILE (-dip | -sip) [-solver S] [options] [-out FILE]
+  adcgo -h TOPIC                    detail on one method, solver or knob
   adcgo -h all                      every flag, unabridged
   adcgo -h topics                   list every help topic
 
 METHODS                                                        detail: adcgo -h ...
   -dip                    double ionization, DIP-ADC(2)                    dip
-  -sip                    single ionization, IP-ADC(n)                     sip
-  -order 2|3|4|22         ADC scheme: (2)x, (3), CVS Dyson (4), (2,2)      order
-  -fano -fano-init K      decay width Gamma and lifetime tau               fano
+  -sip                    single ionization, IP-ADC(3)                     sip
 
 SOLVERS  -solver S        same matrix, same answers — pick by size and band
   lanczos       (default) whole-band block-Lanczos, -blocks N              lanczos
@@ -686,7 +447,6 @@ SOLVERS  -solver S        same matrix, same answers — pick by size and band
 OUTPUT                    default: solver document JSON (E, ps, configs)
   -spectrum               decay channels (DIP + -mo) or per orbital (SIP)  spectrum
   -bare                   one stick per state: energy + pole strength      spectrum
-  -tdm                    transition dipoles, Dyson photoionization        tdm
   -convert FILE           re-derive a spectrum, no re-solve                convert
   -format json|ref        ref = theADCcode's state list, diffable          output
 

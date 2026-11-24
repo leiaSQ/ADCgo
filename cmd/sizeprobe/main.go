@@ -1,7 +1,12 @@
-// Temporary throwaway: exact DIP sector sizing (n, main, block-sparse operator) for one or
-// more FCIDUMPs, via the same functions the solver's pre-flight guard uses. CPU-only.
-// Prints n/main first (cheap), then the operator (a full host block walk), then the
-// whole-band single-GPU need and the per-GPU footprint for a range of -mgpu partition counts.
+// Command sizeprobe sizes a whole-band DIP-ADC(2) run before it is submitted: for each
+// FCIDUMP argument and each spin it prints the sector dimension n, the 2h main-space size,
+// the Mode B Krylov panels, the matrix-free operator and ERI footprint, and the per-GPU
+// memory under -mgpu N — via the same functions adcgo's pre-flight guard uses. CPU-only.
+//
+//	sizeprobe system.fcidump [more.fcidump ...]
+//
+// SIZEPROBE_DENSE=1 also walks the materialized (non-matrix-free) operator, which takes
+// hours at production scale.
 package main
 
 import (

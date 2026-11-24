@@ -51,7 +51,7 @@ import (
 // and the barrier count. It stays 64 by default because that is what has been run; -satchunk
 // overrides it.
 //
-// A var, not a const, so cmd/adcgo can set it and cmd/sizeprobe can report the real value rather
+// A var, not a const, so cmd/adcgo can set it and a sizing tool can report the real value rather
 // than a hand-copied mirror. Read when an applier is CONSTRUCTED (it sizes the slab allocation),
 // so set it before building a Matrix; changing it mid-solve does nothing useful.
 var SatChunkCols = 64

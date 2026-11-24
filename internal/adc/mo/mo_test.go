@@ -154,10 +154,10 @@ func TestFrozenCoreSidecarLoads(t *testing.T) {
 }
 
 // TestLabelledSidecar: the orbital-label group of a localized-orbital dump
-// (testdata/khci/he3_ghost.in via scripts/fcidump/dump_fcidump.py) loads, is consistent, and
+// (testdata/localized/he3_ghost.*, written by the development branch's localized-orbital dumper) loads, is consistent, and
 // the rotated MOs are orthonormal.
 func TestLabelledSidecar(t *testing.T) {
-	d := load(t, filepath.Join("khci", "he3_ghost.mo.json"))
+	d := load(t, filepath.Join("localized", "he3_ghost.mo.json"))
 	if !d.HasLabels || d.Canonical {
 		t.Fatalf("HasLabels=%v Canonical=%v, want true/false", d.HasLabels, d.Canonical)
 	}

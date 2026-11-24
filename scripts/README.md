@@ -1,141 +1,127 @@
 # scripts
 
-| Folder | Contents |
+| Path | What it is |
 |---|---|
-| `fcidump/` | Integral generation: `dump_fcidump.py` (sectioned input, see `adcgo_input.py`), the GAMESS-UK readers, orbital selection, the localized-orbital basis (`orbitals.py`) and KBJ ghost bases (`kbj.py`), `threads.py` (import before numpy on the login node) |
-| `fixtures/` | Regenerate the committed test fixtures in `testdata/` |
-| `codegen/` | Code generators: adcgen ISR elements (`generate_adc.py`, `isrgen.sbatch`, see `internal/adc/isrgen/README.md`), the ADC(4) spin tables (`gen_coeff4.py`) |
-| `helix/` | bwForCluster Helix: `HELIX.md`, the dump-and-run driver (`adcgo_run.sh`, `runADCgo*`), the CUDA build, workspaces, production and benchmark jobs |
-| `gpu/` | GPU diagnostics and parity jobs (CUDA smoke, compute-sanitizer, multi-GPU parity, int32 addressing, timing A/B) |
-| `analysis/` | Spectrum comparison and plotting |
+| `fcidump/` | Integral generation: `dump_fcidump.py` (deck format in `adcgo_input.py`), GAMESS-UK basis/z-matrix readers, orbital selection, `threads.py` |
+| `adcgo_run.sh` | Deck → dump → `adcgo` in one step, for systems that run interactively |
+| `build_cuda.sh` | Build the CUDA binary `adcgo-cuda` (kernels + `go build -tags cuda`) |
+| `slurm/` | Batch templates: `dump.sbatch`, `dip.sbatch`, `sip.sbatch` (self-resubmitting checkpoint chains, `chain.sh`), `gpu_tests.sbatch` |
+| `fixtures/` | Regenerate the committed test fixtures in `testdata/` (needs pyscf) |
 
-Scripts find the repository root from their own location, so run them from any directory:
+Scripts locate the repository from their own path, so run them from any directory.
+
+## Small systems: one command
 
 ```sh
-python scripts/fcidump/dump_fcidump.py --input examples/DIP_h2o/dump.in
-sbatch scripts/helix/runADCgo examples/DIP_h2o/dump.in
+scripts/adcgo_run.sh examples/h2o_dzp/dip.in ./adcgo     # dump + DIP-ADC(2)
+scripts/adcgo_run.sh examples/h2o_dzp/sip.in ./adcgo     # dump + SIP-ADC(3)
 ```
 
-## Auger-Meitner difference spectrum (dimer minus 2 x monomer)
+The deck's `&output` names the FCIDUMP and MO sidecar; its `&adc` line supplies the `adcgo` flags.
+`ADCGO_PYTHON` points at a Python with pyscf if `python3` is not it.
 
-Isolates what a dimer does that two isolated monomers cannot. Needs SIP **and** DIP, whole band, for
-both systems; the monomer must be a **counterpoise** fragment (partner ghosted) or the difference
-carries basis-set superposition error instead of physics.
+## Large systems: the batch pipeline
+
+A DIP and a SIP run over the same orbital space share one FCIDUMP. Each solve outlasts a walltime,
+so `dip.sbatch` and `sip.sbatch` checkpoint and resubmit themselves until converged (exit 0 =
+done, 64 = resumed by the queued successor, anything else stops the chain).
 
 ```sh
-# 1. integrals: dimer (exists) + counterpoise monomer
-SYS=naph2 DECK=naph2_cp_mono.in sbatch scripts/dump_melanin.sbatch
+scripts/build_cuda.sh                                          # once per checkout / GPU arch
+go run ./cmd/sizeprobe sys/sys.fcidump                         # sector sizes, per-GPU memory per -mgpu N
+sbatch --gres=gpu:2 scripts/slurm/gpu_tests.sbatch             # once per GPU model
 
-# 2. whole-band solves. PREFIX picks the file set, SYS the workspace, so the fragment
-#    lives beside its dimer. EIG_B2/EIG_DEVICE are the eigensolve accelerations.
-SYS=naph2 PREFIX=naph2_cp_mono EIG_B2=128 EIG_DEVICE=1 sbatch scripts/melanin_dip_mgpu.sbatch
-SYS=naph2 PREFIX=naph2_cp_mono sbatch scripts/melanin_sip.sbatch
+# 1. integrals (CPU node; the SCF and the 4-index transform need memory, not GPUs)
+DECK=sys/sys.in sbatch --cpus-per-task=64 --mem=500G scripts/slurm/dump.sbatch
 
-# 3. solver documents -> stick spectra
-adcgo -convert naph2.dip.json -dip -bare -out naph2.dip.spec.json      # and .sip
+# 2. solves. DIP: whole band, matrix-free, one sector across 8 NVLink GPUs, one spin per job.
+for s in singlet triplet; do
+  FCIDUMP=sys/sys.fcidump MO=sys/sys.mo.json SPIN=$s \
+    sbatch --gres=gpu:8 --cpus-per-task=64 --mem=1000G --time=120:00:00 scripts/slurm/dip.sbatch
+done
+#    SIP: one GPU does the solve; the host memory is for the Σ(∞) build.
+FCIDUMP=sys/sys.fcidump sbatch --gres=gpu:1 --cpus-per-task=64 --mem=1000G --time=120:00:00 \
+  scripts/slurm/sip.sbatch
+```
 
-# 4. the difference. -xrange is REQUIRED (common electron grid) and 2 is exact only for a
-#    homodimer whose halves are congruent.
+- Add your site's `--account`/`--partition`, and pin the GPU model (e.g. `--gres=gpu:H200:8`) if
+  the cluster mixes models; a run's timings are only comparable on the same model.
+- The variables each template reads are listed in its header (`BLOCKS`, `MGPU`, `SOLVER`,
+  `CHECKPOINT_EVERY`, `EIG_B2`, `EIG_DEVICE`, `EXTRA`, ...).
+- `adcgo` sizes the device footprint before allocating and refuses a sector that does not fit, with
+  the term (operator or Krylov basis) that overflowed.
+- A DIP `-mgpu` run writes each finished sector beside `-out` (`*.s<spin>.i<irrep>.json`), so a
+  failure in a later sector does not lose an earlier one.
+- SIP caches Σ(∞) and the 1h main block beside the FCIDUMP; later generations and reruns skip both.
+  A finished SIP solve cannot be extended to more blocks: rerun with the higher `BLOCKS` (the caches
+  make that cheap, and Lanczos is deterministic).
+
+## Spectra from the solver documents
+
+The solver documents carry energies, pole strengths and (with `-mo`) two-hole populations;
+`-convert` turns them into spectra without re-solving.
+
+```sh
+adcgo -convert sys.sip.json -sip -bare -out sys.sip.spec.json
+adcgo -convert sys.dip.json -dip -bare -out sys.dip.spec.json           # one "states" channel
+adcgo -convert sys.dip.json -dip -spectrum -mo sys.mo.json \
+      -group="A=C1,C2,...,H8" -group="B=C9,...,H16" -init-atom A \
+      -out sys.dip.chan.spec.json                                       # decay channels
+plotspec -mode panel -sip sys.sip.spec.json -dip sys.dip.chan.spec.json -out panel.png
+```
+
+`-format ref` re-emits saved documents as theADCcode's state listing:
+`adcgo -convert sys.sip.json,sys.dip.json -format ref -out sys.ref.out`.
+
+### Decay channels: define the sites, or the channels are meaningless
+
+The classifier routes each dication state by where its two holes sit relative to the initially
+ionized site: both on it = Auger, one on it and one elsewhere = ICD, both on one other site =
+ETMD(2), on two other sites = ETMD(3). Without `-group`, every atom (population column) is its own
+site, so on a molecule with tens of atoms "two different sites" holds for almost every state and
+ETMD(3) swallows the spectrum. Fold the atoms into the chemical units the question is about.
+
+- `-group` takes `=` (`-group=NAME=cols`); `~col` makes a column passive. A bare `-group` prompts.
+- `-init-atom` defaults to `O`; with `-group` it takes a site name.
+- On a homodimer, `Auger@A` and `ETMD(2)` must carry equal weight by symmetry: a free check.
+- `plotspec -dip-family` collapses the channels to Auger / ICD / ETMD for the figure.
+
+## Interaction effects: dimer minus 2 × monomer
+
+Isolates what a dimer does that two isolated monomers cannot. It needs SIP **and** DIP, whole band,
+for both systems, and the monomer must be a **counterpoise** fragment — the partner kept as ghost
+basis centres (`&geometry ghost 13 to 24` in the deck) — or the difference measures basis-set
+superposition error instead of physics.
+
+```sh
 plotspec -mode ees-diff \
-  -sip naph2.sip.spec.json         -dip naph2.dip.spec.json \
-  -ref-sip naph2_cp_mono.sip.spec.json -ref-dip naph2_cp_mono.dip.spec.json \
-  -ref-scale 2 -xrange 0-16 -points 600 -fwhm 1.0 \
-  -out naph2_am_diff.png -data naph2_am_diff.tsv
+  -sip dimer.sip.spec.json -dip dimer.dip.spec.json \
+  -ref-sip mono.sip.spec.json -ref-dip mono.dip.spec.json \
+  -ref-scale 2 -xrange 0-16 -points 600 -fwhm 1.0 -out diff.png -data diff.tsv
 ```
 
-- `-xrange` upper bound = `max(SIP energy) - min(DIP energy)`; above it the electron spectrum is zero.
-  naph2: 33.17 - 17.09 = **16.1 eV**.
-- Intensities are always absolute in `ees-diff`; peak normalisation would make the factor 2 meaningless.
-- Channels are summed before subtracting: ghosting breaks the dimer's C2, so the fragment has fewer
-  irreps and the decompositions do not correspond.
-### Which reference, and why the residual means different things
+- `-xrange` is required (a common electron grid); its useful upper bound is
+  `max(SIP energy) - min(DIP energy)`.
+- Intensities are absolute in `ees-diff`: peak normalisation would make the factor 2 meaningless,
+  and the 2 is exact only for a homodimer whose halves are congruent.
+- Channels are summed before subtracting: ghosting lowers the point group, so the fragment's
+  irrep decomposition does not correspond to the dimer's.
+- A monomer DIP has only one-site final states; the dimer also has one hole on each monomer.
+  `-ref-twosite` adds that family to the reference by self-convolving `-ref-sip` (independent
+  holes, weight `s_i·s_j`, `N²` synthetic states), so the residual is interaction alone.
+  `-twosite-shift` adds the hole–hole repulsion `14.4/R[Å]` eV, with R the monomer centroid
+  distance; 0 is the strict non-interacting limit.
+- With `-ref-sip/-ref-dip`, `-mode panel` draws panel (c) as the stacked one-site (Auger + ETMD(2))
+  and two-site (ICD) background with the dimer over it.
 
-A dimer's non-interacting double-ionization manifold has **three** families: both holes on A, both on
-B, and **one hole on each**. A monomer DIP contains only the one-site kind, so `2 x monomer`
-reproduces two families and omits the third entirely.
+## Looking at the orbitals
 
-| reference | flags | residual contains |
-|---|---|---|
-| one-site only | (default) | the missing two-site family **+** interaction effects, conflated |
-| one- and two-site | `-ref-twosite` | interaction effects alone (shifts, splittings, intensity transfer) |
-
-`-ref-twosite` completes the reference by self-convolving `-ref-sip`: each ordered pair of monomer
-ionizations (i on A, j on B) becomes a final state at `E_i + E_j + shift` with the independent-hole
-weight `s_i * s_j`. Run both and compare — the first says how much of the spectrum the monomers cannot
-account for at all, the second how much of *that* is interaction rather than bookkeeping.
+The `.mo.json` sidecar has MO coefficients but no basis set, so no viewer can draw it. `--molden`
+writes a Molden file (GaussView, Molden, Avogadro, Jmol, Multiwfn) from the same MOs:
 
 ```sh
-plotspec -mode ees-diff ... -ref-twosite -twosite-shift 4.2
+python scripts/fcidump/dump_fcidump.py --input sys.in --molden sys.molden
 ```
 
-- `-twosite-shift` is the hole-hole Coulomb repulsion `e^2/R`, which the strict R->inf reference omits
-  but a dimer at contact does not: `14.4/R(Angstrom)` eV. Use the monomer **centroid** separation, not
-  the interplanar gap: naph2's stack is slipped, so R = **3.62 A** (-> 3.98 eV), not 3.43 A (4.20 eV).
-  Default 0 = the strict non-interacting limit.
-- `-twosite-weight` defaults to 0.5, the non-interacting state count, chosen so `-ref-scale 2` stays
-  correct: an overall factor on the final-state spectrum cancels between sigma's numerator and its
-  `N(E)` denominator, so only the one-site:two-site ratio and the initial-state scale matter.
-- It is an **independent-hole construction**, not an ab-initio two-site DIP, and it applies no spin
-  multiplicity (each spatial two-site configuration supports a singlet and a triplet). Use
-  `-twosite-weight` if a different convention is wanted.
-- Cost: `N^2` synthetic states. 573 SIP lines -> 328k states, convolved in ~8 s.
-
-### Decay-channel spectra: define the SITES or the channels are meaningless
-
-`-mode panel` colours panel (b) by decay channel, which needs a DIP spectrum converted with
-`-spectrum -mo` rather than `-bare` (a `-bare` spectrum has one `states` channel and nothing to group
-by). Two flags decide whether the result means anything.
-
-```sh
-# WRONG: no -group, so every ATOM is its own site
-adcgo -convert naph2.dip.json -dip -spectrum -mo naph2.mo.json -init-atom C1 -out bad.spec.json
-#   -> 38 channels (Auger@C1, ICD:C1->C2 ... ETMD(3)); ETMD(3) takes 91% of the weight
-
-# RIGHT: fold the atoms into the chemical units the channels are about
-A=C1,C2,C3,C4,C5,C6,C7,C8,C9,C10,H1,H2,H3,H4,H5,H6,H7,H8
-B=C11,C12,C13,C14,C15,C16,C17,C18,C19,C20,H9,H10,H11,H12,H13,H14,H15,H16
-adcgo -convert naph2.dip.json -dip -spectrum -mo naph2.mo.json \
-      -group="A=$A" -group="B=$B" -init-atom A -out naph2.dip.frag.spec.json
-#   -> Auger@A / ICD:A->B / ETMD(2); naph2: 22% / 56% / 22% in the EES window
-```
-
-The classifier routes each state by **where its two holes sit relative to the initially ionized
-site**: both on A = Auger, one on A one on B = ICD, both on one site != A = ETMD(2), two sites != A =
-ETMD(3). The default is *each population column its own site*, so with 36 atomic sites "two different
-sites" is satisfied by almost every state and ETMD(3) swallows the spectrum. That 91% is an artefact
-of the site definition, not physics. With two sites ETMD(3) is structurally impossible.
-
-- `-init-atom` defaults to **"O"** and fails outright on a hydrocarbon ("initial site \"O\" is not one
-  of the defined sites"). With `-group` it takes a SITE name.
-- Free correctness check on a homodimer: `Auger@A` and `ETMD(2)` must be equal by the A<->B symmetry.
-  naph2 gives 420.149 each.
-- `-point-group C2` records the point group in the spectrum meta, so `plotspec -panel-sym` can label
-  irreps without `-irrep-labels`.
-- `plotspec -dip-family` collapses the channels onto Auger / ICD / ETMD for the figure, keeping three
-  canonical hues; without it the shared key grows one row per atom pair and buries the panels.
-
-**Panel (c)'s one-site family is Auger + ETMD(2), not "Auger" alone.** "Both holes on one monomer" is
-Auger when they are on the initially ionized monomer and ETMD(2) when they are on the other, which is
-exactly what the factor 2 on `-ref-scale` counts. The split is 1:1 and exact for a homodimer, so
-`-mode panel` with `-ref-sip/-ref-dip` draws them as separate curves (ETMD(2) dashed, because it
-coincides with Auger).
-
-### Visualizing the MOs (GaussView, Molden, Avogadro, Jmol, Multiwfn)
-
-The `.mo.json` sidecar carries the MO coefficients but **no basis set**, and no viewer can draw an
-orbital without the GTOs. `--molden` writes a Molden file from the same MOs the FCIDUMP was built
-from:
-
-```sh
-python scripts/fcidump/dump_fcidump.py --input examples/melanin/melanin.in --molden melanin.molden
-```
-
-- **Orbital numbering matches ADCgo's**, because both count the ACTIVE space: `<55|` in a state
-  listing is MO 55 in the viewer, no offset. For melanin the active space is 222 MOs with 110
-  electrons, so MO 55 is the HOMO — and the first SIP state's leading term is indeed `<55|`.
-- **Orbital energies are not in the sidecar**, so they are written as zeros. Viewers use them only
-  for labelling and sorting; isosurfaces are unaffected.
-- To write one from an EXISTING sidecar without re-running SCF, rebuild the Mole from the same deck
-  (`build_mol(parse_input_file(deck))`) and call `fcidump_common.write_molden` with the stored
-  `mo_coeff`. Check `ao_atom` against the sidecar first — if the AO ordering differs the file is
-  silently wrong, not broken.
+Orbital numbering matches ADCgo's (both count the active space), so `<55|` in a state listing is
+MO 55 in the viewer. Orbital energies are written as zeros; isosurfaces are unaffected.

@@ -5,8 +5,7 @@ reconstruct from the code alone — how one block-Lanczos mat-vec is partitioned
 turned into kernel launches. Companions:
 [`docs/dip_operator_memory.md`](../docs/dip_operator_memory.md) (why the satellite region is
 matrix-free), [`docs/dip_lowmem_lanczos.md`](../docs/dip_lowmem_lanczos.md) (why only a
-few panels are resident), and [`multinode_transport.md`](multinode_transport.md) (how this seam
-extends past one node, and which fabric protocol).
+few panels are resident).
 
 ## The pieces
 
@@ -14,7 +13,7 @@ extends past one node, and which fabric protocol).
 |---|---|
 | `Backend` | the BLAS-ish surface the solvers use: `Alloc/Upload/Download`, `Gemm`, `GemmMat(Batched)`, `AxpyDiag`, … Implementations: `Gonum` (host, reference), `gpuBackend` (cuda), `hip`, `distBackend`. |
 | `HostData` | optional: exposes a resident vector's backing slice. Host backends only. **`gpuBackend` embeds `Gonum`, so it satisfies this interface too** — always test `DeviceKernels` *before* `HostData`, or a device backend takes a host path and panics on `HostSlice(devVec)`. |
-| `DeviceKernels` | optional: the custom CUDA kernels (`Wert2Apply`, `C22Apply`, `DipSatApply`) plus the upload helpers they need. Implemented by the cuda backend only. |
+| `DeviceKernels` | optional: the custom CUDA kernels (`C22Apply`, `DipSatApply`, `DipSatFillJII`) plus the upload helpers they need. Implemented by the cuda backend only. |
 | `PeerCopier` | optional: NVLink peer access — `EnablePeerAccess`, `PeerCopy2D`, `Sync`. |
 | `PanelScatterAdd` | optional: `AddPanel` — add a full host panel into a partitioned one. Backs the host-fallback satellite path. |
 | `PartitionedDevices` | optional: reach the individual partitions (`NumParts`, `Bounds`, `PartBackend`, `PartKernels`, `PartVector`, `AllPeered`). Backs the per-device satellite path. |
@@ -138,8 +137,9 @@ and the only thing available when peer access is missing.
 
 The host-side tests are the source of truth for the physics; the on-hardware tests fix only the
 CUDA transcription. Build the kernels before any `-tags cuda` run — `cuda_kernels.go` links
-**both** `adc4_kernels.o` and `adc2dip_kernels.o`, and omitting either fails the link:
+`sip_kernels.o`, `adc2dip_kernels.o` and `bandeig_kernels.o`, and omitting any fails the link:
 
 ```
-scripts/helix/build_adcgo_cuda_helix     # nvcc both .cu, then go build -tags cuda
+scripts/build_cuda.sh                    # nvcc every .cu, then go build -tags cuda
+scripts/slurm/gpu_tests.sbatch           # the on-hardware tests above, plus two end-to-end runs
 ```

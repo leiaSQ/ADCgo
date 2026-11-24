@@ -21,7 +21,7 @@ package main
 // The guard is conservative for the same reason Σ's is: a WRONG main block is not a crash, it
 // silently shifts every ionization line and still looks publishable. Anything that could change
 // the block invalidates the cache — the ADC order, the sector's irrep and spin multiplicity, the
-// orbital-space dimensions, the WERT3 flag, a hash of the orbital energies, a hash of the static
+// orbital-space dimensions, a hash of the orbital energies, a hash of the static
 // self-energy actually subtracted into the block, and the FCIDUMP's size and mtime. A miss costs
 // a rebuild; a false hit costs a wrong spectrum, so the trade is not symmetric.
 
@@ -49,12 +49,10 @@ type mainBlockCacheKey struct {
 	Order       int
 	Sym         int
 	Norb, Nocc  int
-	Main        int // 1h main-space dimension
-	N           int // full sector dimension — distinguishes spaces the other fields would not
-	Wert3       bool
+	Main        int    // 1h main-space dimension
+	N           int    // full sector dimension — distinguishes spaces the other fields would not
 	EpsHash     uint64 // FNV-1a over the orbital energies
 	SigmaHash   uint64 // FNV-1a over Σ_ij across the main space (0 when Σ is off)
-	CoreHash    uint64 // FNV-1a over the CVS core-orbital list (0 when not CVS)
 	FcidumpSize int64
 	FcidumpMod  int64 // UnixNano
 }
@@ -62,7 +60,7 @@ type mainBlockCacheKey struct {
 // mainBlockCacheKeyFor builds the key. Σ is hashed by VALUE over exactly the indices the block
 // subtracts it at, rather than trusting that the Σ cache key upstream agreed — Σ enters the main
 // block directly, so a mismatch there is a mismatch here.
-func mainBlockCacheKeyFor(order, sym, norb, nocc, main, n int, wert3 bool, core []int,
+func mainBlockCacheKeyFor(order, sym, norb, nocc, main, n int,
 	eps []float64, sigma func(i, j int) float64, fcidump string) mainBlockCacheKey {
 	hashFloats := func(vals func(emit func(float64))) uint64 {
 		h := fnv.New64a()
@@ -75,7 +73,7 @@ func mainBlockCacheKeyFor(order, sym, norb, nocc, main, n int, wert3 bool, core 
 	}
 	k := mainBlockCacheKey{
 		Order: order, Sym: sym,
-		Norb: norb, Nocc: nocc, Main: main, N: n, Wert3: wert3,
+		Norb: norb, Nocc: nocc, Main: main, N: n,
 		EpsHash: hashFloats(func(emit func(float64)) {
 			for _, e := range eps {
 				emit(e)
@@ -91,15 +89,6 @@ func mainBlockCacheKeyFor(order, sym, norb, nocc, main, n int, wert3 bool, core 
 			}
 		})
 	}
-	if len(core) > 0 {
-		h := fnv.New64a()
-		var buf [8]byte
-		for _, c := range core {
-			binary.LittleEndian.PutUint64(buf[:], uint64(c))
-			_, _ = h.Write(buf[:])
-		}
-		k.CoreHash = h.Sum64()
-	}
 	if fi, err := os.Stat(fcidump); err == nil {
 		k.FcidumpSize = fi.Size()
 		k.FcidumpMod = fi.ModTime().UnixNano()
@@ -109,16 +98,20 @@ func mainBlockCacheKeyFor(order, sym, norb, nocc, main, n int, wert3 bool, core 
 
 func (k mainBlockCacheKey) equal(o mainBlockCacheKey) bool { return k == o }
 
+// Two header slots are retired but kept so files written by earlier builds still load: the
+// WERT3 flag (an ADC(4) option whose default, 1, every order-3 run recorded) and the CVS
+// core-orbital hash (always 0 outside ADC(4)).
+const (
+	mainBlockHeaderWert3    = 1
+	mainBlockHeaderCoreHash = 0
+)
+
 func (k mainBlockCacheKey) header(rows, cols int) []int64 {
-	w3 := int64(0)
-	if k.Wert3 {
-		w3 = 1
-	}
 	return []int64{
 		mainBlockCacheVersion,
 		int64(k.Order), int64(k.Sym),
-		int64(k.Norb), int64(k.Nocc), int64(k.Main), int64(k.N), w3,
-		int64(k.EpsHash), int64(k.SigmaHash), int64(k.CoreHash),
+		int64(k.Norb), int64(k.Nocc), int64(k.Main), int64(k.N), mainBlockHeaderWert3,
+		int64(k.EpsHash), int64(k.SigmaHash), mainBlockHeaderCoreHash,
 		k.FcidumpSize, k.FcidumpMod,
 		int64(rows), int64(cols),
 	}
@@ -197,11 +190,11 @@ func readMainBlockCache(path string, want mainBlockCacheKey) (backend.Mat, bool,
 	}
 	got := mainBlockCacheKey{
 		Order: int(hdr[1]), Sym: int(hdr[2]),
-		Norb: int(hdr[3]), Nocc: int(hdr[4]), Main: int(hdr[5]), N: int(hdr[6]), Wert3: hdr[7] == 1,
-		EpsHash: uint64(hdr[8]), SigmaHash: uint64(hdr[9]), CoreHash: uint64(hdr[10]),
+		Norb: int(hdr[3]), Nocc: int(hdr[4]), Main: int(hdr[5]), N: int(hdr[6]),
+		EpsHash: uint64(hdr[8]), SigmaHash: uint64(hdr[9]),
 		FcidumpSize: hdr[11], FcidumpMod: hdr[12],
 	}
-	if !got.equal(want) {
+	if hdr[7] != mainBlockHeaderWert3 || hdr[10] != mainBlockHeaderCoreHash || !got.equal(want) {
 		return backend.Mat{}, false, nil // stale: different orbital space, order, sector or Σ
 	}
 	m := backend.NewMat(rows, cols)
@@ -227,7 +220,7 @@ func installMainBlockCache(mx *sip.Matrix, sp *sip.Space, eps []float64, order i
 	}
 	path := fmt.Sprintf("%s.o%d.i%d.cache", base, order, sp.Sym)
 	key := mainBlockCacheKeyFor(order, sp.Sym, sp.Norb, sp.Nocc,
-		sp.MainBlockSize(), sp.Size(), cfg.wert3, cfg.core, eps, cfg.sig, cfg.fcidumpPath)
+		sp.MainBlockSize(), sp.Size(), eps, cfg.sig, cfg.fcidumpPath)
 
 	load := func() (backend.Mat, bool) {
 		m, ok, err := readMainBlockCache(path, key)

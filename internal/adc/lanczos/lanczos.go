@@ -111,7 +111,7 @@ type Options struct {
 	// It exists for the same reason Progress does, one stage later. The banded reduction is a
 	// single call that at the production DIP shape (dim 308000, half-bandwidth 3079) grinds for
 	// hours after the last block is logged, so a run that had finished its Krylov basis looked
-	// indistinguishable from one that had hung: melanin DIP job 14834817 sat 2 d 15 h past its
+	// indistinguishable from one that had hung: production DIP job 14834817 sat 2 d 15 h past its
 	// last "progress" line with one core busy and every GPU idle, and the only way to tell it was
 	// alive was to sample its core-seconds from sacct. nil keeps the package free of I/O.
 	EigenProgress func(col, cols int, elapsed time.Duration)

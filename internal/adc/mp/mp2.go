@@ -84,7 +84,7 @@ func RequireCanonical(d *fcidump.Data, nocc int) error {
 	if m := MaxFockOffDiagonal(d, nocc); m > CanonicalTol {
 		return fmt.Errorf("mp: the FCIDUMP orbitals are not canonical (max |f_pq|, p != q, "+
 			"= %.3e Eh > %.0e): orbital energies cannot be read off the Fock diagonal. A "+
-			"localized-orbital dump (&orbitals localized) is for the khci engine, not for ADC", m, CanonicalTol)
+			"localized-orbital dump is for CI-type methods, not for ADC", m, CanonicalTol)
 	}
 	return nil
 }

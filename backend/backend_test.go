@@ -29,8 +29,8 @@ func TestGemvNT(t *testing.T) {
 	}
 }
 
-// TestAxpyDiag: y += d ⊙ x with accumulate semantics, and through a Slice view (the
-// mechanism the CVS-ADC(4) 3h2p diagonal block uses to apply over its row band).
+// TestAxpyDiag: y += d ⊙ x with accumulate semantics, and through a Slice view (how a
+// diagonal block applies over its row band).
 func TestAxpyDiag(t *testing.T) {
 	b := Gonum{}
 	d := b.Upload(Vec{2, 3, 4})
