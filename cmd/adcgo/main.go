@@ -42,7 +42,7 @@ var errInterrupted = errors.New("solve interrupted; checkpoint written")
 const exitResumeNeeded = 64
 
 // version is the release this binary was built from.
-const version = "0.1.0"
+const version = "0.1.1"
 
 // signOff closes the log of a solve that ran to completion. It goes to stderr, never
 // stdout, because stdout carries the JSON/ref document when -out is not given.

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.1 — GPU validation script fix
+
+No solver changes. `scripts/slurm/gpu_tests.sbatch` failed on clusters whose compiler module ships
+an old gccgo `go`, and its multi-GPU stage wrote to `/dev/null`, where `-mgpu` cannot save its
+per-sector results. The script now keeps your Go first on `PATH`, writes to a temporary directory
+and reports PASS/FAIL per stage.
+
 ## v0.1.0 — first release
 
 Scope: double ionization by **DIP-ADC(2)** and single ionization by non-Dyson **IP-ADC(3)**.
